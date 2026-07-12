@@ -9,6 +9,7 @@
 *.temp
 tmp/
 temp/
+.worktrees/
 
 # Build/release outputs
 resources/app/server/releases/
