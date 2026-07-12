@@ -14,6 +14,17 @@ async function run() {
   assert.strictEqual(PRESET_PROVIDERS.relay.baseURL, expectedRelay.baseURL);
   assert.strictEqual(PRESET_PROVIDERS.relay.model, expectedRelay.model);
 
+  const relayWithoutApiKey = normalizeProvider("relay", {});
+  assert.strictEqual(relayWithoutApiKey.requiresApiKey, true);
+  await assert.rejects(
+    () => callChatCompletion({
+      providerId: "relay",
+      provider: relayWithoutApiKey,
+      body: { messages: [{ role: "user", content: "Hello" }] }
+    }),
+    /请先在设置中填写 默认中转站 的 API Key。/
+  );
+
   const provider = normalizeProvider("relay", { apiKey: "test-key" });
   let request;
   const response = await callChatCompletion({
@@ -40,6 +51,8 @@ async function run() {
     cases: [
       "default_relay_provider_export",
       "relay_preset_uses_default_base_url_and_model",
+      "relay_requires_api_key",
+      "relay_rejects_missing_api_key",
       "relay_chat_completion_uses_openai_compatible_request"
     ]
   };
