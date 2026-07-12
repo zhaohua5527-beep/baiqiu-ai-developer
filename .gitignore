@@ -10,6 +10,12 @@
 tmp/
 temp/
 
+# Build/release outputs
+resources/app/server/releases/
+resources/app/server/license-db.json
+resources/app/dist/
+resources/app/node_modules/
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

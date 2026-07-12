@@ -485,7 +485,7 @@ function defaultDb() {
       },
       providers: {
         openclaw: { name: "OpenClaw", enabled: false, baseURL: "", apiKey: "", model: "gateway" },
-        deepseek: { name: CLOUD_MODEL_DEFAULTS.deepseek.name, enabled: true, baseURL: CLOUD_MODEL_DEFAULTS.deepseek.baseURL, apiKey: "sk-39203847afd37212a14ac2a8ecacc44d0ed79550eb611de3aafac251c6dd7316", model: CLOUD_MODEL_DEFAULTS.deepseek.model },
+        deepseek: { name: CLOUD_MODEL_DEFAULTS.deepseek.name, enabled: true, baseURL: CLOUD_MODEL_DEFAULTS.deepseek.baseURL, apiKey: "", model: CLOUD_MODEL_DEFAULTS.deepseek.model },
         openai: { ...PRESET_PROVIDERS.openai, enabled: false, apiKey: "" },
         kimi: { ...PRESET_PROVIDERS.kimi, enabled: false, apiKey: "" },
         anthropic: { ...PRESET_PROVIDERS.anthropic, enabled: false, apiKey: "" },

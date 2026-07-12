@@ -18,6 +18,7 @@ const state = {
   monitorLogLines: [],
   monitorLogIndex: 0,
   lastMonitorLogAt: 0,
+  previewCache: {},
   forceScrollBottom: false,
   lastRenderedSessionId: null,
   taskBoardTab: "overview",
@@ -109,6 +110,7 @@ const publishUpdatePanel = $("publishUpdatePanel");
 const publishVersionInput = $("publishVersionInput");
 const publishNotesInput = $("publishNotesInput");
 const publishUpdateBtn = $("publishUpdateBtn");
+const syncUpdateServerBtn = $("syncUpdateServerBtn");
 const startUpdateServerBtn = $("startUpdateServerBtn");
 const saveLocationInput = $("saveLocationInput");
 const chooseSaveLocationBtn = $("chooseSaveLocationBtn");
@@ -120,10 +122,13 @@ const inviteStatus = $("inviteStatus");
 const unlockInviteBtn = $("unlockInviteBtn");
 const ownerInvitePanel = $("ownerInvitePanel");
 const inviteCountInput = $("inviteCountInput");
+const inviteTypeSelect = $("inviteTypeSelect");
 const adminCodeSearchInput = $("adminCodeSearchInput");
 const adminRefreshCodesBtn = $("adminRefreshCodesBtn");
 const adminExportCodesBtn = $("adminExportCodesBtn");
 const adminCodeListOutput = $("adminCodeListOutput");
+const openAdminServerBtn = $("openAdminServerBtn");
+const adminWebStatus = $("adminWebStatus");
 const developerLogsTab = $("developerLogsTab");
 const developerLogsPage = $("developerLogsPage");
 const developerLogTypeSelect = $("developerLogTypeSelect");
@@ -312,7 +317,15 @@ function setTaskProgressStage(label, value) {
   if (taskState) taskState.textContent = label || "执行中";
   if (monitorMode) monitorMode.textContent = label || "执行中";
   setProgress(value);
+  pushMonitorEvent("STEP", label || "执行中", `${Math.max(0, Math.min(100, Number(value || 0)))}%`);
   renderMonitorLog(selectedSession(), state.currentMessages || []);
+}
+
+function pushMonitorEvent(type = "STEP", label = "", detail = "") {
+  const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  const line = `${time} [${type}] ${compactMonitorText([label, detail].filter(Boolean).join(" · "), 72)}`;
+  state.monitorLogLines = [...(state.monitorLogLines || []), line].slice(-13);
+  state.lastMonitorLogAt = Date.now();
 }
 
 async function submitProductInput(session, text, { taskMode = true } = {}) {
@@ -369,6 +382,35 @@ async function submitAttachmentInput(session, text, attachments = []) {
   });
 }
 
+async function submitMonitoredProductTask(session, payload = {}, { devMode = false } = {}) {
+  if (typeof api.productSubmitTask !== "function") {
+    throw new Error("Product SDK 通道不可用，请检查发布包是否已同步。");
+  }
+  const base = {
+    productId: "desktop-assistant",
+    sessionId: session.id,
+    skipPersist: true,
+    ...payload
+  };
+  let createdTask = null;
+  if (typeof api.productCreateTask === "function") {
+    createdTask = await api.productCreateTask(base).catch(() => null);
+  }
+  if (createdTask?.experience) {
+    updateProductTaskProgress(createdTask, { devMode });
+  }
+  const stopTaskMonitor = startProductTaskMonitor(createdTask?.taskId, { devMode });
+  try {
+    return await api.productSubmitTask({
+      ...(createdTask || {}),
+      ...base,
+      taskId: createdTask?.taskId || base.taskId || ""
+    });
+  } finally {
+    stopTaskMonitor();
+  }
+}
+
 function renderProductDashboard(task = null, { devMode = false } = {}) {
   if (!neuralDashboard) return;
   neuralDashboard.hidden = !devMode;
@@ -407,6 +449,49 @@ function renderProductDashboard(task = null, { devMode = false } = {}) {
   }
 }
 
+function updateProductTaskProgress(task = null, { devMode = false } = {}) {
+  if (!task) return;
+  const experience = task.experience || task.result?.experience || {};
+  if (experience.currentStage || experience.message) {
+    setTaskProgressStage(
+      experience.message || productStageLabel(experience.currentStage || ""),
+      Number.isFinite(Number(experience.progress)) ? Number(experience.progress) : state.progress
+    );
+  }
+  renderProductDashboard(task, { devMode });
+  renderProductTaskStrip([task]);
+}
+
+function startProductTaskMonitor(taskId = "", { devMode = false, intervalMs = 360 } = {}) {
+  if (!taskId || typeof api.productQueryTask !== "function") return () => {};
+  let active = true;
+  let lastSignature = "";
+  const tick = async () => {
+    if (!active) return;
+    const task = await api.productQueryTask(taskId).catch(() => null);
+    if (!task) return;
+    const experience = task.experience || {};
+    const signature = [
+      task.status || "",
+      experience.currentStage || "",
+      experience.progress || "",
+      experience.message || ""
+    ].join("|");
+    if (signature !== lastSignature) {
+      lastSignature = signature;
+      updateProductTaskProgress(task, { devMode });
+    }
+    if (["success", "failed"].includes(task.status)) stop();
+  };
+  const timer = setInterval(tick, intervalMs);
+  const stop = () => {
+    active = false;
+    clearInterval(timer);
+  };
+  tick();
+  return stop;
+}
+
 function renderProductTaskStrip(tasks = []) {
   if (!productTaskStrip) return;
   productTaskStrip.hidden = true;
@@ -436,6 +521,49 @@ function renderTaskCard(experience = {}) {
 function renderResultCard(result = {}) {
   const text = productResultText(result) || (result.success ? "任务完成。" : "任务未完成。");
   return `**结果**\n\n${text}`;
+}
+
+function shouldShowTaskThinking(text = "", attachments = []) {
+  return Boolean(
+    attachments.length
+    || isSkillLearningPrompt(text)
+    || isCalculatorCreationPrompt(text)
+    || shouldUseProductTask(text, attachments)
+  );
+}
+
+function buildTaskThinkingCard(text = "", attachments = []) {
+  const value = String(text || "").trim() || "分析附件内容";
+  let taskType = "通用任务";
+  let approach = "先理解目标，再选择产品层能力执行，最后验证结果。";
+  if (attachments.length) {
+    taskType = "附件分析";
+    approach = "先读取附件结构，再提取关键信息，最后给出精简结论和建议。";
+  } else if (isSkillLearningPrompt(value)) {
+    taskType = "技能学习";
+    approach = "先判断技能是否能真实安装，再记录可验证能力；不会假装已经完成外部学习。";
+  } else if (isCalculatorCreationPrompt(value)) {
+    taskType = "软件生成";
+    approach = "使用计算器生成能力创建文件，完成后尝试打开并返回结果。";
+  } else if (/表格|Excel|xlsx|csv|数据|分析/i.test(value)) {
+    taskType = "数据分析";
+    approach = "先识别数据来源和字段，再输出结论、证据和可执行建议。";
+  }
+  const files = attachments.length
+    ? `\n\n附件：${attachments.map((item) => item.name || "未命名文件").slice(0, 3).join("、")}${attachments.length > 3 ? ` 等 ${attachments.length} 个` : ""}`
+    : "";
+  return [
+    `**任务理解**`,
+    `我理解为：${value}`,
+    `类型：${taskType}`,
+    `执行方式：${approach}${files}`
+  ].join("\n\n");
+}
+
+async function persistTaskExchange(sessionId, userMessage, thinkingMessage, assistantMessage) {
+  await api.appendMessage(sessionId, userMessage);
+  if (thinkingMessage) await api.appendMessage(sessionId, thinkingMessage);
+  await api.appendMessage(sessionId, assistantMessage);
 }
 
 function reasoningLabel(value) {
@@ -474,6 +602,31 @@ function formatLicenseCode(value) {
     .replace(/(.{4})(?=.)/g, "$1-");
 }
 
+const PLAN_CATALOG = {
+  monthly_first: { label: "月卡尝鲜", amount: "19.9", description: "首次付费折扣，原价 49.9/月" },
+  monthly: { label: "月卡", amount: "49.9", description: "月卡基础价" },
+  yearly: { label: "年卡", amount: "199", description: "年卡基础价" }
+};
+
+async function createPlanOrder(planId = "monthly_first", source = "client") {
+  const plan = PLAN_CATALOG[planId] || PLAN_CATALOG.monthly_first;
+  const customer = {
+    name: inviteNameInput?.value?.trim() || licenseNameInput?.value?.trim() || "客户",
+    phone: invitePhoneInput?.value?.trim() || licensePhoneInput?.value?.trim() || ""
+  };
+  const order = await api.createPurchaseOrder?.({
+    ...customer,
+    planId,
+    planName: plan.label,
+    amount: plan.amount,
+    proof: `${source}:${plan.description}`
+  });
+  const text = `已提交 ${plan.label} 购买申请，金额 ¥${plan.amount}。订单号：${order?.id || "待生成"}。请完成付款后联系管理员确认，管理员会发放兑换码。`;
+  if (inviteStatus) inviteStatus.textContent = text;
+  if (licenseOverlayStatus) licenseOverlayStatus.textContent = text;
+  return order;
+}
+
 function renderLicenseStatus(status) {
   if (!status) return;
   if (status.state === "developer" || status.devMode || status.owner) {
@@ -487,14 +640,14 @@ function renderLicenseStatus(status) {
       ? "已激活"
       : status.locked
         ? "试用已结束"
-        : `试用剩余：${formatTrialTime(status.trialRemainingSeconds)} | 购买卡密解锁`;
+        : `试用剩余：${formatTrialTime(status.trialRemainingSeconds)} | 购买套餐解锁`;
   }
   if (licenseOverlay) licenseOverlay.hidden = Boolean(status.unlocked || !status.locked);
   if (inviteStatus) {
     inviteStatus.textContent = status.unlocked
-      ? "已激活：当前设备可永久使用白球 AI。"
+      ? "已激活：当前设备可使用白球 AI。"
       : status.locked
-        ? "试用已结束：请输入卡密激活。"
+        ? "试用已结束：请选择套餐购买，或输入兑换码激活。"
         : `试用中：剩余 ${formatTrialTime(status.trialRemainingSeconds)}。`;
   }
 }
@@ -536,6 +689,10 @@ async function tryOpenExternalUrl(url) {
 }
 
 async function openAttachmentExternally(item = {}) {
+  if (typeof api.openAttachment === "function") {
+    await api.openAttachment(item);
+    return;
+  }
   const pathValue = item.path || item.originalPath || item.filePath || "";
   const urlValue = item.url || "";
   if (pathValue && typeof api.openPath === "function") {
@@ -785,28 +942,10 @@ function renderMonitorLog(session, messages = []) {
     state.monitorLogIndex = 0;
     state.lastMonitorLogAt = 0;
   } else {
-    const now = Date.now();
-    const beatMs = 220;
-    const steps = [
-      "[INTENT] receive user requirement",
-      `[MODEL] route ${provider?.name || "DeepSeek"}`,
-      "[CTX] read conversation context",
-      "[PLAN] build execution steps",
-      `[PROGRESS] running ${state.progress}%`,
-      "[EXEC] waiting for tool result",
-      "[MEM] sync local record",
-      "[OUT] prepare final response"
-    ];
-    if (!state.monitorLogLines.length || now - state.lastMonitorLogAt >= beatMs) {
-      const burstCount = state.monitorLogLines.length ? 3 : 6;
-      for (let i = 0; i < burstCount; i += 1) {
-        const stepNo = String((state.monitorLogIndex % steps.length) + 1).padStart(2, "0");
-        state.monitorLogLines.push(`${time} ${stepNo} ${steps[state.monitorLogIndex % steps.length]}`);
-        state.monitorLogIndex += 1;
-      }
-      state.monitorLogLines = ensureMonitorLogFill([...recentMessages, ...state.monitorLogLines], 13);
-      state.lastMonitorLogAt = now;
+    if (!state.monitorLogLines.length) {
+      pushMonitorEvent("RUN", "任务已进入执行流", `${state.progress || 0}%`);
     }
+    state.monitorLogLines = ensureMonitorLogFill([...recentMessages, ...state.monitorLogLines], 13);
   }
   paintMonitorLogLines(state.monitorLogLines);
 }
@@ -1248,11 +1387,39 @@ function buildPersistedAttachments(attachments = []) {
 }
 
 function productResultText(result = {}) {
-  return result.text
+  return sanitizeVisibleReply(result.text
     || result.result?.text
     || result.result?.normalized?.error
     || result.result?.response?.error
-    || (result.success ? "任务完成。" : "");
+    || (result.success ? "任务完成。" : ""));
+}
+
+function sanitizeVisibleReply(text) {
+  let value = typeof text === "object" && text
+    ? (text.text || text.message || text.error || JSON.stringify(text))
+    : String(text || "");
+  if (!value.trim()) return "";
+  value = value.replace(/\[object Object\]/g, "任务返回了异常对象，白球已拦截内部错误。");
+  const internalPattern = /Tool\s*Registry|ToolSelector|Intent\s*Lock|intent\s*mismatch|工具与意图不匹配|意图.*不匹配|office\.doc|general\.chat|dev\.code|math\.calculator|run_command|write_text_file|install_skill|wps_tool|被拦截/i;
+  const lines = value.replace(/\r/g, "").split("\n");
+  const kept = [];
+  let removedInternal = false;
+  for (const line of lines) {
+    if (internalPattern.test(line)) {
+      removedInternal = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  value = kept.join("\n").trim();
+  if (removedInternal) {
+    value = [
+      "我刚才没有把任务路由到合适的执行能力上。",
+      "请直接补充目标、文件或权限，我会按产品能力继续处理。",
+      value
+    ].filter(Boolean).join("\n\n");
+  }
+  return value.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function showConfirmCard(request) {
@@ -1645,7 +1812,7 @@ async function renderAdminCodeList() {
         item.deviceId || "",
         item.notes || ""
       ].join(" | "));
-    adminCodeListOutput.value = rows.length ? rows.join("\n") : "暂无卡密记录";
+    adminCodeListOutput.value = rows.length ? rows.join("\n") : "暂无兑换码记录";
   } catch (error) {
     adminCodeListOutput.value = `读取失败：${error.message || error}`;
   }
@@ -1917,6 +2084,13 @@ async function sendCurrentTask(task = null) {
   addMessage(userMessage);
   state.forceScrollBottom = true;
   scrollMessagesToBottom();
+  const thinkingMessage = shouldShowTaskThinking(text, attachments)
+    ? { role: "assistant", text: buildTaskThinkingCard(text, attachments), raw: { productLayer: true, taskThinking: true } }
+    : null;
+  if (thinkingMessage) {
+    addMessage(thinkingMessage);
+    scrollMessagesToBottom();
+  }
   chatInput.value = "";
   adjustComposerHeight();
   state.attachments = [];
@@ -1925,61 +2099,88 @@ async function sendCurrentTask(task = null) {
   setTaskProgressStage("已接收", 8);
   try {
     const useProductTask = shouldUseProductTask(text, attachments);
+    const owner = await api.ownerStatus?.().catch(() => ({ devMode: false }));
+    const devMode = Boolean(owner?.devMode);
     if (isSkillLearningPrompt(text) && api.productSubmitTask) {
       setTaskProgressStage("正在学习技能", 24);
-      const productResult = await submitSkillLearningInput(session, text);
+      const productResult = await submitMonitoredProductTask(session, {
+        templateId: "desktop.chat_runtime",
+        text,
+        message: text,
+        context: {
+          chatRuntime: true,
+          skillLearning: true
+        }
+      }, { devMode });
       setTaskProgressStage("正在验证", 88);
       const assistantText = productResultText(productResult) || productResult?.text || "技能学习流程已结束。";
       addMessage({ role: "assistant", text: assistantText });
       scrollMessagesToBottom();
       setTaskProgressStage(productResult?.success ? "已完成" : "执行失败", productResult?.success ? 100 : 0);
-      await api.appendMessage(session.id, userMessage);
-      await api.appendMessage(session.id, { role: "assistant", text: assistantText, raw: { productLayer: true, skillLearning: true, productResult } });
+      await persistTaskExchange(session.id, userMessage, thinkingMessage, { role: "assistant", text: assistantText, raw: { productLayer: true, skillLearning: true, productResult } });
       state.db = await api.init();
-      const owner = await api.ownerStatus?.().catch(() => ({ devMode: false }));
       const productTask = await api.productQueryTask?.(productResult.taskId).catch(() => null);
-      renderProductDashboard(productTask, { devMode: Boolean(owner?.devMode) });
+      renderProductDashboard(productTask, { devMode });
       return;
     }
     if (isCalculatorCreationPrompt(text) && api.productSubmitTask) {
       setTaskProgressStage("正在生成计算器", 32);
-      const productResult = await submitProductInput(session, text, { taskMode: false });
+      const productResult = await submitMonitoredProductTask(session, {
+        templateId: "desktop.chat",
+        text,
+        message: text,
+        context: {
+          conversationOnly: true
+        }
+      }, { devMode });
       setTaskProgressStage("正在打开", 78);
       const assistantText = productResultText(productResult) || productResult?.text || "计算器任务已结束。";
       addMessage({ role: "assistant", text: assistantText });
       scrollMessagesToBottom();
       setTaskProgressStage(productResult?.success ? "已完成" : "执行失败", productResult?.success ? 100 : 0);
-      await api.appendMessage(session.id, userMessage);
-      await api.appendMessage(session.id, { role: "assistant", text: assistantText, raw: { productLayer: true, calculatorShortcut: true, productResult } });
+      await persistTaskExchange(session.id, userMessage, thinkingMessage, { role: "assistant", text: assistantText, raw: { productLayer: true, calculatorShortcut: true, productResult } });
       state.db = await api.init();
       return;
     }
     if (!useProductTask) {
       setTaskProgressStage("正在理解", 18);
-      const productResult = await submitProductInput(session, text, { taskMode: false });
+      const productResult = await submitMonitoredProductTask(session, {
+        templateId: "desktop.chat",
+        text,
+        message: text,
+        context: {
+          conversationOnly: true
+        }
+      }, { devMode });
       setTaskProgressStage("正在生成回复", 76);
       const assistantText = productResultText(productResult) || productResult?.text || "我在。";
       addMessage({ role: "assistant", text: assistantText });
       scrollMessagesToBottom();
       setTaskProgressStage("已完成", 100);
-      await api.appendMessage(session.id, userMessage);
-      await api.appendMessage(session.id, { role: "assistant", text: assistantText, raw: { productLayer: true, conversationOnly: true, productResult } });
+      await persistTaskExchange(session.id, userMessage, thinkingMessage, { role: "assistant", text: assistantText, raw: { productLayer: true, conversationOnly: true, productResult } });
       return;
     }
     if (attachments.length && api.productSubmitTask) {
       setTaskProgressStage("正在读取附件", 24);
-      const productResult = await submitAttachmentInput(session, text, attachments);
+      const productResult = await submitMonitoredProductTask(session, {
+        templateId: "desktop.chat_runtime",
+        text: text || "请分析附件内容。",
+        message: text || "请分析附件内容。",
+        attachments,
+        context: {
+          chatRuntime: true,
+          hasAttachments: true
+        }
+      }, { devMode });
       setTaskProgressStage("正在分析", 70);
       const assistantText = productResultText(productResult) || productResult?.text || "附件已收到，但没有生成有效分析。";
       addMessage({ role: "assistant", text: assistantText });
       scrollMessagesToBottom();
       setTaskProgressStage(productResult?.success ? "已完成" : "执行失败", productResult?.success ? 100 : 0);
-      await api.appendMessage(session.id, userMessage);
-      await api.appendMessage(session.id, { role: "assistant", text: assistantText, raw: { productLayer: true, attachmentAnalysis: true, productResult } });
+      await persistTaskExchange(session.id, userMessage, thinkingMessage, { role: "assistant", text: assistantText, raw: { productLayer: true, attachmentAnalysis: true, productResult } });
       state.db = await api.init();
-      const owner = await api.ownerStatus?.().catch(() => ({ devMode: false }));
       const productTask = await api.productQueryTask?.(productResult.taskId).catch(() => null);
-      renderProductDashboard(productTask, { devMode: Boolean(owner?.devMode) });
+      renderProductDashboard(productTask, { devMode });
       return;
     }
     if (api.productSubmitTask) {
@@ -1994,16 +2195,23 @@ async function sendCurrentTask(task = null) {
       if (createdTask?.experience) {
         addMessage({ role: "assistant", text: renderTaskCard(createdTask.experience) });
         renderProductTaskStrip([createdTask]);
+        renderProductDashboard(createdTask, { devMode });
       }
       setTaskProgressStage("正在执行", 58);
-      const productResult = await api.productSubmitTask({
-        ...(createdTask || {}),
-        productId: "desktop-assistant",
-        templateId: "desktop.general_task",
-        sessionId: session.id,
-        text,
-        message: text
-      });
+      const stopTaskMonitor = startProductTaskMonitor(createdTask?.taskId, { devMode });
+      let productResult = null;
+      try {
+        productResult = await api.productSubmitTask({
+          ...(createdTask || {}),
+          productId: "desktop-assistant",
+          templateId: "desktop.general_task",
+          sessionId: session.id,
+          text,
+          message: text
+        });
+      } finally {
+        stopTaskMonitor();
+      }
       setTaskProgressStage("正在验证", 86);
       const assistantText = productResultText(productResult) || (productResult?.success ? "任务完成。" : "请补充具体需求后我再执行。");
       if (!productResult?.success) {
@@ -2013,32 +2221,29 @@ async function sendCurrentTask(task = null) {
         addMessage({ role: "assistant", text: fallbackText });
         scrollMessagesToBottom();
         setTaskProgressStage(fallbackResult?.success ? "已完成" : "执行失败", fallbackResult?.success ? 100 : 0);
-        await api.appendMessage(session.id, userMessage);
-        await api.appendMessage(session.id, { role: "assistant", text: fallbackText, raw: { productLayer: true, fallback: true, productResult: fallbackResult } });
+        await persistTaskExchange(session.id, userMessage, thinkingMessage, { role: "assistant", text: fallbackText, raw: { productLayer: true, fallback: true, productResult: fallbackResult } });
         return;
       }
       addMessage({ role: "assistant", text: renderResultCard({ ...productResult, text: assistantText }) });
       scrollMessagesToBottom();
       setTaskProgressStage(productResult?.success ? "已完成" : "执行失败", productResult?.success ? 100 : 0);
-      await api.appendMessage(session.id, userMessage);
-      await api.appendMessage(session.id, { role: "assistant", text: assistantText, raw: { productLayer: true, productResult } });
+      await persistTaskExchange(session.id, userMessage, thinkingMessage, { role: "assistant", text: assistantText, raw: { productLayer: true, productResult } });
       state.db = await api.init();
-      const owner = await api.ownerStatus?.().catch(() => ({ devMode: false }));
       const productTask = await api.productQueryTask?.(productResult.taskId).catch(() => null);
-      renderProductDashboard(productTask, { devMode: Boolean(owner?.devMode) });
+      renderProductDashboard(productTask, { devMode });
       return;
     }
     addMessage({ role: "assistant", text: "当前产品层暂时没有返回结果，请稍后再试。" });
     scrollMessagesToBottom();
-    await api.appendMessage(session.id, userMessage);
-    await api.appendMessage(session.id, { role: "assistant", text: "当前产品层暂时没有返回结果，请稍后再试。", raw: { productLayer: true, emptyResult: true } });
+    await persistTaskExchange(session.id, userMessage, thinkingMessage, { role: "assistant", text: "当前产品层暂时没有返回结果，请稍后再试。", raw: { productLayer: true, emptyResult: true } });
   } catch (error) {
     console.error(error);
     const message = error?.message || String(error || "未知错误");
-    addMessage({ role: "assistant", text: `没有发送成功。\n原因：${message}` });
+    const errorMessage = { role: "assistant", text: `没有发送成功。\n原因：${sanitizeVisibleReply(message) || "未知错误"}`, raw: { uiError: true } };
+    addMessage(errorMessage);
     scrollMessagesToBottom();
     setTaskProgressStage("执行失败", 0);
-    await api.appendMessage(session.id, { role: "assistant", text: `没有发送成功。\n原因：${message}`, raw: { uiError: true } }).catch(() => null);
+    await persistTaskExchange(session.id, userMessage, thinkingMessage, errorMessage).catch(() => null);
   } finally {
     state.db = await api.init();
     await renderAll();
@@ -2263,6 +2468,37 @@ publishUpdateBtn?.addEventListener("click", async () => {
     publishUpdateBtn.disabled = false;
   }
 });
+syncUpdateServerBtn?.addEventListener("click", async () => {
+  if (!updateContent) return;
+  const version = publishVersionInput?.value?.trim() || appVersion?.textContent?.trim() || "";
+  const notes = publishNotesInput?.value?.trim() || "客户版更新。";
+  if (!version) {
+    updateContent.textContent = "请输入新版本号。";
+    return;
+  }
+  if (!await showAppConfirm({
+    title: "同步到服务器",
+    message: `生成客户版 ${version} 并同步到 http://108.187.15.86:18790/？`,
+    primary: "同步",
+    secondary: "取消"
+  })) return;
+  syncUpdateServerBtn.disabled = true;
+  updateContent.textContent = "正在生成更新文件并同步到服务器。";
+  if (sshSyncState) sshSyncState.textContent = "同步中";
+  try {
+    const result = await api.syncUpdateServer({ version, notes });
+    updateContent.innerHTML = `<p>${escapeHtml(result.message || "同步完成。")}</p><pre>${escapeHtml(result.log || "")}</pre>`;
+    if (sshSyncState) sshSyncState.textContent = "已同步";
+    await refreshClientStats();
+  } catch (error) {
+    const message = String(error.message || error).replace(/Error:|Exception:|Failed:/gi, "").trim();
+    updateContent.textContent = `同步失败：${message}`;
+    if (sshSyncState) sshSyncState.textContent = "同步失败";
+  } finally {
+    syncUpdateServerBtn.disabled = false;
+  }
+});
+
 startUpdateServerBtn?.addEventListener("click", async () => {
   if (!updateContent) return;
   startUpdateServerBtn.disabled = true;
@@ -2317,7 +2553,7 @@ resetSaveLocationBtn?.addEventListener("click", async () => {
 unlockInviteBtn?.addEventListener("click", async () => {
   const code = (inviteInput?.value || "").trim();
   if (!code) {
-    if (inviteStatus) inviteStatus.textContent = "请输入卡密。";
+    if (inviteStatus) inviteStatus.textContent = "请输入兑换码。";
     return;
   }
   const customer = {
@@ -2326,7 +2562,7 @@ unlockInviteBtn?.addEventListener("click", async () => {
   };
   const result = await (window.license.confirmActivation?.({ code, ...customer }) || window.license.verifyCode(code, customer));
   state.db = await api.init();
-  if (inviteStatus) inviteStatus.textContent = result.message || (result.ok || result.success ? "激活成功。" : "卡密无效。");
+  if (inviteStatus) inviteStatus.textContent = result.message || (result.ok || result.success ? "激活成功。" : "兑换码无效。");
   if (inviteInput) inviteInput.value = result.code || code;
   await refreshLicenseStatus();
   await renderLicenseControls();
@@ -2341,7 +2577,7 @@ let licenseActivationStep = 1;
 licenseActivateBtn?.addEventListener("click", async () => {
   const code = licenseCodeInput?.value || "";
   if (!code) {
-    if (licenseOverlayStatus) licenseOverlayStatus.textContent = "请输入卡密。";
+    if (licenseOverlayStatus) licenseOverlayStatus.textContent = "请输入兑换码。";
     return;
   }
   if (licenseActivationStep === 1) {
@@ -2357,7 +2593,7 @@ licenseActivateBtn?.addEventListener("click", async () => {
     phone: licensePhoneInput?.value?.trim() || ""
   };
   const result = await (window.license.confirmActivation?.({ code, ...customer }) || window.license.verifyCode(code, customer));
-  if (licenseOverlayStatus) licenseOverlayStatus.textContent = result.message || (result.ok ? "激活成功。" : "卡密无效。");
+  if (licenseOverlayStatus) licenseOverlayStatus.textContent = result.message || (result.ok ? "激活成功。" : "兑换码无效。");
   if (result.ok || result.success) {
     state.db = await api.init();
     await refreshLicenseStatus();
@@ -2371,11 +2607,18 @@ licenseActivateBtn?.addEventListener("click", async () => {
   }
 });
 licenseBuyBtn?.addEventListener("click", () => {
-  showAppConfirm({
-    title: "获取卡密",
-    message: "请联系销售获取卡密。",
-    primary: "知道了",
-    secondary: "关闭"
+  createPlanOrder("monthly_first", "overlay").catch((error) => {
+    if (licenseOverlayStatus) licenseOverlayStatus.textContent = `提交购买失败：${error.message || error}`;
+  });
+});
+document.querySelectorAll("[data-buy-plan]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const planId = button.dataset.buyPlan || "monthly_first";
+    createPlanOrder(planId, "plan-card").catch((error) => {
+      const text = `提交购买失败：${error.message || error}`;
+      if (inviteStatus) inviteStatus.textContent = text;
+      if (licenseOverlayStatus) licenseOverlayStatus.textContent = text;
+    });
   });
 });
 addSkillBtn?.addEventListener("click", async () => {
@@ -2435,6 +2678,19 @@ adminExportCodesBtn?.addEventListener("click", async () => {
     if (adminCodeListOutput) adminCodeListOutput.value = `导出失败：${error.message || error}`;
   }
 });
+openAdminServerBtn?.addEventListener("click", async () => {
+  openAdminServerBtn.disabled = true;
+  if (adminWebStatus) adminWebStatus.textContent = "正在启动并打开后台管理网页。";
+  try {
+    const result = await api.openAdminServer?.();
+    const url = result?.url || "http://127.0.0.1:18790/admin";
+    if (adminWebStatus) adminWebStatus.textContent = `${result?.message || "后台管理已打开。"} 地址：${url}`;
+  } catch (error) {
+    if (adminWebStatus) adminWebStatus.textContent = `打开失败：${error.message || error}`;
+  } finally {
+    openAdminServerBtn.disabled = false;
+  }
+});
 refreshDeveloperLogsBtn?.addEventListener("click", renderDeveloperLogs);
 developerLogTypeSelect?.addEventListener("change", renderDeveloperLogs);
 exportDeveloperLogsBtn?.addEventListener("click", async () => {
@@ -2448,7 +2704,10 @@ exportDeveloperLogsBtn?.addEventListener("click", async () => {
 });
 generateInviteBtn?.addEventListener("click", async () => {
   const count = Number(inviteCountInput?.value || 5);
-  const codes = await api.generateInvite(count).catch((error) => [`生成失败：${error.message || error}`]);
+  const type = inviteTypeSelect?.value || "lifetime";
+  const codes = await window.admin?.generateCodes?.(count, type, `兑换码类型：${type}`)
+    .catch(async () => api.generateInvite(count))
+    .catch((error) => [`生成失败：${error.message || error}`]);
   if (generatedInviteOutput) generatedInviteOutput.value = codes.join("\n");
 });
 sideReasoningSelect?.addEventListener("change", async () => {
@@ -2570,6 +2829,54 @@ function collectTaskBoardLinks(messages = []) {
   return [...found.values()];
 }
 
+function looksLikePreviewablePath(value = "") {
+  return /^[a-zA-Z]:[\\/][^\n\r<>"]+\.(?:xlsx|xls|csv|png|jpe?g|webp|gif|pdf|html?|txt|md|json)$/i.test(String(value || ""));
+}
+
+function fileNameFromPath(value = "") {
+  return String(value || "").split(/[\\/]/).filter(Boolean).pop() || "白球输出文件";
+}
+
+function collectOutputFilesFromValue(value, out = []) {
+  if (!value) return out;
+  if (typeof value === "string") {
+    const matches = value.match(/[a-zA-Z]:[\\/][^\n\r<>"]+\.(?:xlsx|xls|csv|png|jpe?g|webp|gif|pdf|html?|txt|md|json)/gi) || [];
+    for (const match of matches) out.push({ path: match });
+    return out;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectOutputFilesFromValue(item, out));
+    return out;
+  }
+  if (typeof value === "object") {
+    const directPath = value.path || value.file || value.filePath || value.outputPath || value.packageFile;
+    if (looksLikePreviewablePath(directPath)) out.push({ path: directPath, name: value.name || fileNameFromPath(directPath), mimeType: value.mimeType || "" });
+    for (const item of Object.values(value)) collectOutputFilesFromValue(item, out);
+  }
+  return out;
+}
+
+function collectGeneratedFiles(messages = []) {
+  const found = new Map();
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    const candidates = collectOutputFilesFromValue(message.raw || []).concat(collectOutputFilesFromValue(message.text || ""));
+    for (const item of candidates) {
+      const filePath = item.path || item.filePath || "";
+      if (!looksLikePreviewablePath(filePath) || found.has(filePath)) continue;
+      found.set(filePath, {
+        id: `generated-${filePath}`,
+        name: item.name || fileNameFromPath(filePath),
+        mimeType: item.mimeType || guessMime(filePath),
+        sizeBytes: 0,
+        path: filePath,
+        source: "白球输出"
+      });
+    }
+  }
+  return [...found.values()];
+}
+
 function collectTaskBoardAssets(messages = []) {
   const files = [];
   const images = [];
@@ -2592,6 +2899,7 @@ function collectTaskBoardAssets(messages = []) {
       });
     }
   }
+  files.push(...collectGeneratedFiles(messages));
   return { files, images, links: collectTaskBoardLinks(messages) };
 }
 
@@ -2650,6 +2958,42 @@ function closeTaskBoard() {
   if (!drawer) return;
   drawer.classList.remove("open");
   drawer.hidden = true;
+}
+
+function taskBoardFileKey(file = {}) {
+  return file.path || file.filePath || file.originalPath || file.url || file.id || `${file.name || "file"}-${file.sizeBytes || 0}`;
+}
+
+function renderInlinePreview(file = {}) {
+  const key = taskBoardFileKey(file);
+  const cached = state.previewCache[key];
+  if (!cached) return `<div class="task-board-file-preview loading" data-preview-key="${escapeHtml(key)}">正在生成内嵌预览...</div>`;
+  if (cached.kind === "image" && (cached.dataUrl || cached.fileUrl)) {
+    return `<div class="task-board-inline-media"><img src="${escapeHtml(cached.dataUrl || cached.fileUrl)}" alt="${escapeHtml(cached.name || file.name || "图片预览")}"></div>`;
+  }
+  if (cached.kind === "frame" && cached.fileUrl) {
+    return `<div class="task-board-inline-frame"><iframe src="${escapeHtml(cached.fileUrl)}" title="${escapeHtml(cached.name || file.name || "文件预览")}"></iframe></div>`;
+  }
+  return `<pre class="task-board-file-preview">${escapeHtml(cached.previewText || file.textContent || "暂未生成可展示的预览内容。")}</pre>`;
+}
+
+async function ensureInlinePreviews(files = []) {
+  if (typeof api.previewAttachment !== "function") return;
+  for (const file of files) {
+    const key = taskBoardFileKey(file);
+    if (!key || state.previewCache[key]) continue;
+    api.previewAttachment(file)
+      .then((preview) => {
+        state.previewCache[key] = preview || { ok: false, previewText: "暂未生成可展示的预览内容。" };
+        const drawer = document.getElementById("taskBoardDrawer");
+        if (drawer && !drawer.hidden && (state.taskBoardTab || drawer.dataset.tab) === "files") renderTaskBoard();
+      })
+      .catch((error) => {
+        state.previewCache[key] = { ok: false, kind: "error", previewText: `预览失败：${error.message || error}` };
+        const drawer = document.getElementById("taskBoardDrawer");
+        if (drawer && !drawer.hidden && (state.taskBoardTab || drawer.dataset.tab) === "files") renderTaskBoard();
+      });
+  }
 }
 
 function renderTaskBoard() {
@@ -2712,10 +3056,11 @@ function renderTaskBoard() {
             <button type="button" data-board-file-open="${escapeHtml(id)}">外部打开</button>
             <button type="button" data-board-file-copy="${escapeHtml(file.name || "")}">复制文件名</button>
           </div>
-          <div class="task-board-file-preview">${escapeHtml((file.textContent || "暂不支持此类文件的内嵌预览。").slice(0, 1200))}</div>
+          ${renderInlinePreview(file)}
         </article>
       `;
     }).join("");
+    ensureInlinePreviews(files);
     body.querySelectorAll("[data-board-file-open]").forEach((button) => {
       button.addEventListener("click", async () => {
         const current = files.find((item) => (item.id || item.name || "") === (button.dataset.boardFileOpen || ""));

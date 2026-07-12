@@ -188,7 +188,7 @@ function adminPage() {
     h1 { margin: 0 0 18px; font-size: 24px; }
     .bar { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-bottom: 18px; }
     label { display: grid; gap: 6px; font-size: 13px; color: #aab7c4; }
-    input, button { height: 36px; border-radius: 6px; border: 1px solid #2b3948; background: #18212b; color: #eef4f8; padding: 0 10px; }
+    input, select, button { height: 36px; border-radius: 6px; border: 1px solid #2b3948; background: #18212b; color: #eef4f8; padding: 0 10px; }
     input { min-width: 120px; }
     button { cursor: pointer; background: #2f81f7; border-color: #2f81f7; font-weight: 600; }
     button.secondary { background: #18212b; border-color: #3a4a5c; }
@@ -202,6 +202,9 @@ function adminPage() {
     .danger { color: #ff8d8d; }
     .ok { color: #82d6a3; }
     .section { margin-top: 28px; }
+    .license-section { margin-top: 18px; }
+    .license-section h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 17px; }
+    .count-pill { display: inline-flex; align-items: center; min-width: 28px; height: 22px; padding: 0 8px; border: 1px solid #2b3948; border-radius: 999px; color: #9cdcfe; background: #121a23; font: 700 12px Consolas, monospace; }
     .download-link { color: #9cdcfe; }
   </style>
 </head>
@@ -407,6 +410,309 @@ function adminPage() {
       if (!code) return;
       await navigator.clipboard.writeText(code);
       setStatus("已复制：" + code);
+    });
+    loadLicenses();
+    loadReleases();
+  </script>
+</body>
+</html>`;
+}
+
+function adminPage() {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Baiqiu AI Admin</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Microsoft YaHei", Arial, sans-serif; background: #101418; color: #eef4f8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 28px; background: #101418; }
+    main { max-width: 1120px; margin: 0 auto; }
+    h1 { margin: 0 0 18px; font-size: 24px; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    .bar { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-bottom: 18px; }
+    label { display: grid; gap: 6px; font-size: 13px; color: #aab7c4; }
+    input, button { height: 36px; border-radius: 6px; border: 1px solid #2b3948; background: #18212b; color: #eef4f8; padding: 0 10px; }
+    input { min-width: 120px; }
+    button { cursor: pointer; background: #2f81f7; border-color: #2f81f7; font-weight: 600; }
+    button.secondary { background: #18212b; border-color: #3a4a5c; }
+    .status { min-height: 22px; color: #82d6a3; margin-bottom: 12px; }
+    table { width: 100%; border-collapse: collapse; background: #151b22; border: 1px solid #2b3948; border-radius: 8px; overflow: hidden; }
+    th, td { padding: 10px; border-bottom: 1px solid #263340; text-align: left; font-size: 13px; vertical-align: top; }
+    th { color: #aab7c4; background: #111820; font-weight: 600; }
+    tr:last-child td { border-bottom: 0; }
+    .code { font-family: Consolas, monospace; color: #9cdcfe; white-space: nowrap; }
+    .muted { color: #8794a3; }
+    .danger { color: #ff8d8d; }
+    .ok { color: #82d6a3; }
+    .section { margin-top: 28px; }
+    .download-link { color: #9cdcfe; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Baiqiu AI License Admin</h1>
+    <div class="bar">
+      <label>Admin Token
+        <input id="token" value="baiqiu-admin-test">
+      </label>
+      <label>Count
+        <input id="count" type="number" min="1" max="500" value="1">
+      </label>
+      <label>Max Devices
+        <input id="maxDevices" type="number" min="1" max="20" value="1">
+      </label>
+      <label>Code Type
+        <select id="planType">
+          <option value="lifetime">Lifetime Redeem Code</option>
+          <option value="monthly">Monthly Redeem Code</option>
+          <option value="yearly">Yearly Redeem Code</option>
+        </select>
+      </label>
+      <label>Expires At
+        <input id="expiresAt" placeholder="Auto by code type">
+      </label>
+      <button id="createBtn">Create Redeem Codes</button>
+      <button class="secondary" id="refreshBtn">Refresh</button>
+    </div>
+    <div class="status" id="status"></div>
+    <section id="licenseTables">
+      <div class="license-section">
+        <h2>New / Unbound Codes <span id="unusedCount" class="count-pill">0</span></h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Status</th>
+              <th>Devices</th>
+              <th>Expires At</th>
+              <th>Created At</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="unusedRows">
+            <tr><td colspan="6" class="muted">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="license-section">
+        <h2>Bound / Used Codes <span id="usedCount" class="count-pill">0</span></h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Status</th>
+              <th>Devices</th>
+              <th>Expires At</th>
+              <th>Created At</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="usedRows">
+            <tr><td colspan="6" class="muted">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Release And Update</h2>
+      <div class="bar">
+        <label>Version
+          <input id="releaseVersion" placeholder="1.1.3">
+        </label>
+        <label>Notes
+          <input id="releaseNotes" placeholder="Release notes">
+        </label>
+        <label>Installer exe / Update zip
+          <input id="releaseFile" type="file" accept=".exe,.zip">
+        </label>
+        <button id="uploadReleaseBtn">Upload</button>
+        <button class="secondary" id="refreshReleaseBtn">Refresh Releases</button>
+      </div>
+      <div class="status" id="releaseStatus"></div>
+      <p class="muted">Customer download page: <a class="download-link" href="/download" target="_blank">/download</a>. Update API: <span class="code">/api/update/check</span></p>
+      <table>
+        <thead>
+          <tr>
+            <th>Version</th>
+            <th>File</th>
+            <th>Size</th>
+            <th>Published At</th>
+            <th>Notes</th>
+            <th>Download</th>
+          </tr>
+        </thead>
+        <tbody id="releaseRows">
+          <tr><td colspan="6" class="muted">Loading...</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    const tokenInput = document.getElementById("token");
+    const statusEl = document.getElementById("status");
+    const licenseTablesEl = document.getElementById("licenseTables");
+    const unusedRowsEl = document.getElementById("unusedRows");
+    const usedRowsEl = document.getElementById("usedRows");
+    const unusedCountEl = document.getElementById("unusedCount");
+    const usedCountEl = document.getElementById("usedCount");
+    const releaseStatusEl = document.getElementById("releaseStatus");
+    const releaseRowsEl = document.getElementById("releaseRows");
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+
+    function setStatus(text, danger = false) {
+      statusEl.textContent = text || "";
+      statusEl.className = danger ? "status danger" : "status";
+    }
+
+    function setReleaseStatus(text, danger = false) {
+      releaseStatusEl.textContent = text || "";
+      releaseStatusEl.className = danger ? "status danger" : "status";
+    }
+
+    function fmtTime(value) {
+      if (!value) return "";
+      const date = typeof value === "number" ? new Date(value) : new Date(String(value));
+      return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+    }
+
+    function fmtSize(value) {
+      const size = Number(value || 0);
+      if (size > 1024 * 1024) return (size / 1024 / 1024).toFixed(1) + " MB";
+      if (size > 1024) return (size / 1024).toFixed(1) + " KB";
+      return size + " B";
+    }
+
+    async function api(path, options = {}) {
+      const headers = { "x-admin-token": tokenInput.value.trim(), ...(options.headers || {}) };
+      const res = await fetch(path, { ...options, headers });
+      const data = await res.json();
+      if (!res.ok || data.success === false) throw new Error(data.message || "Request failed");
+      return data;
+    }
+
+    async function loadLicenses() {
+      try {
+        const data = await api("/admin/licenses");
+        const licenses = data.licenses || [];
+        const unused = licenses.filter((item) => item.status !== "used" && !(item.devices || []).length);
+        const used = licenses.filter((item) => item.status === "used" || (item.devices || []).length);
+        unusedRowsEl.innerHTML = renderLicenseRows(unused, "No new/unbound license codes");
+        usedRowsEl.innerHTML = renderLicenseRows(used, "No bound/used license codes");
+        unusedCountEl.textContent = String(unused.length);
+        usedCountEl.textContent = String(used.length);
+        setStatus("Loaded " + licenses.length + " license code(s). New: " + unused.length + ", Bound: " + used.length + ".");
+      } catch (error) {
+        const errorRow = "<tr><td colspan='6' class='danger'>" + escapeHtml(error.message) + "</td></tr>";
+        unusedRowsEl.innerHTML = errorRow;
+        usedRowsEl.innerHTML = errorRow;
+        setStatus(error.message, true);
+      }
+    }
+
+    function renderLicenseRows(list, emptyText) {
+      return list.length ? list.map((item) => {
+          const devices = item.devices || [];
+          const deviceText = devices.length
+            ? devices.map((device) => escapeHtml(device.deviceId) + " / " + escapeHtml(fmtTime(device.activatedAt))).join("<br>")
+            : "<span class='muted'>Unbound</span>";
+          const statusClass = item.status === "used" ? "ok" : item.status === "banned" ? "danger" : "muted";
+          return "<tr>" +
+            "<td class='code'>" + escapeHtml(item.code) + "</td>" +
+            "<td class='" + statusClass + "'>" + escapeHtml(item.status) + "</td>" +
+            "<td>" + deviceText + "</td>" +
+            "<td>" + escapeHtml(item.expiresAt) + "</td>" +
+            "<td>" + escapeHtml(fmtTime(item.createdAt)) + "</td>" +
+            "<td><button class='secondary' data-copy='" + escapeHtml(item.code) + "'>Copy</button></td>" +
+          "</tr>";
+        }).join("") : "<tr><td colspan='6' class='muted'>" + escapeHtml(emptyText) + "</td></tr>";
+    }
+
+    async function createLicenses() {
+      try {
+        const body = {
+          count: Number(document.getElementById("count").value || 1),
+          maxDevices: Number(document.getElementById("maxDevices").value || 1),
+          plan: document.getElementById("planType").value || "lifetime",
+          expiresAt: document.getElementById("expiresAt").value.trim()
+        };
+        const data = await api("/admin/licenses/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        setStatus("Created: " + (data.licenses || []).map((item) => item.code).join(", "));
+        await loadLicenses();
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    }
+
+    async function loadReleases() {
+      try {
+        const data = await api("/admin/releases");
+        const releases = data.releases || [];
+        releaseRowsEl.innerHTML = releases.length ? releases.map((item) => {
+          return "<tr>" +
+            "<td class='code'>" + escapeHtml(item.version) + "</td>" +
+            "<td>" + escapeHtml(item.installerFile || item.file || "") + "</td>" +
+            "<td>" + escapeHtml(fmtSize(item.fileSize)) + "</td>" +
+            "<td>" + escapeHtml(fmtTime(item.publishedAt)) + "</td>" +
+            "<td>" + escapeHtml(item.notes || "") + "</td>" +
+            "<td><a class='download-link' href='" + escapeHtml(item.downloadUrl || "#") + "' target='_blank'>Download</a></td>" +
+          "</tr>";
+        }).join("") : "<tr><td colspan='6' class='muted'>No releases</td></tr>";
+        setReleaseStatus("Loaded " + releases.length + " release(s).");
+      } catch (error) {
+        releaseRowsEl.innerHTML = "<tr><td colspan='6' class='danger'>" + escapeHtml(error.message) + "</td></tr>";
+        setReleaseStatus(error.message, true);
+      }
+    }
+
+    async function uploadRelease() {
+      const file = document.getElementById("releaseFile").files[0];
+      const version = document.getElementById("releaseVersion").value.trim();
+      const notes = document.getElementById("releaseNotes").value.trim();
+      if (!version) return setReleaseStatus("Please enter a version, for example 1.1.3.", true);
+      if (!file) return setReleaseStatus("Please choose an exe installer or zip update package.", true);
+      try {
+        setReleaseStatus("Uploading " + file.name + " ...");
+        const params = new URLSearchParams({ version, notes, fileName: file.name });
+        const res = await fetch("/admin/releases/upload?" + params.toString(), {
+          method: "POST",
+          headers: { "x-admin-token": tokenInput.value.trim(), "Content-Type": "application/octet-stream" },
+          body: file
+        });
+        const data = await res.json();
+        if (!res.ok || data.success === false) throw new Error(data.message || "Upload failed");
+        setReleaseStatus("Published version " + data.release.version + ".");
+        await loadReleases();
+      } catch (error) {
+        setReleaseStatus(error.message, true);
+      }
+    }
+
+    document.getElementById("createBtn").addEventListener("click", createLicenses);
+    document.getElementById("refreshBtn").addEventListener("click", loadLicenses);
+    document.getElementById("uploadReleaseBtn").addEventListener("click", uploadRelease);
+    document.getElementById("refreshReleaseBtn").addEventListener("click", loadReleases);
+    licenseTablesEl.addEventListener("click", async (event) => {
+      const code = event.target?.dataset?.copy;
+      if (!code) return;
+      await navigator.clipboard.writeText(code);
+      setStatus("Copied: " + code);
     });
     loadLicenses();
     loadReleases();
@@ -641,11 +947,20 @@ function saveRawBodyToFile(req, filePath, maxSize = 3 * 1024 * 1024 * 1024) {
   });
 }
 
-function createLicenses(count = 1, expiresAt = "2099-12-31T23:59:59Z", maxDevices = 1, notes = "") {
+function planExpiresAt(plan = "lifetime", explicitExpiresAt = "") {
+  if (explicitExpiresAt) return explicitExpiresAt;
+  const now = Date.now();
+  if (plan === "monthly" || plan === "monthly_first") return new Date(now + 30 * 24 * 60 * 60 * 1000).toISOString();
+  if (plan === "yearly") return new Date(now + 365 * 24 * 60 * 60 * 1000).toISOString();
+  return "2099-12-31T23:59:59Z";
+}
+
+function createLicenses(count = 1, expiresAt = "2099-12-31T23:59:59Z", maxDevices = 1, notes = "", plan = "lifetime") {
   const db = readDb();
   db.licenses ||= [];
   const existing = new Set(db.licenses.map((item) => item.code));
   const created = [];
+  const finalExpiresAt = planExpiresAt(plan, expiresAt);
   while (created.length < count) {
     const code = generateCode();
     if (existing.has(code)) continue;
@@ -653,9 +968,10 @@ function createLicenses(count = 1, expiresAt = "2099-12-31T23:59:59Z", maxDevice
     const item = {
       code,
       status: "unused",
-      expiresAt,
+      expiresAt: finalExpiresAt,
       maxDevices,
       devices: [],
+      plan,
       notes,
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -709,10 +1025,11 @@ async function handleAdminCreate(req, res) {
   if (req.headers["x-admin-token"] !== ADMIN_TOKEN) return sendJson(res, 401, { success: false, message: "管理员令牌无效" });
   const body = await readBody(req);
   const count = Math.max(1, Math.min(500, Number(body.count || 1)));
-  const expiresAt = String(body.expiresAt || "2099-12-31T23:59:59Z");
+  const plan = String(body.plan || body.type || "lifetime");
+  const expiresAt = String(body.expiresAt || "");
   const maxDevices = Math.max(1, Math.min(20, Number(body.maxDevices || 1)));
   const notes = String(body.notes || "");
-  const created = createLicenses(count, expiresAt, maxDevices, notes);
+  const created = createLicenses(count, expiresAt, maxDevices, notes, plan);
   return sendJson(res, 200, { success: true, licenses: created });
 }
 

@@ -3161,6 +3161,32 @@ body.window-moving .app {
 .admin-code-tools input { min-width: 0; }
 #adminCodeListOutput,
 #developerLogOutput { font-family: Consolas, 'Courier New', monospace; }
+.admin-web-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  margin: 10px 0;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.42);
+}
+.admin-web-entry span {
+  display: block;
+  color: var(--text);
+  font-weight: 700;
+  line-height: 1.4;
+}
+.admin-web-entry small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.admin-web-entry button {
+  min-width: 96px;
+}
 
 
 .message { will-change: transform, opacity; }
@@ -8623,6 +8649,42 @@ body.resizing-composer * {
   font-size: 12px;
   line-height: 1.55;
   white-space: pre-wrap;
+}
+
+.task-board-file-preview.loading {
+  color: color-mix(in srgb, var(--accent) 82%, white 18%);
+}
+
+.task-board-inline-media {
+  margin-top: 12px;
+  max-height: 280px;
+  overflow: auto;
+  border-radius: 8px;
+  background: rgba(8, 12, 18, 0.48);
+}
+
+.task-board-inline-media img {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
+.task-board-inline-frame {
+  margin-top: 12px;
+  height: 320px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 66%, transparent);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.task-board-inline-frame iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
 }
 
 .task-board-gallery {

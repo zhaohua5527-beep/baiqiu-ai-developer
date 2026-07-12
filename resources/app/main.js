@@ -106,7 +106,27 @@ const activeRuns = new Map();
 let lastGatewayStatusSent = { state: "", message: "", at: 0 };
 let lastGatewayReconnectAt = 0;
 const INVITE_SECRET = "baiqiu-ai-owner-signed-invite-v2";
-const isDevMode = process.argv.includes("--dev");
+const DEFAULT_PUBLIC_SERVER = "http://108.187.15.86:18790";
+
+function readModeJson(file) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return null;
+  }
+}
+
+function detectDevMode() {
+  if (process.argv.includes("--dev")) return true;
+  if (process.argv.includes("--client") || process.argv.includes("--customer")) return false;
+  const appVersion = readModeJson(path.join(__dirname, "version.json"));
+  if (String(appVersion?.channel || "").toLowerCase() === "dev") return true;
+  const portableMode = readModeJson(path.resolve(__dirname, "..", "..", "baiqiu-mode.json"));
+  return String(portableMode?.mode || "").toLowerCase() === "dev";
+}
+
+const isDevMode = detectDevMode();
 
 app.setName("Baiqiu AI");
 app.setAppUserModelId("Baiqiu.AI");
@@ -423,7 +443,7 @@ function defaultDb() {
       license: {
         unlocked: false,
         inviteCode: "",
-        activateServer: "http://127.0.0.1:18790"
+        activateServer: DEFAULT_PUBLIC_SERVER
       },
       skills: {
         custom: [],
@@ -471,8 +491,8 @@ function defaultDb() {
         persona: "专业、可靠、高效的本地桌面执行官。"
       },
       update: {
-        manifestUrl: "http://127.0.0.1:18790/manifest.json",
-        updateServer: "http://127.0.0.1:18790",
+        manifestUrl: `${DEFAULT_PUBLIC_SERVER}/manifest.json`,
+        updateServer: DEFAULT_PUBLIC_SERVER,
         autoCheck: true,
         lastCheckAt: 0,
         updateStatus: "idle",
@@ -485,7 +505,7 @@ function defaultDb() {
       },
       providers: {
         openclaw: { name: "OpenClaw", enabled: false, baseURL: "", apiKey: "", model: "gateway" },
-        deepseek: { name: CLOUD_MODEL_DEFAULTS.deepseek.name, enabled: true, baseURL: CLOUD_MODEL_DEFAULTS.deepseek.baseURL, apiKey: "sk-39203847afd37212a14ac2a8ecacc44d0ed79550eb611de3aafac251c6dd7316", model: CLOUD_MODEL_DEFAULTS.deepseek.model },
+        deepseek: { name: CLOUD_MODEL_DEFAULTS.deepseek.name, enabled: true, baseURL: CLOUD_MODEL_DEFAULTS.deepseek.baseURL, apiKey: "", model: CLOUD_MODEL_DEFAULTS.deepseek.model },
         openai: { ...PRESET_PROVIDERS.openai, enabled: false, apiKey: "" },
         kimi: { ...PRESET_PROVIDERS.kimi, enabled: false, apiKey: "" },
         anthropic: { ...PRESET_PROVIDERS.anthropic, enabled: false, apiKey: "" },
@@ -778,23 +798,19 @@ function ensureProductUIAdapter() {
 async function productLayerConversationReply(input = {}) {
   const text = String(input.message || input.text || input.input || "");
   const sessionId = input.sessionId || "";
-  const memoryQuestion = ensureMemoryCenter().answerMemoryQuestion(text);
-  if (memoryQuestion?.answered) return memoryQuestion.text;
-  const contextQuestion = ensureContextManager().answerContextQuestion(text);
-  if (contextQuestion?.answered) return contextQuestion.text;
-  if (/你叫什么(?:名字)?|你的名字|你是谁/i.test(sanitizeText(text))) {
-    const profile = getPersonaProfile(loadDb().settings);
-    return `我叫${profile.assistantName || profile.name || "白球 AI"}。`;
-  }
-  if (isSkillListQuestion(text)) return skillListReply();
+  // Deterministic route guard: 你叫什么 / isCapabilityListQuestion(text)
+  const deterministic = deterministicBasicReply(text, { sessionId, settings: loadDb().settings });
+  if (deterministic) return sanitizeUserFacingReply(deterministic.text);
   if (isSkillLearningRequest(text)) {
     const skillReply = await learnSkillDirectReply(text, { sessionId });
     return skillReply.text;
   }
-  if (isCapabilityListQuestion(text)) return capabilityListReply();
-  if (isAgentStatusQuestion(text)) return agentStatusReply(sessionId);
+  const memoryQuestion = ensureMemoryCenter().answerMemoryQuestion(text);
+  if (memoryQuestion?.answered) return sanitizeUserFacingReply(memoryQuestion.text);
+  const contextQuestion = ensureContextManager().answerContextQuestion(text);
+  if (contextQuestion?.answered) return sanitizeUserFacingReply(contextQuestion.text);
   const runtime = await productLayerChatRuntime({ ...input, message: text, sessionId, skipPersist: true });
-  return runtime.text || "我在。";
+  return sanitizeUserFacingReply(runtime.text || "我在。");
 }
 
 function isCalculatorCreationRequest(message = "") {
@@ -842,7 +858,7 @@ async function runCalculatorShortcut({ sessionId = "", message = "", signal = nu
   return {
     ok,
     sessionId,
-    text: verified.text || (ok ? "计算器已生成并打开。" : `计算器生成失败：${errorText}`),
+    text: sanitizeUserFacingReply(verified.text || (ok ? "计算器已生成并打开。" : `计算器生成失败：${errorText}`)),
     raw: { calculatorShortcut: true, execution, verified }
   };
 }
@@ -866,7 +882,7 @@ async function productLayerChatRuntime(input = {}) {
         traceId: input.traceId || input.taskId || ""
       });
       if (!input.skipPersist) {
-        appendMessage(session.id, { role: "assistant", text: calculatorResult.text, raw: { productLayer: true, calculatorShortcut: true, raw: calculatorResult.raw } });
+        appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(calculatorResult.text), raw: { productLayer: true, calculatorShortcut: true, raw: calculatorResult.raw } });
         updateSession(session.id, { status: calculatorResult.ok ? "done" : "failed" });
         mainWindow?.webContents.send("session:changed", loadDb());
       }
@@ -880,11 +896,11 @@ async function productLayerChatRuntime(input = {}) {
       }
       const skillReply = await learnSkillDirectReply(originalText, { sessionId: session.id });
       if (!input.skipPersist) {
-        appendMessage(session.id, { role: "assistant", text: skillReply.text, raw: { productLayer: true, skillCenter: true, action: "learn", result: skillReply.result } });
+        appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(skillReply.text), raw: { productLayer: true, skillCenter: true, action: "learn", result: skillReply.result } });
         updateSession(session.id, { status: skillReply.ok ? "done" : "failed" });
         mainWindow?.webContents.send("session:changed", loadDb());
       }
-      return { ok: skillReply.ok, sessionId: session.id, text: skillReply.text, raw: skillReply.result };
+      return { ok: skillReply.ok, sessionId: session.id, text: sanitizeUserFacingReply(skillReply.text), raw: skillReply.result };
     }
     const spreadsheetReply = spreadsheetAttachmentAnalysisReply(attachments);
     if (spreadsheetReply) {
@@ -895,11 +911,11 @@ async function productLayerChatRuntime(input = {}) {
           attachments: attachments.map((item) => ({ name: item.name, mimeType: item.mimeType, sizeBytes: item.sizeBytes })),
           images: attachments.filter((item) => String(item.mimeType || "").startsWith("image/")).map((item) => item.dataUrl)
         });
-        appendMessage(session.id, { role: "assistant", text: spreadsheetReply, raw: { productLayer: true, spreadsheetAnalysis: true } });
+        appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(spreadsheetReply), raw: { productLayer: true, spreadsheetAnalysis: true } });
         updateSession(session.id, { status: "done" });
         mainWindow?.webContents.send("session:changed", loadDb());
       }
-      return { ok: true, sessionId: session.id, text: spreadsheetReply, raw: { spreadsheetAnalysis: true } };
+      return { ok: true, sessionId: session.id, text: sanitizeUserFacingReply(spreadsheetReply), raw: { spreadsheetAnalysis: true } };
     }
     if (!input.skipPersist) {
       appendMessage(session.id, {
@@ -918,23 +934,23 @@ async function productLayerChatRuntime(input = {}) {
       raw = { localImageUnsupported: true };
     } else {
       const result = await directProviderChat(settings, originalText, attachments, session.id, {});
-      replyText = result?.text || "我已收到，但暂时没有生成有效回复。";
+      replyText = sanitizeUserFacingReply(result?.text || "我已收到，但暂时没有生成有效回复。");
       raw = result?.raw || result || null;
     }
     if (!input.skipPersist) {
-      appendMessage(session.id, { role: "assistant", text: replyText, raw: { productLayer: true, chatRuntime: true, raw } });
+      appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(replyText), raw: { productLayer: true, chatRuntime: true, raw } });
       updateSession(session.id, { status: "done" });
       mainWindow?.webContents.send("session:changed", loadDb());
     }
-    return { ok: true, sessionId: session.id, text: replyText, raw };
+    return { ok: true, sessionId: session.id, text: sanitizeUserFacingReply(replyText), raw };
   } catch (error) {
     const message = humanReadableError(error);
     if (!input.skipPersist) {
-      appendMessage(session.id, { role: "assistant", text: `执行失败。\n原因：${message}`, raw: { productLayer: true, chatRuntime: true, error: message } });
+      appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(`执行失败。\n原因：${message}`), raw: { productLayer: true, chatRuntime: true, error: message } });
       updateSession(session.id, { status: "failed" });
       mainWindow?.webContents.send("session:changed", loadDb());
     }
-    return { ok: false, sessionId: session.id, text: `执行失败。\n原因：${message}`, error: message };
+    return { ok: false, sessionId: session.id, text: sanitizeUserFacingReply(`执行失败。\n原因：${message}`), error: message };
   }
 }
 
@@ -1534,6 +1550,28 @@ function isSkillLearningRequest(message) {
   return /(?:学习|学|安装|创建|新增|做).{0,40}(?:skill|技能)|(?:skill|技能).{0,40}(?:学习|安装|创建|新增)/i.test(text);
 }
 
+function isOnlineSkillLearningRequest(message) {
+  return isSkillLearningRequest(message) && /网上|联网|搜索|互联网|网页|网址|资料|web|online|https?:\/\//i.test(sanitizeText(message));
+}
+
+function extractSkillSourceFromMessage(message) {
+  const text = sanitizeText(message);
+  const url = text.match(/https?:\/\/[^\s，。；;]+/i)?.[0] || "";
+  if (url) return url;
+  return extractRequestedSkillTopic(text);
+}
+
+function extractRequestedSkillTopic(message) {
+  let text = sanitizeText(message)
+    .replace(/https?:\/\/[^\s，。；;]+/ig, "")
+    .replace(/请|帮我|你|去|到|从|在|网上|联网|搜索|互联网|网页|网址|资料|学习|学会|学一个|学习一个|安装|创建|新增|做一个/ig, "")
+    .replace(/skill|技能/ig, "")
+    .replace(/[，。；;,.!?！？]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.slice(0, 60) || "专业技能";
+}
+
 function skillListReply() {
   const skills = ensureSkillCenter().listSkills();
   const installed = skills.filter((skill) => skill.status === "installed");
@@ -1688,45 +1726,143 @@ async function learnSkillDirectReply(message, { sessionId = "" } = {}) {
     };
   }
 
-  const result = ensureSkillCenter().learnSkillFromRequest(message);
-  if (result.success && result.verification?.status === "passed") {
+  const onlineRequested = isOnlineSkillLearningRequest(message);
+  const source = extractSkillSourceFromMessage(message);
+  try {
+    const learned = await learnProfessionalSkill({
+      name: extractRequestedSkillTopic(message),
+      source
+    });
+    const skillName = learned.item?.name || extractRequestedSkillTopic(message);
+    const hasUrl = /^https?:\/\//i.test(source);
+    const lines = [
+      hasUrl ? "技能学习完成。" : "技能已创建为本地专业技能。",
+      "",
+      "技能：",
+      skillName,
+      "",
+      "状态：",
+      hasUrl ? "已读取资料并写入自学习技能库。" : (onlineRequested ? "已写入自学习技能库；本次没有实际联网检索来源，所以不会标记为“已联网学习”。" : "已写入自学习技能库。"),
+      "",
+      "它现在会沉淀为：",
+      "- 使用场景",
+      "- 核心规则",
+      "- 操作流程",
+      "- 学习来源/主题",
+      "",
+      "下一步你可以直接说：",
+      `- 使用 ${skillName} 帮我处理一个具体任务`,
+      `- 按 ${skillName} 的流程分析这个文件`
+    ];
     return {
       ok: true,
+      result: learned,
+      text: lines.join("\n")
+    };
+  } catch (error) {
+    const result = ensureSkillCenter().learnSkillFromRequest(message);
+    if (result.success && result.verification?.status === "passed") {
+      const skillName = result.skill?.name || extractRequestedSkillTopic(message);
+      return {
+        ok: true,
+        result,
+        text: [
+          "技能已登记为本地技能档案。",
+          "",
+          "技能：",
+          skillName,
+          "",
+          "状态：",
+          "自学习技能文件写入失败，但技能档案已保留。",
+          "",
+          "原因：",
+          humanReadableError(error)
+        ].join("\n")
+      };
+    }
+    return {
+      ok: false,
       result,
       text: [
-        "技能学习完成。",
+        "技能学习失败。",
         "",
-        "技能：",
-        result.skill.name,
-        "",
-        "状态：",
-        "已安装。"
+        "原因：",
+        humanReadableError(error) || result.error || result.verification?.reason || "技能未通过验证。"
       ].join("\n")
     };
   }
-  return {
-    ok: false,
-    result,
-    text: [
-      "技能学习失败。",
-      "",
-      "原因：",
-      result.error || result.verification?.reason || "技能未通过验证。"
-    ].join("\n")
-  };
 }
 
 function isCapabilityListQuestion(message) {
   return /^(?:查看|显示|列出)?(?:我的|当前)?能力(?:列表)?[。!！?？]*$|我能做什么|有哪些能力/.test(sanitizeText(message));
 }
 
+function isSpreadsheetAbilityQuestion(message) {
+  const text = sanitizeText(message);
+  return /(你|白球|AI|现在|还)?.{0,10}(能|可以|会|支持|不能|无法|打不开|看不到|读取|打开|分析).{0,18}(Excel|xlsx|xls|csv|表格|电子表|工作簿)/i.test(text)
+    || /(Excel|xlsx|xls|csv|表格|电子表|工作簿).{0,18}(能|可以|会|支持|不能|无法|打不开|看不到|读取|打开|分析)/i.test(text);
+}
+
+function spreadsheetAbilityReply() {
+  return [
+    "可以，我能分析 Excel / CSV 表格。",
+    "",
+    "你可以直接上传 `.xlsx`、`.xls` 或 `.csv` 文件，我会先本地解析工作表、字段、行列数和关键数值列，再给你精简结论。",
+    "",
+    "适合让我做：",
+    "- 销售额排行、商品动销、品类占比",
+    "- 异常数据、缺失值、重复项检查",
+    "- 门店经营建议、汇总统计、导出分析结果",
+    "",
+    "如果解析失败，我会明确告诉你是文件损坏、加密、格式不支持，还是附件没有真正传进来。"
+  ].join("\n");
+}
+
+function isImageAbilityQuestion(message) {
+  const text = sanitizeText(message);
+  return /(你|白球|AI|现在|还)?.{0,10}(能|可以|会|支持|不能|无法|看不到|识别|分析).{0,18}(图片|图像|照片|截图|image|png|jpg|jpeg|webp)/i.test(text)
+    || /(图片|图像|照片|截图|image|png|jpg|jpeg|webp).{0,18}(能|可以|会|支持|不能|无法|看不到|识别|分析)/i.test(text);
+}
+
+function imageAbilityReply(settings = {}) {
+  const provider = settings.providers?.[settings.defaultProvider] || {};
+  const model = String(provider.model || provider.name || "");
+  const visionReady = /qwen.*vl|qwen-vl|glm-4v|gpt-4o|gpt-4\.1|vision|llava|pixtral|gemini/i.test(model);
+  return [
+    visionReady ? "可以，我当前模型支持图片理解。" : "我可以接收图片；如果当前模型不支持视觉，我会明确提示并让你切换视觉模型。",
+    "",
+    "你可以上传截图、照片、商品图、报表截图或界面截图。",
+    "",
+    "适合让我做：",
+    "- 识别图片里的文字和界面问题",
+    "- 分析商品图、运营图、表格截图",
+    "- 根据截图给出修改建议或排查步骤",
+    "",
+    "我不会在没读到图片内容时假装已经看过。"
+  ].join("\n");
+}
+
 function capabilityListReply() {
   const capabilities = refreshCapabilities();
   const available = capabilities.filter((item) => item.status === "available").slice(0, 40);
   const missing = capabilities.filter((item) => item.status === "missing").slice(0, 12);
-  const lines = ["当前能力列表：", "", "可用能力："];
+  const skills = ensureSkillCenter().listSkills().filter((skill) => skill.status === "installed");
+  const lines = [
+    "我现在主要能做这些高频任务：",
+    "",
+    "- 桌面任务：创建/打开文件、生成小工具、处理本地路径",
+    "- 表格数据：读取 Excel/CSV、提取字段、做排行/汇总/异常分析",
+    "- 图片理解：在视觉模型可用时分析截图、商品图、界面图",
+    "- 网页与 HTML：生成简单网页/HTML 应用，打开和验证结果",
+    "- 技能学习：把常用流程沉淀成自学习技能",
+    "- 任务执行：通过产品层提交任务，显示进度、验证结果并记录经验",
+    "",
+    `已安装技能：${skills.length} 个`,
+    "",
+    "底层可用能力："
+  ];
   if (available.length) {
-    for (const item of available) lines.push(`- ${item.name || item.id}（${item.type}）`);
+    for (const item of available.slice(0, 16)) lines.push(`- ${item.name || item.id}（${item.type}）`);
   } else {
     lines.push("- 暂无可用能力");
   }
@@ -1777,6 +1913,20 @@ function agentStatusReply(sessionId) {
     `当前任务：${(agent.plan || db.settings.agent?.lastPlan || [])[0] || "无正在执行任务"}`,
     `当前意图：${agent.intent || db.settings.agent?.lastIntent || "general.chat"}`
   ].join("\n");
+}
+
+function deterministicBasicReply(message = "", { sessionId = "", settings = null } = {}) {
+  const text = sanitizeText(message);
+  if (/你叫什么(?:名字)?|你的名字|你是谁/i.test(text)) {
+    const profile = getPersonaProfile((settings || loadDb().settings));
+    return { text: `我叫${profile.assistantName || profile.name || "白球 AI"}。`, raw: { deterministicReply: true, type: "identity" } };
+  }
+  if (isSpreadsheetAbilityQuestion(text)) return { text: spreadsheetAbilityReply(), raw: { deterministicReply: true, type: "spreadsheet_ability" } };
+  if (isImageAbilityQuestion(text)) return { text: imageAbilityReply(settings || loadDb().settings), raw: { deterministicReply: true, type: "image_ability" } };
+  if (isSkillListQuestion(text)) return { text: skillListReply(), raw: { skillCenter: true, action: "list", deterministicReply: true } };
+  if (isCapabilityListQuestion(text)) return { text: capabilityListReply(), raw: { capabilityCenter: true, action: "list", deterministicReply: true } };
+  if (isAgentStatusQuestion(text)) return { text: agentStatusReply(sessionId), raw: { agentStatus: true, deterministicReply: true } };
+  return null;
 }
 
 function decodeHtmlEntities(text) {
@@ -1996,8 +2146,10 @@ function ensureLicenseManager() {
   const settings = loadDb().settings || {};
   const licenseSettings = settings.license || {};
   const configuredActivateServer = sanitizeText(licenseSettings.activateServer || "");
-  const activateServer = !configuredActivateServer || configuredActivateServer === "https://your-license-server.com"
-    ? "http://127.0.0.1:18790"
+  const activateServer = !configuredActivateServer
+      || configuredActivateServer === "https://your-license-server.com"
+      || /^http:\/\/(?:localhost|127\.0\.0\.1):18790$/i.test(configuredActivateServer)
+    ? DEFAULT_PUBLIC_SERVER
     : configuredActivateServer;
   const serverSecret = sanitizeText(licenseSettings.serverSecret || "") || undefined;
   if (!licenseManager) {
@@ -2213,8 +2365,8 @@ function effectiveAppVersion() {
 
 function updateJsonUrl(settings = loadDb().settings) {
   const configuredServer = sanitizeText(settings.update?.updateServer || "");
-  const server = !configuredServer || /^http:\/\/(?:localhost|127\.0\.0\.1):3000$/i.test(configuredServer)
-    ? "http://127.0.0.1:18790"
+  const server = !configuredServer || /^http:\/\/(?:localhost|127\.0\.0\.1):(?:3000|18790)$/i.test(configuredServer)
+    ? DEFAULT_PUBLIC_SERVER
     : configuredServer;
   return `${server.replace(/\/+$/, "")}/update.json`;
 }
@@ -2389,8 +2541,8 @@ function runPreparedUpdateScript(update = loadDb().settings?.update || {}) {
 function ensureUpdater() {
   const settings = loadDb().settings;
   const configuredServer = sanitizeText(settings.update?.updateServer || "");
-  const updateServer = !configuredServer || /^http:\/\/(?:localhost|127\.0\.0\.1):3000$/i.test(configuredServer)
-    ? "http://127.0.0.1:18790"
+  const updateServer = !configuredServer || /^http:\/\/(?:localhost|127\.0\.0\.1):(?:3000|18790)$/i.test(configuredServer)
+    ? DEFAULT_PUBLIC_SERVER
     : configuredServer;
   if (!updater || updater.updateServer !== updateServer || updater.currentVersion !== effectiveAppVersion()) {
     updater = new Updater({
@@ -2677,8 +2829,8 @@ async function publishCustomerUpdate(payload = {}) {
   const manifestPath = path.join(__dirname, "server", "updates.json");
   const updateJsonPath = path.join(__dirname, "server", "update.json");
   const configuredServer = sanitizeText(loadDb().settings.update?.updateServer || "");
-  const updateServer = !configuredServer || /^http:\/\/(?:localhost|127\.0\.0\.1):3000$/i.test(configuredServer)
-    ? "http://127.0.0.1:18790"
+  const updateServer = !configuredServer || /^http:\/\/(?:localhost|127\.0\.0\.1):(?:3000|18790)$/i.test(configuredServer)
+    ? DEFAULT_PUBLIC_SERVER
     : configuredServer;
   const manifest = readJson(manifestPath, { channels: { stable: [] } });
   manifest.channels ||= {};
@@ -2709,6 +2861,33 @@ async function publishCustomerUpdate(payload = {}) {
     portablePackageFile: packageFile,
     sha256,
     updateServer
+  };
+}
+
+async function syncCustomerUpdateToRemoteServer(payload = {}) {
+  if (!hasAdminAccess()) throw new Error("当前模式没有服务器同步权限，请使用开发工具面板。");
+  const version = sanitizeText(payload.version || appVersion());
+  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) throw new Error("版本号格式应为 1.0.1");
+  const notes = sanitizeText(payload.notes || "客户版更新。");
+  const published = await publishCustomerUpdate({ version, notes });
+  const script = path.join(__dirname, "scripts", "sync-to-update-server.ps1");
+  if (!fs.existsSync(script)) throw new Error("服务器同步脚本不存在。");
+  const log = await runCommand("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    script,
+    "-Version",
+    version
+  ], { cwd: __dirname, timeout: 900000 });
+  devLog("update", "INFO", "[RemoteSync] Synced update server", { version, log: log.slice(-2000) });
+  return {
+    ok: true,
+    message: `客户版 ${version} 已同步到 http://108.187.15.86:18790/`,
+    version,
+    published,
+    log: log.slice(-4000)
   };
 }
 
@@ -2989,7 +3168,7 @@ function importantColumnSummary(sheet = {}) {
   const importantNames = new Set(Object.values(sheet.importantColumns || {}).filter(Boolean));
   const picked = columns
     .filter((col) => importantNames.has(col.name) || typeof col.sum === "number")
-    .slice(0, 8);
+    .slice(0, 5);
   if (!picked.length) return "未识别到明显的金额/销量/分类关键列。";
   return picked.map((col) => {
     if (typeof col.sum === "number") return `${col.name}：合计 ${numberText(col.sum)}，均值 ${numberText(col.avg)}`;
@@ -3008,9 +3187,13 @@ function topCategorySummary(sheet = {}) {
 function summarizeSpreadsheetForUser(analysis = {}) {
   const sheets = Array.isArray(analysis.sheets) ? analysis.sheets : [];
   const first = sheets.find((sheet) => !sheet.empty) || sheets[0] || {};
-  const sheetRows = sheets.slice(0, 10).map((sheet) => `| ${sheet.name || "-"} | ${sheet.rowCount || 0} | ${sheet.columnCount || 0} | ${compactList(sheet.headers || [], 8)} |`);
+  const visibleSheets = sheets.slice(0, 5);
+  const hiddenSheetCount = Math.max(0, sheets.length - visibleSheets.length);
+  const sheetRows = visibleSheets.map((sheet) => `| ${sheet.name || "-"} | ${sheet.rowCount || 0} | ${sheet.columnCount || 0} | ${compactList(sheet.headers || [], 5)} |`);
+  if (hiddenSheetCount) sheetRows.push(`| 其余工作表 | ${hiddenSheetCount} 个未展开 | - | 说“展开工作表结构”可查看 |`);
   const categoryLine = topCategorySummary(first);
   const keySummary = importantColumnSummary(first);
+  const isLargeWorkbook = Number(analysis.totalRows || 0) > 5000 || Number(analysis.totalColumns || 0) > 80 || sheets.length > 5;
   return [
     `已读取：${analysis.fileName || "表格文件"}`,
     "",
@@ -3018,6 +3201,7 @@ function summarizeSpreadsheetForUser(analysis = {}) {
     `- 工作表：${analysis.sheetCount || 0} 个，已分析：${analysis.analyzedSheetCount || 0} 个`,
     `- 数据规模：${Number(analysis.totalRows || 0).toLocaleString("zh-CN")} 行，${Number(analysis.totalColumns || 0).toLocaleString("zh-CN")} 列`,
     first?.name ? `- 主要工作表：${first.name}（${Number(first.rowCount || 0).toLocaleString("zh-CN")} 行，${first.columnCount || 0} 列）` : "",
+    isLargeWorkbook ? "- 这是较大的工作簿，默认只展示摘要，避免刷屏。" : "",
     "",
     "### 工作表结构",
     "| 工作表 | 行数 | 列数 | 主要字段 |",
@@ -3026,7 +3210,7 @@ function summarizeSpreadsheetForUser(analysis = {}) {
     "",
     "### 初步结论",
     categoryLine ? `- 商品/分类数据已经识别，${categoryLine}` : "- 已识别表格结构，下一步可以按销售、库存、商品、分类维度继续拆解。",
-    "- 默认不展开全部字段明细，避免刷屏；需要明细时可以说“展开字段摘要”或“导出分析表”。",
+    "- 默认不展开全部字段明细；需要明细时可以说“展开字段摘要”或“展开工作表结构”。",
     "",
     "### 关键字段",
     keySummary,
@@ -5387,13 +5571,145 @@ async function executeOpenPath(action) {
     await ensureVerifiedTaskService().openBrowser({ path: file });
     return `已用默认浏览器打开 ${actionRelativeLabel(file)}`;
   }
-  if (/\.(xlsx|xls|csv)$/i.test(file)) {
-    shell.showItemInFolder(file);
-    return `已生成表格 ${actionRelativeLabel(file)}。为避免自动唤起 WPS/Office，已改为在文件夹中定位该文件，未自动打开。`;
-  }
   const error = await shell.openPath(file);
   if (error) throw new Error(`打开失败：${error}`);
   return `已打开 ${actionRelativeLabel(file)}`;
+}
+
+function attachmentExtension(name = "", mimeType = "") {
+  const ext = path.extname(String(name || "")).toLowerCase();
+  if (ext) return ext;
+  const mime = String(mimeType || "").toLowerCase();
+  if (mime.includes("spreadsheetml")) return ".xlsx";
+  if (mime.includes("ms-excel")) return ".xls";
+  if (mime.includes("csv")) return ".csv";
+  if (mime.includes("png")) return ".png";
+  if (mime.includes("jpeg") || mime.includes("jpg")) return ".jpg";
+  if (mime.includes("webp")) return ".webp";
+  if (mime.includes("gif")) return ".gif";
+  if (mime.includes("json")) return ".json";
+  if (mime.includes("markdown")) return ".md";
+  if (mime.includes("text")) return ".txt";
+  return ".bin";
+}
+
+function safeAttachmentName(name = "", mimeType = "") {
+  const base = path.basename(String(name || "attachment")).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim() || "attachment";
+  return path.extname(base) ? base : `${base}${attachmentExtension(base, mimeType)}`;
+}
+
+function attachmentDataUrlBuffer(dataUrl = "") {
+  const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/);
+  if (!match) return null;
+  return match[2] ? Buffer.from(match[3], "base64") : Buffer.from(decodeURIComponent(match[3]), "utf8");
+}
+
+async function executeOpenAttachment(attachment = {}) {
+  const sourcePath = sanitizeText(attachment.path || attachment.originalPath || attachment.filePath || "");
+  const url = sanitizeText(attachment.url || "");
+  if (sourcePath && fs.existsSync(sourcePath)) {
+    const error = await shell.openPath(sourcePath);
+    if (error) throw new Error(`打开附件失败：${error}`);
+    return { ok: true, path: sourcePath };
+  }
+  if (/^https?:\/\//i.test(url)) {
+    await shell.openExternal(url);
+    return { ok: true, url };
+  }
+
+  const mimeType = sanitizeText(attachment.mimeType || "");
+  const fileName = safeAttachmentName(attachment.name, mimeType);
+  const dir = path.join(app.getPath("temp"), "BaiqiuAI", "attachments");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${Date.now()}-${randomUUID().slice(0, 8)}-${fileName}`);
+
+  const dataBuffer = attachmentDataUrlBuffer(attachment.dataUrl);
+  if (dataBuffer) {
+    fs.writeFileSync(file, dataBuffer);
+  } else if (attachment.textContent) {
+    fs.writeFileSync(file, String(attachment.textContent), "utf8");
+  } else {
+    throw new Error("附件没有可打开的本地路径或内容");
+  }
+
+  const error = await shell.openPath(file);
+  if (error) throw new Error(`打开附件失败：${error}`);
+  return { ok: true, path: file };
+}
+
+function attachmentBuffer(attachment = {}) {
+  const sourcePath = sanitizeText(attachment.path || attachment.originalPath || attachment.filePath || "");
+  if (sourcePath && fs.existsSync(sourcePath) && fs.statSync(sourcePath).isFile()) {
+    return { buffer: fs.readFileSync(sourcePath), path: sourcePath };
+  }
+  const dataBuffer = attachmentDataUrlBuffer(attachment.dataUrl);
+  if (dataBuffer) return { buffer: dataBuffer, path: "" };
+  if (attachment.textContent) return { buffer: Buffer.from(String(attachment.textContent), "utf8"), path: "" };
+  return { buffer: null, path: "" };
+}
+
+function previewMimeFromName(name = "", fallback = "") {
+  const lower = String(name || "").toLowerCase();
+  if (/\.(xlsx)$/i.test(lower)) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (/\.(xls)$/i.test(lower)) return "application/vnd.ms-excel";
+  if (/\.(csv)$/i.test(lower)) return "text/csv";
+  if (/\.(html?)$/i.test(lower)) return "text/html";
+  if (/\.(png)$/i.test(lower)) return "image/png";
+  if (/\.(jpe?g)$/i.test(lower)) return "image/jpeg";
+  if (/\.(webp)$/i.test(lower)) return "image/webp";
+  if (/\.(gif)$/i.test(lower)) return "image/gif";
+  if (/\.(pdf)$/i.test(lower)) return "application/pdf";
+  if (/\.(txt|md|json|log|csv)$/i.test(lower)) return "text/plain";
+  return fallback || "application/octet-stream";
+}
+
+function compactSpreadsheetPreview(analysis = {}) {
+  const sheets = Array.isArray(analysis.sheets) ? analysis.sheets : [];
+  const lines = [
+    `[Spreadsheet Preview: ${analysis.name || "表格"}]`,
+    `工作表：${analysis.sheetCount || sheets.length}，总行数：${analysis.totalRows || 0}，总列数：${analysis.totalColumns || 0}`
+  ];
+  for (const sheet of sheets.slice(0, 4)) {
+    lines.push("");
+    lines.push(`Sheet: ${sheet.name || "-"} | ${sheet.rowCount || 0} 行 x ${sheet.columnCount || 0} 列`);
+    const headers = Array.isArray(sheet.headers) ? sheet.headers.slice(0, 12).join(" | ") : "";
+    if (headers) lines.push(`字段：${headers}`);
+    const columns = Array.isArray(sheet.columns) ? sheet.columns.slice(0, 8) : [];
+    for (const col of columns) {
+      if (typeof col.sum === "number") lines.push(`- ${col.name}：合计 ${col.sum}，均值 ${col.avg}`);
+      else if (Array.isArray(col.topValues) && col.topValues.length) lines.push(`- ${col.name}：高频 ${col.topValues.slice(0, 5).join("、")}`);
+    }
+  }
+  if (sheets.length > 4) lines.push(`\n还有 ${sheets.length - 4} 个工作表未展开。`);
+  return lines.join("\n").slice(0, 8000);
+}
+
+async function executePreviewAttachment(attachment = {}) {
+  const name = sanitizeText(attachment.name || path.basename(attachment.path || attachment.filePath || "") || "附件");
+  const mimeType = previewMimeFromName(name, sanitizeText(attachment.mimeType || ""));
+  const sourcePath = sanitizeText(attachment.path || attachment.originalPath || attachment.filePath || "");
+  const existingPath = sourcePath && fs.existsSync(sourcePath) ? sourcePath : "";
+  const { buffer } = attachmentBuffer(attachment);
+
+  if (existingPath && (/^image\//i.test(mimeType) || /\/pdf$/i.test(mimeType) || /html/i.test(mimeType))) {
+    return { ok: true, kind: /^image\//i.test(mimeType) ? "image" : "frame", name, mimeType, fileUrl: pathToFileURL(existingPath).toString() };
+  }
+  if (attachment.dataUrl && /^image\//i.test(mimeType)) {
+    return { ok: true, kind: "image", name, mimeType, dataUrl: String(attachment.dataUrl) };
+  }
+  if (!buffer) return { ok: false, kind: "empty", name, mimeType, previewText: "没有可用于内嵌预览的文件内容。" };
+
+  if (/\.(xlsx|xls|csv)$/i.test(name) || /spreadsheet|excel|csv/i.test(mimeType)) {
+    if (!XLSX) return { ok: false, kind: "text", name, mimeType, previewText: "运行包缺少 xlsx 解析依赖，无法内嵌预览表格。" };
+    const analysis = SpreadsheetAgent.analyzeWorkbook(XLSX, buffer, { name });
+    return { ok: true, kind: "spreadsheet", name, mimeType, previewText: compactSpreadsheetPreview(analysis), analysis };
+  }
+
+  if (/^text\/|json|markdown|xml|javascript|html/i.test(mimeType) || /\.(txt|md|json|csv|log|html?|js|css)$/i.test(name)) {
+    return { ok: true, kind: "text", name, mimeType, previewText: buffer.toString("utf8").slice(0, 12000) };
+  }
+
+  return { ok: false, kind: "binary", name, mimeType, previewText: "该文件是二进制格式，可外部打开；暂未生成文本化预览。" };
 }
 
 function executeModifyAppFile(action) {
@@ -6042,12 +6358,51 @@ function humanReadableError(error) {
   if (/not\s*found|enoent|不存在|找不到/i.test(value)) return "文件或程序不存在。";
   if (/模型接口|chat\/completions|Base URL|choices|output_text|codekey|api key|apiKey/i.test(raw)) return "模型接口连接失败，请检查模型 Base URL、API Key 和模型名称。";
   if (/network|fetch|econn|dns|socket|联网/i.test(value)) return "网络连接失败，请检查网络连接或模型供应商地址。";
+  if (/Tool\s*Registry|ToolSelector|Intent\s*Lock|intent\s*mismatch|工具与意图不匹配|意图.*不匹配|office\.doc|general\.chat|dev\.code|math\.calculator|run_command|write_text_file|被拦截/i.test(raw)) {
+    return "当前任务路由没有匹配到合适的可执行能力，我会改用产品层能力处理；如果仍失败，请补充文件、权限或具体目标。";
+  }
   if (/syntax|unexpected token|parse/i.test(value)) return "生成内容格式异常，已停止执行。";
   return sanitizeText(value)
     .replace(/^Error:\s*/i, "")
     .replace(/^Exception:\s*/i, "")
     .replace(/^Failed:\s*/i, "失败：")
     .slice(0, 240) || "未知原因";
+}
+
+function sanitizeUserFacingReply(text) {
+  let value = typeof text === "object" && text
+    ? (text.text || text.message || text.error || JSON.stringify(text))
+    : String(text || "");
+  value = value.replace(/\r/g, "");
+  if (!value.trim()) return "";
+  value = value.replace(/\[object Object\]/g, "任务返回了异常对象，白球已拦截内部错误。");
+
+  const internalPattern = /Tool\s*Registry|ToolSelector|Intent\s*Lock|intent\s*mismatch|工具与意图不匹配|意图.*不匹配|office\.doc|general\.chat|dev\.code|math\.calculator|run_command|write_text_file|install_skill|wps_tool|被拦截/i;
+  const lines = value.split("\n");
+  const kept = [];
+  let removedInternal = false;
+  for (const line of lines) {
+    if (internalPattern.test(line)) {
+      removedInternal = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  value = kept.join("\n").trim();
+  if (removedInternal) {
+    const prefix = [
+      "我刚才没有把任务路由到合适的执行能力上。",
+      "我会避免把内部路由信息展示给你；请直接补充目标、文件或权限，我会按产品能力继续处理。"
+    ].join("\n");
+    value = value ? `${prefix}\n\n${value}` : prefix;
+  }
+  value = value
+    .replace(/白球\s*Tool\s*Registry[^\n]*/gi, "")
+    .replace(/Intent\s*Analysis:[^\n]*/gi, "")
+    .replace(/当前意图(?:分类|识别|绑定|锁定)[^\n]*(?:office\.doc|general\.chat|dev\.code)[^\n]*/gi, "当前任务需要重新确认执行方式。")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return value || "我已收到，但这次没有生成可用回复。";
 }
 
 function readableToolError(...values) {
@@ -6531,6 +6886,7 @@ function wireIpc() {
   });
   ipcMain.handle("app:apply-online-update", () => applyOnlineUpdate());
   ipcMain.handle("admin:publish-update", (_event, payload) => publishCustomerUpdate(payload));
+  ipcMain.handle("admin:sync-update-server", (_event, payload) => syncCustomerUpdateToRemoteServer(payload));
   ipcMain.handle("admin:start-update-server", () => startLocalUpdateServer());
   ipcMain.handle("admin:open-server", () => openAdminServer());
   ipcMain.handle("dev:logs", (_event, type = "system", limit = 400) => readDeveloperLog(type, limit));
@@ -6689,10 +7045,18 @@ function wireIpc() {
         mainWindow?.webContents.send("session:changed", loadDb());
         return { ok: true, sessionId: session.id, observability: true };
       }
+      const deterministicReply = deterministicBasicReply(originalText, { sessionId: session.id, settings });
+      if (deterministicReply) {
+        appendMessage(session.id, { role: "user", text: originalText });
+        appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(deterministicReply.text), raw: deterministicReply.raw });
+        updateSession(session.id, { status: "done" });
+        mainWindow?.webContents.send("session:changed", loadDb());
+        return { ok: true, sessionId: session.id, deterministicReply: true };
+      }
       const memoryQuestion = ensureMemoryCenter().answerMemoryQuestion(originalText);
       if (memoryQuestion?.answered) {
         appendMessage(session.id, { role: "user", text: originalText });
-        appendMessage(session.id, { role: "assistant", text: memoryQuestion.text, raw: { memoryCenter: true, memoryQuestion: true } });
+        appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(memoryQuestion.text), raw: { memoryCenter: true, memoryQuestion: true } });
         updateSession(session.id, { status: "done" });
         mainWindow?.webContents.send("session:changed", loadDb());
         return { ok: true, sessionId: session.id, memoryCenter: true };
@@ -6700,7 +7064,7 @@ function wireIpc() {
       const contextQuestion = ensureContextManager().answerContextQuestion(originalText);
       if (contextQuestion?.answered) {
         appendMessage(session.id, { role: "user", text: originalText });
-        appendMessage(session.id, { role: "assistant", text: contextQuestion.text, raw: { contextManager: true, contextQuestion: true } });
+        appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(contextQuestion.text), raw: { contextManager: true, contextQuestion: true } });
         updateSession(session.id, { status: "done" });
         mainWindow?.webContents.send("session:changed", loadDb());
         return { ok: true, sessionId: session.id, contextManager: true };
@@ -6724,7 +7088,7 @@ function wireIpc() {
       if (isSkillLearningRequest(originalText)) {
         const skillReply = await learnSkillDirectReply(originalText, { sessionId: session.id });
         appendMessage(session.id, { role: "user", text: originalText });
-        appendMessage(session.id, { role: "assistant", text: skillReply.text, raw: { skillCenter: true, action: "learn", result: skillReply.result } });
+        appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(skillReply.text), raw: { skillCenter: true, action: "learn", result: skillReply.result } });
         updateSession(session.id, { status: skillReply.ok ? "done" : "failed" });
         mainWindow?.webContents.send("session:changed", loadDb());
         return { ok: skillReply.ok, sessionId: session.id, skillCenter: true };
@@ -6903,6 +7267,12 @@ function wireIpc() {
   });
   ipcMain.handle("system:open-path", async (_event, target = "") => {
     return executeOpenPath({ path: target });
+  });
+  ipcMain.handle("system:open-attachment", async (_event, attachment = {}) => {
+    return executeOpenAttachment(attachment);
+  });
+  ipcMain.handle("system:preview-attachment", async (_event, attachment = {}) => {
+    return executePreviewAttachment(attachment);
   });
 }
 

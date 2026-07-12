@@ -92,9 +92,51 @@ function main() {
 
   {
     const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+    assert(mainSource.includes("function isSpreadsheetAbilityQuestion"), "spreadsheet ability questions should be detected before model routing");
+    assert(mainSource.includes("function spreadsheetAbilityReply"), "spreadsheet ability questions need deterministic replies");
+    assert(mainSource.includes("可以，我能分析 Excel / CSV 表格"), "spreadsheet ability reply should clearly say Excel/CSV can be analyzed");
+    assert(mainSource.includes("不会在没读到图片内容时假装已经看过"), "image ability reply should avoid fake vision claims");
+    assert(mainSource.includes("function isImageAbilityQuestion"), "image ability questions should be detected before model routing");
+    assert(mainSource.includes("function imageAbilityReply"), "image ability questions need deterministic replies");
+    cases.push("deterministic_file_ability_replies_guard");
+  }
+
+  {
+    const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+    const replyStart = mainSource.indexOf("async function productLayerConversationReply");
+    const identityIndex = mainSource.indexOf("你叫什么", replyStart);
+    const capabilityIndex = mainSource.indexOf("isCapabilityListQuestion(text)", replyStart);
+    const memoryIndex = mainSource.indexOf("answerMemoryQuestion(text)", replyStart);
+    const runtimeIndex = mainSource.indexOf("productLayerChatRuntime", replyStart);
+    assert(replyStart >= 0 && identityIndex > replyStart, "conversation reply should have deterministic identity handling");
+    assert(capabilityIndex > replyStart, "conversation reply should have deterministic capability handling");
+    assert(memoryIndex > identityIndex, "identity questions must not be intercepted by memory/context");
+    assert(memoryIndex > capabilityIndex, "capability questions must not be intercepted by memory/context");
+    assert(runtimeIndex > memoryIndex, "model runtime should remain the final fallback");
+    cases.push("deterministic_basic_qa_route_order_guard");
+  }
+
+  {
+    const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+    const chatStart = mainSource.indexOf('ipcMain.handle("chat:send"');
+    const deterministicIndex = mainSource.indexOf("deterministicBasicReply(originalText", chatStart);
+    const memoryIndex = mainSource.indexOf("answerMemoryQuestion(originalText)", chatStart);
+    const skillIndex = mainSource.indexOf("isSkillLearningRequest(originalText)", chatStart);
+    assert(chatStart >= 0 && deterministicIndex > chatStart, "legacy chat chain should use deterministic basic QA");
+    assert(memoryIndex > deterministicIndex, "legacy chat memory should not intercept basic QA");
+    assert(skillIndex > deterministicIndex, "legacy chat skill handling should remain after deterministic list/capability handling");
+    assert(mainSource.includes("sanitizeUserFacingReply(deterministicReply.text)"), "legacy deterministic replies should be sanitized");
+    cases.push("legacy_chat_deterministic_qa_guard");
+  }
+
+  {
+    const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
     assert(mainSource.includes("function summarizeSpreadsheetForUser"), "spreadsheet replies should have a compact user-facing summary");
     assert(mainSource.includes("summarizeSpreadsheetForUser(item.spreadsheetAnalysis)"), "spreadsheet runtime should show compact analysis instead of raw parser text");
     assert(!mainSource.includes("attachmentText(item).slice(0, 16000)"), "spreadsheet runtime must not dump long raw analysis into chat");
+    assert(mainSource.includes("const visibleSheets = sheets.slice(0, 5)"), "spreadsheet chat summary should only show a few sheets by default");
+    assert(mainSource.includes("compactList(sheet.headers || [], 5)"), "spreadsheet chat summary should limit displayed fields");
+    assert(mainSource.includes("这是较大的工作簿，默认只展示摘要"), "large workbook replies should explain compact mode");
     cases.push("spreadsheet_reply_compact_summary_guard");
   }
 
@@ -127,6 +169,17 @@ function main() {
   }
 
   {
+    const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+    assert(mainSource.includes("function isOnlineSkillLearningRequest"), "online skill request detection should be explicit");
+    assert(mainSource.includes("function extractSkillSourceFromMessage"), "skill learning should extract URL or topic source");
+    assert(mainSource.includes("function extractRequestedSkillTopic"), "skill learning should extract a usable skill topic");
+    assert(mainSource.includes("await learnProfessionalSkill"), "generic skill learning should create a reusable self-learning skill");
+    assert(mainSource.includes("buildLearnedSkill({"), "skill learning should generate a structured skill document");
+    assert(mainSource.includes("saveCustomSkill(skill)"), "learned skill should be persisted as a custom skill file");
+    cases.push("professional_skill_learning_guard");
+  }
+
+  {
     const rendererSource = fs.readFileSync(path.join(__dirname, "..", "renderer", "app.js"), "utf8");
     const productSubmitBlocks = rendererSource.match(/return api\.productSubmitTask\(\{[\s\S]*?\n  \}\);/g) || [];
     const runtimeBlocks = productSubmitBlocks.filter((block) => /desktop\.chat_runtime|desktop\.chat/.test(block));
@@ -147,6 +200,58 @@ function main() {
     assert(rendererSource.includes('target="_blank"'), "markdown links should be clickable");
     assert(stylesSource.includes(".rendered .markdown-table-wrap"), "markdown tables need stable chat styling");
     cases.push("markdown_rendering_table_guard");
+  }
+
+  {
+    const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+    const rendererSource = fs.readFileSync(path.join(__dirname, "..", "renderer", "app.js"), "utf8");
+    assert(mainSource.includes("function sanitizeUserFacingReply"), "backend replies need a user-visible sanitizer");
+    assert(rendererSource.includes("function sanitizeVisibleReply"), "renderer needs a final user-visible sanitizer");
+    assert(mainSource.includes("ToolSelector|Intent\\s*Lock|intent\\s*mismatch"), "sanitizer should catch internal routing terms");
+    assert(mainSource.includes("任务返回了异常对象"), "sanitizer should suppress [object Object]");
+    assert(rendererSource.includes("任务返回了异常对象"), "renderer should suppress [object Object]");
+    cases.push("user_visible_reply_sanitizer_guard");
+  }
+
+  {
+    const mainSource = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+    assert(mainSource.includes("onlineRequested"), "online skill requests should be handled explicitly");
+    assert(mainSource.includes("本次没有实际联网检索来源"), "online skill learning must not claim web learning without sources");
+    assert(mainSource.includes("技能已登记为本地技能档案"), "generic skill learning should describe recorded local capability");
+    cases.push("skill_learning_truthfulness_guard");
+  }
+
+  {
+    const rendererSource = fs.readFileSync(path.join(__dirname, "..", "renderer", "app.js"), "utf8");
+    assert(rendererSource.includes("function buildTaskThinkingCard"), "task requests should show a concise thinking card");
+    assert(rendererSource.includes("我理解为"), "thinking card should explain interpreted goal");
+    assert(rendererSource.includes("执行方式"), "thinking card should explain execution approach");
+    assert(rendererSource.includes("function persistTaskExchange"), "user, thinking card, and result should persist together");
+    assert(rendererSource.includes("pushMonitorEvent(\"STEP\""), "progress log should be driven by real stage changes");
+    assert(!rendererSource.includes("[EXEC] waiting for tool result"), "monitor should not use fake execution heartbeat logs");
+    assert(!rendererSource.includes("[PLAN] build execution steps"), "monitor should not simulate planning logs");
+    cases.push("real_progress_and_thinking_card_guard");
+  }
+
+  {
+    const rendererSource = fs.readFileSync(path.join(__dirname, "..", "renderer", "app.js"), "utf8");
+    assert(rendererSource.includes("function startProductTaskMonitor"), "long product tasks should be monitored while running");
+    assert(rendererSource.includes("api.productQueryTask(taskId)"), "task monitor should poll Product SDK task state");
+    assert(rendererSource.includes("updateProductTaskProgress(task"), "task monitor should update UI progress from task experience");
+    assert(rendererSource.includes("const stopTaskMonitor = startProductTaskMonitor"), "submit flow should start runtime task monitoring");
+    assert(rendererSource.includes("stopTaskMonitor();"), "submit flow should stop task monitoring after completion");
+    cases.push("product_task_runtime_monitor_guard");
+  }
+
+  {
+    const rendererSource = fs.readFileSync(path.join(__dirname, "..", "renderer", "app.js"), "utf8");
+    assert(rendererSource.includes("async function submitMonitoredProductTask"), "shortcut paths need a shared monitored submit helper");
+    assert(rendererSource.includes("createdTask = await api.productCreateTask(base)"), "monitored submit should create a Product SDK task before execution");
+    assert(rendererSource.includes("templateId: \"desktop.chat_runtime\""), "skill and attachment runtime paths should remain Product SDK runtime tasks");
+    assert(rendererSource.includes("skillLearning: true"), "skill learning path should use monitored Product SDK runtime");
+    assert(rendererSource.includes("hasAttachments: true"), "attachment analysis path should use monitored Product SDK runtime");
+    assert(rendererSource.includes("conversationOnly: true"), "calculator and chat shortcut paths should use monitored Product SDK conversation tasks");
+    cases.push("shortcut_paths_monitored_task_guard");
   }
 
   console.log(JSON.stringify({ ok: true, cases }, null, 2));
