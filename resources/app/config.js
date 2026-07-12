@@ -18,6 +18,12 @@ const CLOUD_MODEL_DEFAULTS = {
   }
 };
 
+const DEFAULT_RELAY_PROVIDER = {
+  name: "默认中转站",
+  baseURL: "https://sub2.hhlai.xyz/v1",
+  model: "gpt-5.5"
+};
+
 function readJson(filePath) {
   if (!fs.existsSync(filePath)) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -49,5 +55,5 @@ function getOpenClawConfig() {
   };
 }
 
-module.exports = { getOpenClawConfig, CLOUD_MODEL_DEFAULTS };
+module.exports = { getOpenClawConfig, CLOUD_MODEL_DEFAULTS, DEFAULT_RELAY_PROVIDER };
 

@@ -1,4 +1,7 @@
-﻿const PRESET_PROVIDERS = {
+﻿const { DEFAULT_RELAY_PROVIDER } = require("../config");
+
+const PRESET_PROVIDERS = {
+  relay: { ...DEFAULT_RELAY_PROVIDER, apiStyle: "openai", requiresApiKey: true },
   deepseek: { name: "供应商2", baseURL: "https://codekey.buzz/keys", model: "deepseek-chat", apiStyle: "openai", requiresApiKey: true },
   openai: { name: "GPT", baseURL: "https://api.openai.com/v1", model: "gpt-4.1", apiStyle: "openai", requiresApiKey: true },
   kimi: { name: "Kimi", baseURL: "https://api.moonshot.cn/v1", model: "moonshot-v1-128k", apiStyle: "openai", requiresApiKey: true },

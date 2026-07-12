@@ -8,7 +8,7 @@ const { execFileSync, spawn } = require("node:child_process");
 const { createHash, randomUUID } = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell, clipboard, dialog } = require("electron");
-const { getOpenClawConfig, CLOUD_MODEL_DEFAULTS } = require("./config");
+const { getOpenClawConfig, CLOUD_MODEL_DEFAULTS, DEFAULT_RELAY_PROVIDER } = require("./config");
 const { GatewayClient } = require("./gateway-client");
 const { ToolRegistry } = require("./tool-registry");
 const { loadTools } = require("./tool-loader");
@@ -429,7 +429,7 @@ function defaultDb() {
     messages: {},
     queue: [],
     settings: {
-      defaultProvider: "deepseek",
+      defaultProvider: "relay",
       reasoning: "minimal",
       appearance: {
         skin: "custom",
@@ -504,8 +504,9 @@ function defaultDb() {
         updateError: ""
       },
       providers: {
+        relay: { ...DEFAULT_RELAY_PROVIDER, enabled: true, apiKey: "" },
         openclaw: { name: "OpenClaw", enabled: false, baseURL: "", apiKey: "", model: "gateway" },
-        deepseek: { name: CLOUD_MODEL_DEFAULTS.deepseek.name, enabled: true, baseURL: CLOUD_MODEL_DEFAULTS.deepseek.baseURL, apiKey: "", model: CLOUD_MODEL_DEFAULTS.deepseek.model },
+        deepseek: { name: CLOUD_MODEL_DEFAULTS.deepseek.name, enabled: false, baseURL: CLOUD_MODEL_DEFAULTS.deepseek.baseURL, apiKey: "", model: CLOUD_MODEL_DEFAULTS.deepseek.model },
         openai: { ...PRESET_PROVIDERS.openai, enabled: false, apiKey: "" },
         kimi: { ...PRESET_PROVIDERS.kimi, enabled: false, apiKey: "" },
         anthropic: { ...PRESET_PROVIDERS.anthropic, enabled: false, apiKey: "" },
@@ -530,7 +531,7 @@ function loadDb() {
   db.messages ||= {};
   db.queue ||= [];
   db.settings ||= base.settings;
-  db.settings.defaultProvider ||= "deepseek";
+  db.settings.defaultProvider ||= "relay";
   db.settings.reasoning ||= "minimal";
   db.settings.appearance = { ...base.settings.appearance, ...(db.settings.appearance || {}) };
   db.settings.license = { ...base.settings.license, ...(db.settings.license || {}) };
