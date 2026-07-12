@@ -21,6 +21,7 @@
       </div>
       <div class="title-actions">
         <span id="trialStatus" class="trial-status">试用检测中</span>
+        <button id="taskBoardToggleBtn" class="task-board-toggle-btn" title="打开或收起任务看板">看板</button>
         <button id="modelBtn" title="模型">模型</button>
         <button id="skinBtn" title="主题">主题</button>
         <button id="inviteBtn" title="购买套餐">购买套餐</button>
@@ -59,33 +60,50 @@
 
     <div id="licenseOverlay" class="license-overlay" hidden>
       <div class="license-panel">
-        <strong>您的免费试用已结束</strong>
-        <p>选择套餐购买，或输入管理员发放的兑换码激活白球 AI。</p>
-        <div class="plan-grid license-plan-grid">
-          <button type="button" class="plan-card" data-buy-plan="monthly_first">
-            <span>月卡尝鲜</span>
-            <b>¥19.9</b>
-            <small>首次付费折扣，原价 ¥49.9/月</small>
-          </button>
-          <button type="button" class="plan-card" data-buy-plan="monthly">
+        <div class="member-pay-title">
+          <span>您的免费试用已结束</span>
+          <strong>开通会员继续使用白球 AI</strong>
+          <p>选择套餐购买，或输入管理员发放的兑换码激活。</p>
+        </div>
+        <section class="member-redeem-card">
+          <div>
+            <strong>兑换码激活</strong>
+            <p>管理员发放的永久兑换码，可直接在这里验证。</p>
+          </div>
+          <div class="member-redeem-row">
+            <input id="licenseCodeInput" placeholder="BQ-XXXX-XXXX-XXXX" maxlength="19">
+            <button id="licenseActivateBtn" type="button">验证确认</button>
+          </div>
+        </section>
+        <div class="plan-grid license-plan-grid member-plan-grid">
+          <button type="button" class="plan-card member-plan-card" data-buy-plan="monthly">
+            <em>新手体验</em>
             <span>月卡</span>
-            <b>¥49.9</b>
-            <small>按月使用，适合短期任务</small>
+            <small>原价 ¥49.9</small>
+            <b>折扣价 ¥19.9</b>
+            <i>适用于新手体验</i>
           </button>
-          <button type="button" class="plan-card" data-buy-plan="yearly">
+          <button type="button" class="plan-card member-plan-card" data-buy-plan="six_months">
+            <em>推荐长期使用</em>
+            <span>半年卡</span>
+            <small>原价 ¥99</small>
+            <b>折扣价 ¥88</b>
+            <i>适用于长期使用</i>
+          </button>
+          <button type="button" class="plan-card member-plan-card" data-buy-plan="yearly">
+            <em>重度使用</em>
             <span>年卡</span>
-            <b>¥199</b>
-            <small>全年使用，性价比最高</small>
+            <small>原价 ¥180</small>
+            <b>折扣价 ¥168</b>
+            <i>适用于重度使用</i>
           </button>
         </div>
-        <input id="licenseCodeInput" placeholder="兑换码 XXXX-XXXX-XXXX-XXXX" maxlength="19">
         <div id="licenseCustomerFields" class="license-customer-fields" hidden>
           <input id="licenseNameInput" placeholder="姓名">
           <input id="licensePhoneInput" placeholder="手机号">
           <p class="license-privacy">仅用于购买记录、售后和设备激活核验，不会用于无关用途。</p>
         </div>
         <div class="license-actions">
-          <button id="licenseActivateBtn" type="button">下一步</button>
           <button id="licenseBuyBtn" type="button">提交购买</button>
         </div>
         <div id="licenseOverlayStatus" class="license-status"></div>
@@ -251,6 +269,8 @@
               <option value="custom">AI OS</option>
               <option value="black">经典黑</option>
               <option value="white">经典白</option>
+              <option value="mecha">磁暴装甲</option>
+              <option value="wasteland">余烬荒原</option>
             </select>
           </label>
           <label class="skin-image-picker">
@@ -286,12 +306,9 @@
         <div class="settings-card">
           <strong>版本更新</strong>
           <div class="stat"><span>当前版本</span><b id="appVersion">0.2.0</b></div>
-          <label>
-            <span>更新服务器</span>
-            <input id="updateManifestInput" placeholder="http://localhost:3000">
-          </label>
-          <button id="updateCheckBtn" type="button">检查最新版本</button>
-          <button id="applyOnlineUpdateBtn" type="button">下载在线更新</button>
+          <div class="update-server-status"><span>更新服务器</span><b>白球官方线路</b><i>自动连接</i></div>
+          <button id="updateCheckBtn" type="button">检查服务器更新</button>
+          <button id="applyOnlineUpdateBtn" type="button" hidden>确认更新</button>
           <button id="syncOpenClawBtn" type="button" hidden>同步 OpenClaw 最新功能</button>
           <label>
             <span>开机自启动</span>
@@ -351,21 +368,27 @@
       <section class="settings-page" data-settings-page="invite">
         <div class="settings-card">
           <strong>购买套餐 / 兑换码</strong>
-          <div class="plan-grid">
-            <button type="button" class="plan-card" data-buy-plan="monthly_first">
-              <span>月卡尝鲜</span>
-              <b>¥19.9</b>
-              <small>首次付费折扣，原价 ¥49.9/月</small>
-            </button>
-            <button type="button" class="plan-card" data-buy-plan="monthly">
+          <div class="plan-grid member-plan-grid">
+            <button type="button" class="plan-card member-plan-card" data-buy-plan="monthly">
+              <em>新手体验</em>
               <span>月卡</span>
-              <b>¥49.9</b>
-              <small>适合短期使用</small>
+              <small>原价 ¥49.9</small>
+              <b>折扣价 ¥19.9</b>
+              <i>适用于新手体验</i>
             </button>
-            <button type="button" class="plan-card" data-buy-plan="yearly">
+            <button type="button" class="plan-card member-plan-card" data-buy-plan="six_months">
+              <em>推荐长期使用</em>
+              <span>半年卡</span>
+              <small>原价 ¥99</small>
+              <b>折扣价 ¥88</b>
+              <i>适用于长期使用</i>
+            </button>
+            <button type="button" class="plan-card member-plan-card" data-buy-plan="yearly">
+              <em>重度使用</em>
               <span>年卡</span>
-              <b>¥199</b>
-              <small>全年使用</small>
+              <small>原价 ¥180</small>
+              <b>折扣价 ¥168</b>
+              <i>适用于重度使用</i>
             </button>
           </div>
           <label>

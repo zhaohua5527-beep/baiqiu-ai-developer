@@ -5048,7 +5048,7 @@ async function directProviderChat(settings, text, attachments, sessionId = "", o
     const assistantMessage = payload.choices?.[0]?.message || {};
     const toolCalls = Array.isArray(assistantMessage.tool_calls) ? assistantMessage.tool_calls : [];
     if (!toolCalls.length) {
-      const rawText = contentText(assistantMessage.content ?? payload.output_text ?? "");
+      const rawText = contentText(assistantMessage.content ?? assistantMessage.reasoning_content ?? payload.output_text ?? "");
       const extracted = extractBaiqiuActions(rawText);
       if (extracted.actions.length) {
         logAgentLoop(debugRunId, loopNo, {
@@ -5114,7 +5114,7 @@ async function directProviderChat(settings, text, attachments, sessionId = "", o
 
     logAgentLoop(debugRunId, loopNo, {
       llm: {
-        content: assistantMessage.content || "",
+        content: assistantMessage.content || assistantMessage.reasoning_content || "",
         tool_calls: toolCalls
       }
     });
@@ -5270,7 +5270,7 @@ function shouldStopAfterWebSearch(executed = []) {
 }
 
 function assistantVisibleText(message = {}, payload = {}) {
-  const content = message.content ?? payload.output_text ?? "";
+  const content = message.content ?? message.reasoning_content ?? payload.output_text ?? "";
   return safeAssistantVisibleText(contentText(content).replace(/^\uFEFF/, "").trim());
 }
 
@@ -5605,6 +5605,18 @@ function attachmentDataUrlBuffer(dataUrl = "") {
 }
 
 async function executeOpenAttachment(attachment = {}) {
+  if (/\.(xlsx|xls|csv)$/i.test(String(attachment.name || attachment.path || "")) && XLSX) {
+    const rows = spreadsheetPreviewRows(attachment, 5000, 80);
+    if (rows.length) {
+      const dir = path.join(app.getPath("temp"), "BaiqiuAI", "previews");
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `table-${Date.now()}.html`);
+      fs.writeFileSync(file, styledSpreadsheetHtml(attachment, rows), "utf8");
+      const error = await shell.openPath(file);
+      if (error) throw new Error(`打开表格美化视图失败：${error}`);
+      return { ok: true, path: file, kind: "styled-spreadsheet" };
+    }
+  }
   const sourcePath = sanitizeText(attachment.path || attachment.originalPath || attachment.filePath || "");
   const url = sanitizeText(attachment.url || "");
   if (sourcePath && fs.existsSync(sourcePath)) {
@@ -5646,6 +5658,22 @@ function attachmentBuffer(attachment = {}) {
   if (dataBuffer) return { buffer: dataBuffer, path: "" };
   if (attachment.textContent) return { buffer: Buffer.from(String(attachment.textContent), "utf8"), path: "" };
   return { buffer: null, path: "" };
+}
+
+function spreadsheetPreviewRows(attachment = {}, maxRows = 120, maxColumns = 24) {
+  if (!XLSX) return [];
+  const { buffer } = attachmentBuffer(attachment);
+  if (!buffer) return [];
+  const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  if (!sheet) return [];
+  return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false }).slice(0, maxRows).map((row) => row.slice(0, maxColumns).map((cell) => String(cell ?? "")));
+}
+
+function styledSpreadsheetHtml(attachment = {}, rows = []) {
+  const escape = (value) => String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;");
+  const table = rows.map((row, index) => `<tr>${row.map((cell) => index ? `<td>${escape(cell)}</td>` : `<th>${escape(cell)}</th>`).join("")}</tr>`).join("");
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escape(attachment.name || "白球表格")}</title><style>body{margin:0;background:#0a0f15;color:#e8f0f7;font:14px system-ui,"Microsoft YaHei"}.top{position:sticky;top:0;z-index:3;padding:18px 24px;background:#101820;border-bottom:1px solid #263748}.top h1{margin:0;font-size:18px}.top p{margin:6px 0 0;color:#8fa5b8}.wrap{padding:20px;overflow:auto}table{width:100%;min-width:760px;border-collapse:separate;border-spacing:0;background:#111923;border:1px solid #293949}th,td{padding:11px 13px;border-right:1px solid #243443;border-bottom:1px solid #243443;text-align:left;white-space:nowrap}th{position:sticky;top:80px;background:#173044;color:#82ddff}tr:nth-child(even) td{background:#0e1720}tr:hover td{background:#152536}</style></head><body><header class="top"><h1>${escape(attachment.name || "白球表格")}</h1><p>${Math.max(0, rows.length - 1)} 行 · 白球美化视图</p></header><main class="wrap"><table>${table}</table></main></body></html>`;
 }
 
 function previewMimeFromName(name = "", fallback = "") {
@@ -7274,6 +7302,7 @@ function wireIpc() {
   ipcMain.handle("system:preview-attachment", async (_event, attachment = {}) => {
     return executePreviewAttachment(attachment);
   });
+  ipcMain.handle("system:spreadsheet-preview", (_event, attachment = {}) => ({ ok: true, rows: spreadsheetPreviewRows(attachment, 80, 18) }));
 }
 
 app.whenReady().then(() => {

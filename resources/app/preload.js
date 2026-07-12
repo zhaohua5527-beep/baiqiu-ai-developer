@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld("heiqiu", {
   openPath: (target) => ipcRenderer.invoke("system:open-path", target),
   openAttachment: (attachment) => ipcRenderer.invoke("system:open-attachment", attachment),
   previewAttachment: (attachment) => ipcRenderer.invoke("system:preview-attachment", attachment),
+  spreadsheetPreview: (attachment) => ipcRenderer.invoke("system:spreadsheet-preview", attachment),
   onGatewayStatus: (handler) => ipcRenderer.on("gateway:status", (_event, status) => handler(status)),
   onGatewayEvent: (handler) => ipcRenderer.on("gateway:event", (_event, frame) => handler(frame)),
   onUpdateDownloadProgress: (handler) => ipcRenderer.on("update:download-progress", (_event, progress) => handler(progress)),

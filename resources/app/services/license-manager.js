@@ -108,37 +108,56 @@ class LicenseManager {
   }
 
   async verifyCode(code, customer = {}) {
-    const normalized = this._normalizeCode(code);
-    if (!this._isCodeFormatValid(normalized)) {
-      return { ok: false, success: false, message: "卡密格式无效" };
+    const redeemCode = this._normalizeRedeemCode(code);
+    const legacyCode = this._normalizeCode(code);
+    const isLegacyCode = this._isCodeFormatValid(legacyCode);
+    const normalized = redeemCode || legacyCode;
+    if (!redeemCode && !isLegacyCode) {
+      return { ok: false, success: false, message: "兑换码格式无效" };
     }
 
-    const online = await this.verifyCodeOnline(normalized, this.deviceId);
+    const online = await this.verifyCodeOnline(normalized, this.deviceId, customer);
     if (!online.success) {
-      return { ok: false, success: false, code: normalized, message: online.message || "卡密联网激活失败" };
+      return { ok: false, success: false, code: normalized, message: online.message || "兑换码联网激活失败" };
     }
 
-    const expiresAt = online.expiresAt || "2099-12-31T23:59:59Z";
+    const license = online.license || online;
+    const expiresAt = license.lifetime ? "2099-12-31T23:59:59Z" : (license.expiresAt || online.expiresAt || "2099-12-31T23:59:59Z");
     const serverSignature = online.signature || this._serverSignature(normalized, this.deviceId, expiresAt);
     if (!this._verifyServerSignature(normalized, this.deviceId, expiresAt, serverSignature)) {
       return { ok: false, success: false, code: normalized, message: "服务器签名校验失败" };
     }
 
-    this._activateLicense(normalized, expiresAt, serverSignature, "online", customer);
+    const activationCustomer = {
+      name: customer.name || customer.customer || license.name || license.customer || "",
+      phone: customer.phone || license.phone || ""
+    };
+    this._activateLicense(normalized, expiresAt, serverSignature, online.endpoint || "online", activationCustomer, {
+      plan: license.plan || "",
+      planName: license.planName || "",
+      lifetime: Boolean(license.lifetime)
+    });
 
     return {
       ok: true,
       success: true,
       code: normalized,
       expiresAt,
-      message: online.message || "激活成功，当前设备已永久解锁。"
+      plan: license.plan || "",
+      planName: license.planName || "",
+      lifetime: Boolean(license.lifetime),
+      message: online.message || "激活成功，当前设备已解锁。"
     };
   }
 
   activateOfflineInvite(code, expiresAt = "2099-12-31T23:59:59Z", customer = {}) {
     const normalized = String(code || "").trim().toUpperCase();
     const serverSignature = this._serverSignature(normalized, this.deviceId, expiresAt);
-    this._activateLicense(normalized, expiresAt, serverSignature, "offline-invite", customer);
+    this._activateLicense(normalized, expiresAt, serverSignature, "offline-invite", customer, {
+      plan: "offline",
+      planName: "限时会员",
+      lifetime: !expiresAt || /^2099-/.test(String(expiresAt))
+    });
     return {
       ok: true,
       success: true,
@@ -148,20 +167,31 @@ class LicenseManager {
     };
   }
 
-  verifyCodeOnline(code, deviceId = this.deviceId) {
+  async verifyCodeOnline(code, deviceId = this.deviceId, customer = {}) {
     const body = {
       code,
       deviceId,
+      customer: customer.customer || customer.name || "",
+      name: customer.name || customer.customer || "",
+      phone: customer.phone || "",
       timestamp: Date.now()
     };
-    return this._requestJson("POST", "/api/license/activate", body);
+    const redeem = await this._requestJson("POST", "/api/redeem", body);
+    if (redeem.ok || redeem.success) {
+      return { ...redeem, success: true, endpoint: "redeem" };
+    }
+    if (redeem.statusCode && redeem.statusCode !== 404) {
+      return redeem;
+    }
+    const legacy = await this._requestJson("POST", "/api/license/activate", body);
+    return legacy.ok && !legacy.success ? { ...legacy, success: true, endpoint: "legacy" } : { ...legacy, endpoint: "legacy" };
   }
 
-  _activateLicense(code, expiresAt, serverSignature, activationMode, customer = {}) {
+  _activateLicense(code, expiresAt, serverSignature, activationMode, customer = {}, membership = {}) {
     const db = this._readDb();
     const license = this._ensureLicense(db);
     license.state = "activated";
-    license.type = "permanent";
+    license.type = membership.lifetime ? "permanent" : "timed";
     license.unlocked = true;
     license.locked = false;
     license.lockReason = "";
@@ -172,6 +202,9 @@ class LicenseManager {
     license.deviceIdEncrypted = this._encryptField(this.deviceId);
     license.serverSignature = serverSignature;
     license.activationMode = activationMode || "online";
+    license.plan = String(membership.plan || "");
+    license.planName = String(membership.planName || (membership.lifetime ? "永久会员" : "限时会员"));
+    license.lifetime = Boolean(membership.lifetime);
     license.customer = {
       name: String(customer.name || "").trim(),
       phone: String(customer.phone || "").trim()
@@ -306,12 +339,12 @@ class LicenseManager {
           try {
             const parsed = JSON.parse(data || "{}");
             if (res.statusCode >= 400) {
-              resolve({ success: false, message: parsed.message || `激活服务器返回 ${res.statusCode}` });
+              resolve({ ...parsed, success: false, statusCode: res.statusCode, message: parsed.message || `激活服务器返回 ${res.statusCode}` });
             } else {
-              resolve(parsed);
+              resolve({ ...parsed, statusCode: res.statusCode });
             }
           } catch {
-            resolve({ success: false, message: "激活服务器响应不是有效 JSON" });
+            resolve({ success: false, statusCode: res.statusCode, message: "激活服务器响应不是有效 JSON" });
           }
         });
       });
@@ -325,6 +358,8 @@ class LicenseManager {
   _publicStatus(license) {
     const used = Math.max(0, Number(license.trialUsedSeconds || 0));
     const remaining = Math.max(0, this.trialLimit - used);
+    const expiresAtMs = Date.parse(license.expiresAt || "");
+    const lifetime = Boolean(license.lifetime || /^2099-/.test(String(license.expiresAt || "")));
     return {
       state: license.unlocked ? "activated" : license.locked ? "expired" : "trial",
       unlocked: Boolean(license.unlocked),
@@ -336,6 +371,10 @@ class LicenseManager {
       shouldWarn: !license.unlocked && remaining > 0 && remaining <= this.trialWarnAt,
       inviteCode: license.inviteCode || "",
       expiresAt: license.expiresAt || "",
+      plan: license.plan || "",
+      planName: license.planName || (lifetime ? "永久会员" : "限时会员"),
+      lifetime,
+      membershipRemainingSeconds: license.unlocked && !lifetime && Number.isFinite(expiresAtMs) ? Math.max(0, Math.floor((expiresAtMs - Date.now()) / 1000)) : 0,
       deviceId: `${this.deviceId.slice(0, 8)}...`,
       message: license.lockReason || ""
     };
@@ -418,6 +457,13 @@ class LicenseManager {
 
   _normalizeCode(code) {
     return String(code || "").toUpperCase().replace(/[^23456789ABCDEFGHJKLMNPQRSTUVWXYZ]/g, "").replace(/(.{4})(?=.)/g, "$1-").slice(0, 19);
+  }
+
+  _normalizeRedeemCode(code) {
+    const compact = String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const match = compact.match(/^BQ([A-Z0-9]{12})$/);
+    if (!match) return "";
+    return `BQ-${match[1].slice(0, 4)}-${match[1].slice(4, 8)}-${match[1].slice(8, 12)}`;
   }
 
   _isCodeFormatValid(code) {

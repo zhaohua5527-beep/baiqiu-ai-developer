@@ -22,13 +22,15 @@ const state = {
   forceScrollBottom: false,
   lastRenderedSessionId: null,
   taskBoardTab: "overview",
-  taskBoardFocusId: ""
+  taskBoardFocusId: "",
+  taskBoardPreviewRows: {}
 };
 let pendingConfirmations = {};
 
 const $ = (id) => document.getElementById(id);
 const gatewayStatus = $("gatewayStatus");
 const trialStatus = $("trialStatus");
+const taskBoardToggleBtn = $("taskBoardToggleBtn");
 const licenseOverlay = $("licenseOverlay");
 const licenseCodeInput = $("licenseCodeInput");
 const licenseActivateBtn = $("licenseActivateBtn");
@@ -190,7 +192,18 @@ const SKIN_PRESETS = {
     backgroundColor: "#07090d",
     panelColor: "#111722",
     fontSize: 16
+  },
+  mecha: {
+    textColor: "#e8f7ff", accentColor: "#31d6ff", backgroundColor: "#070b0f", panelColor: "#101820", fontSize: 16
+  },
+  wasteland: {
+    textColor: "#f2ead8", accentColor: "#d6b24a", backgroundColor: "#11100d", panelColor: "#1b1a16", fontSize: 16
   }
+};
+
+const MODEL_VERSION_OPTIONS = {
+  openai: [["gpt-5.6-sol", "GPT 5.6 Sol"], ["gpt-5.6-terra", "GPT 5.6 Terra"], ["gpt-5.6-luna", "GPT 5.6 Luna"], ["gpt-4.1", "GPT 4.1 兼容"]],
+  deepseek: [["deepseek-v4-pro", "DeepSeek V4 Pro"], ["deepseek-v4-flash", "DeepSeek V4 Flash"], ["deepseek-chat", "DeepSeek Chat 兼容"]]
 };
 
 function escapeHtml(value) {
@@ -603,13 +616,13 @@ function formatLicenseCode(value) {
 }
 
 const PLAN_CATALOG = {
-  monthly_first: { label: "月卡尝鲜", amount: "19.9", description: "首次付费折扣，原价 49.9/月" },
-  monthly: { label: "月卡", amount: "49.9", description: "月卡基础价" },
-  yearly: { label: "年卡", amount: "199", description: "年卡基础价" }
+  monthly: { label: "月卡", amount: "19.9", baseAmount: "49.9", description: "月卡首充折扣价，原价 49.9" },
+  six_months: { label: "半年卡", amount: "88", baseAmount: "99", description: "半年卡折扣价，原价 99" },
+  yearly: { label: "年卡", amount: "168", baseAmount: "180", description: "年卡折扣价，原价 180" }
 };
 
-async function createPlanOrder(planId = "monthly_first", source = "client") {
-  const plan = PLAN_CATALOG[planId] || PLAN_CATALOG.monthly_first;
+async function createPlanOrder(planId = "monthly", source = "client") {
+  const plan = PLAN_CATALOG[planId] || PLAN_CATALOG.monthly;
   const customer = {
     name: inviteNameInput?.value?.trim() || licenseNameInput?.value?.trim() || "客户",
     phone: invitePhoneInput?.value?.trim() || licensePhoneInput?.value?.trim() || ""
@@ -635,9 +648,12 @@ function renderLicenseStatus(status) {
     if (inviteStatus) inviteStatus.textContent = "开发工具面板已解锁。";
     return;
   }
+  const membershipText = status.unlocked
+    ? (status.lifetime ? "永久会员" : `${status.planName || "限时会员"} · 剩余 ${Math.max(0, Math.ceil(Number(status.membershipRemainingSeconds || 0) / 86400))} 天`)
+    : "";
   if (trialStatus) {
     trialStatus.textContent = status.unlocked
-      ? "已激活"
+      ? membershipText
       : status.locked
         ? "试用已结束"
         : `试用剩余：${formatTrialTime(status.trialRemainingSeconds)} | 购买套餐解锁`;
@@ -645,7 +661,7 @@ function renderLicenseStatus(status) {
   if (licenseOverlay) licenseOverlay.hidden = Boolean(status.unlocked || !status.locked);
   if (inviteStatus) {
     inviteStatus.textContent = status.unlocked
-      ? "已激活：当前设备可使用白球 AI。"
+      ? (status.lifetime ? "已激活：永久会员。" : `已激活：${status.planName || "限时会员"}，剩余 ${Math.max(0, Math.ceil(Number(status.membershipRemainingSeconds || 0) / 86400))} 天。`)
       : status.locked
         ? "试用已结束：请选择套餐购买，或输入兑换码激活。"
         : `试用中：剩余 ${formatTrialTime(status.trialRemainingSeconds)}。`;
@@ -1108,12 +1124,8 @@ function renderAccessMode() {
   const mode = currentAccessMode();
   const active = ACCESS_MODES[mode] || ACCESS_MODES.ask;
   accessModeBtn.innerHTML = `
-    <span class="access-mode-icon" aria-hidden="true"></span>
-    <span class="access-mode-copy">
-      <span class="access-mode-label">权限</span>
-      <span class="access-mode-current">${active.short || active.label}</span>
-    </span>
-    <span class="access-mode-caret">⌄</span>
+    <span class="access-energy-label">${active.short || active.label}</span>
+    <span class="access-energy-track" aria-hidden="true"><i></i><i></i><i></i><b></b></span>
     <span class="access-mode-menu" role="menu">
       ${["normal", "ask", "full"].map((key) => {
         const config = ACCESS_MODES[key];
@@ -1653,10 +1665,13 @@ function renderProviderDetails() {
     `;
     return;
   }
+  const versions = [...(MODEL_VERSION_OPTIONS[key] || [])];
+  if (provider.model && !versions.some(([value]) => value === provider.model)) versions.unshift([provider.model, `${provider.model}（当前）`]);
   providerList.innerHTML = `
     <label>API Key <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(provider.apiKey || "")}" placeholder="sk-..."></label>
     <label>Base URL <input id="baseUrlInput" value="${escapeHtml(provider.baseURL || "")}" placeholder="https://api.deepseek.com"></label>
-    <label>模型 <input id="modelInput" value="${escapeHtml(provider.model || "")}" placeholder="deepseek-chat"></label>
+    <label>模型版本 ${versions.length ? `<select id="modelVersionSelect">${versions.map(([value, label]) => `<option value="${escapeHtml(value)}"${value === provider.model ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>` : `<input id="modelVersionSelect" value="${escapeHtml(provider.model || "")}">`}</label>
+    <div class="provider-note model-route-note">所选模型名称会原样发送给当前线路；线路必须支持该版本。</div>
   `;
 }
 
@@ -1691,7 +1706,7 @@ function readSettingsFromDialog() {
   if (settings.defaultProvider !== "openclaw") {
     provider.apiKey = $("apiKeyInput")?.value || "";
     provider.baseURL = $("baseUrlInput")?.value || provider.baseURL || "";
-    provider.model = $("modelInput")?.value || provider.model || "";
+    provider.model = $("modelVersionSelect")?.value || provider.model || "";
   }
   const selectedSkin = SKIN_PRESETS[skinSelect?.value] ? skinSelect.value : "custom";
   const selectedPreset = SKIN_PRESETS[selectedSkin] || SKIN_PRESETS.custom;
@@ -1832,8 +1847,8 @@ async function renderLicenseControls() {
   if (applyOnlineUpdateBtn) applyOnlineUpdateBtn.hidden = Boolean(status.devMode);
   if (inviteBtn) {
     inviteBtn.hidden = !status.owner && unlocked;
-    inviteBtn.textContent = status.owner ? "卡密管理" : "购买卡密";
-    inviteBtn.title = status.owner ? "卡密生成与管理" : "购买卡密并激活";
+    inviteBtn.textContent = status.owner ? "兑换码管理" : "购买会员";
+    inviteBtn.title = status.owner ? "兑换码生成与管理" : "购买会员并激活";
   }
   if (ownerInvitePanel) ownerInvitePanel.hidden = !status.owner;
   if (publishUpdatePanel) publishUpdatePanel.hidden = !status.owner;
@@ -2573,25 +2588,17 @@ inviteInput?.addEventListener("input", () => {
 licenseCodeInput?.addEventListener("input", () => {
   licenseCodeInput.value = formatLicenseCode(licenseCodeInput.value);
 });
-let licenseActivationStep = 1;
 licenseActivateBtn?.addEventListener("click", async () => {
   const code = licenseCodeInput?.value || "";
   if (!code) {
     if (licenseOverlayStatus) licenseOverlayStatus.textContent = "请输入兑换码。";
     return;
   }
-  if (licenseActivationStep === 1) {
-    licenseActivationStep = 2;
-    if (licenseCustomerFields) licenseCustomerFields.hidden = false;
-    if (licenseActivateBtn) licenseActivateBtn.textContent = "确认激活";
-    if (licenseOverlayStatus) licenseOverlayStatus.textContent = "请填写姓名和手机号，用于售后与激活记录。";
-    licenseNameInput?.focus?.();
-    return;
-  }
   const customer = {
     name: licenseNameInput?.value?.trim() || "客户",
     phone: licensePhoneInput?.value?.trim() || ""
   };
+  if (licenseOverlayStatus) licenseOverlayStatus.textContent = "正在验证兑换码...";
   const result = await (window.license.confirmActivation?.({ code, ...customer }) || window.license.verifyCode(code, customer));
   if (licenseOverlayStatus) licenseOverlayStatus.textContent = result.message || (result.ok ? "激活成功。" : "兑换码无效。");
   if (result.ok || result.success) {
@@ -2600,20 +2607,19 @@ licenseActivateBtn?.addEventListener("click", async () => {
     await renderLicenseControls();
     setTimeout(() => {
       if (licenseOverlay) licenseOverlay.hidden = true;
-      licenseActivationStep = 1;
       if (licenseCustomerFields) licenseCustomerFields.hidden = true;
-      if (licenseActivateBtn) licenseActivateBtn.textContent = "下一步";
+      if (licenseActivateBtn) licenseActivateBtn.textContent = "验证确认";
     }, 1500);
   }
 });
 licenseBuyBtn?.addEventListener("click", () => {
-  createPlanOrder("monthly_first", "overlay").catch((error) => {
+  createPlanOrder("monthly", "overlay").catch((error) => {
     if (licenseOverlayStatus) licenseOverlayStatus.textContent = `提交购买失败：${error.message || error}`;
   });
 });
 document.querySelectorAll("[data-buy-plan]").forEach((button) => {
   button.addEventListener("click", () => {
-    const planId = button.dataset.buyPlan || "monthly_first";
+    const planId = button.dataset.buyPlan || "monthly";
     createPlanOrder(planId, "plan-card").catch((error) => {
       const text = `提交购买失败：${error.message || error}`;
       if (inviteStatus) inviteStatus.textContent = text;
@@ -2785,7 +2791,7 @@ window.license?.onTrialWarning((status) => {
     sessionStorage.setItem("baiqiuTrialWarned", "1");
     showAppConfirm({
       title: "试用即将结束",
-      message: `白球 AI 试用还剩 ${formatTrialTime(status.trialRemainingSeconds)}，请及时购买卡密激活。`,
+      message: `白球 AI 试用还剩 ${formatTrialTime(status.trialRemainingSeconds)}，请及时购买会员或使用兑换码激活。`,
       primary: "知道了",
       secondary: "稍后"
     });
@@ -2966,8 +2972,21 @@ function taskBoardFileKey(file = {}) {
 
 function renderInlinePreview(file = {}) {
   const key = taskBoardFileKey(file);
+  const rows = state.taskBoardPreviewRows[key];
+  if (Array.isArray(rows) && rows.length) {
+    const columns = Math.max(0, ...rows.map((row) => row.length));
+    return `<div class="task-board-sheet-meta"><span>表格预览</span><b>${Math.max(0, rows.length - 1)} 行 · ${columns} 列</b></div><div class="task-board-table-wrap"><table class="task-board-table">${rows.map((row, rowIndex) => `<tr>${row.map((cell) => rowIndex === 0 ? `<th>${escapeHtml(cell)}</th>` : `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}</table></div>`;
+  }
   const cached = state.previewCache[key];
   if (!cached) return `<div class="task-board-file-preview loading" data-preview-key="${escapeHtml(key)}">正在生成内嵌预览...</div>`;
+  if (cached.kind === "spreadsheet" && cached.analysis?.sheets?.[0]) {
+    const sheet = cached.analysis.sheets[0];
+    const headers = (sheet.headers || []).slice(0, 12);
+    const rows = (sheet.sampleRows || []).slice(0, 18).map((row) => headers.map((header) => row?.[header] ?? ""));
+    if (headers.length) {
+      return `<div class="task-board-sheet-meta"><span>${escapeHtml(sheet.name || "表格预览")}</span><b>${Number(sheet.rowCount || 0)} 行 · ${Number(sheet.columnCount || headers.length)} 列</b></div><div class="task-board-table-wrap"><table class="task-board-table"><tr>${headers.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("")}</tr>${rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}</table></div>`;
+    }
+  }
   if (cached.kind === "image" && (cached.dataUrl || cached.fileUrl)) {
     return `<div class="task-board-inline-media"><img src="${escapeHtml(cached.dataUrl || cached.fileUrl)}" alt="${escapeHtml(cached.name || file.name || "图片预览")}"></div>`;
   }
@@ -3053,6 +3072,7 @@ function renderTaskBoard() {
             <span>${escapeHtml(file.source || "附件")} · ${escapeHtml(file.mimeType || "未知类型")} · ${formatTaskBoardBytes(file.sizeBytes)}</span>
           </div>
           <div class="task-board-file-actions">
+            <button type="button" data-board-file-internal="${escapeHtml(id)}">内部打开</button>
             <button type="button" data-board-file-open="${escapeHtml(id)}">外部打开</button>
             <button type="button" data-board-file-copy="${escapeHtml(file.name || "")}">复制文件名</button>
           </div>
@@ -3061,6 +3081,18 @@ function renderTaskBoard() {
       `;
     }).join("");
     ensureInlinePreviews(files);
+    body.querySelectorAll("[data-board-file-internal]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const current = files.find((item) => (item.id || item.name || "") === (button.dataset.boardFileInternal || ""));
+        if (!current) return;
+        const key = taskBoardFileKey(current);
+        state.taskBoardFocusId = current.id || current.name || "";
+        const preview = await api.spreadsheetPreview?.(current).catch(() => null);
+        if (preview?.rows?.length) state.taskBoardPreviewRows[key] = preview.rows;
+        renderTaskBoard();
+        showCopyToast(preview?.rows?.length ? "已打开美化表格预览" : "当前文件没有可展示的表格内容");
+      });
+    });
     body.querySelectorAll("[data-board-file-open]").forEach((button) => {
       button.addEventListener("click", async () => {
         const current = files.find((item) => (item.id || item.name || "") === (button.dataset.boardFileOpen || ""));
@@ -3139,6 +3171,11 @@ function renderTaskBoard() {
 }
 
 function bindTaskBoardEntrances() {
+  taskBoardToggleBtn?.addEventListener("click", () => {
+    const drawer = ensureTaskBoardDrawer();
+    if (drawer?.classList.contains("open")) closeTaskBoard();
+    else openTaskBoard(state.taskBoardTab || "overview");
+  });
   document.querySelector(".mini-monitor")?.addEventListener("click", (event) => {
     if (event.target.closest("button")) return;
     openTaskBoard("timeline");
