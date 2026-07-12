@@ -106,7 +106,7 @@ const activeRuns = new Map();
 let lastGatewayStatusSent = { state: "", message: "", at: 0 };
 let lastGatewayReconnectAt = 0;
 const INVITE_SECRET = "baiqiu-ai-owner-signed-invite-v2";
-const DEFAULT_PUBLIC_SERVER = "http://108.187.15.86:18790";
+const DEFAULT_PUBLIC_SERVER = "https://baiqiuai.xiaoxin8.com";
 
 function readModeJson(file) {
   try {
@@ -908,7 +908,7 @@ async function productLayerChatRuntime(input = {}) {
         appendMessage(session.id, {
           role: "user",
           text: originalText,
-          attachments: attachments.map((item) => ({ name: item.name, mimeType: item.mimeType, sizeBytes: item.sizeBytes })),
+          attachments: attachments.map(persistAttachmentForMessage),
           images: attachments.filter((item) => String(item.mimeType || "").startsWith("image/")).map((item) => item.dataUrl)
         });
         appendMessage(session.id, { role: "assistant", text: sanitizeUserFacingReply(spreadsheetReply), raw: { productLayer: true, spreadsheetAnalysis: true } });
@@ -921,7 +921,7 @@ async function productLayerChatRuntime(input = {}) {
       appendMessage(session.id, {
         role: "user",
         text: originalText,
-        attachments: attachments.map((item) => ({ name: item.name, mimeType: item.mimeType, sizeBytes: item.sizeBytes })),
+        attachments: attachments.map(persistAttachmentForMessage),
         images: attachments.filter((item) => String(item.mimeType || "").startsWith("image/")).map((item) => item.dataUrl)
       });
       updateSession(session.id, { status: "running" });
@@ -2884,7 +2884,7 @@ async function syncCustomerUpdateToRemoteServer(payload = {}) {
   devLog("update", "INFO", "[RemoteSync] Synced update server", { version, log: log.slice(-2000) });
   return {
     ok: true,
-    message: `客户版 ${version} 已同步到 http://108.187.15.86:18790/`,
+    message: `客户版 ${version} 已同步到 https://baiqiuai.xiaoxin8.com/`,
     version,
     published,
     log: log.slice(-4000)
@@ -2950,10 +2950,9 @@ async function startLocalUpdateServer() {
 
 async function openAdminServer() {
   if (!hasAdminAccess()) throw new Error("当前模式没有后台管理权限，请使用开发工具面板。");
-  const result = await startLocalUpdateServer();
-  const url = `${String(result.url || "http://127.0.0.1:18790").replace(/\/+$/, "")}/`;
+  const url = `${DEFAULT_PUBLIC_SERVER}/admin`;
   await shell.openExternal(url);
-  return { ...result, message: "后台管理已打开。", url };
+  return { ok: true, message: "管理员后台已打开。", url };
 }
 
 async function autoCheckForUpdates() {
@@ -4944,13 +4943,25 @@ function providerRequestBody(settings, message, attachments, sessionId = "") {
       "【附件说明】当前模型接口只支持纯文本消息，无法查看或识别图片内容。请明确说明图片已收到并保留在对话中，但当前模型不能直接看图；不要假装已经分析图片。"
     ].filter(Boolean).join("\n");
   }
-  return {
+  const request = {
     model: provider.model || "deepseek-chat",
     messages: [{ role: "system", content: systemPrompt }, ...chatHistoryMessages(sessionId), { role: "user", content }],
     tools: toolSchemasForFunctionCalling(),
     tool_choice: "auto",
     stream: false
   };
+  if (providerKey === "openai") {
+    request.reasoning_effort = {
+      off: "none",
+      minimal: "minimal",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      extra_high: "xhigh",
+      maximum: "xhigh"
+    }[settings.reasoning || "minimal"] || "minimal";
+  }
+  return request;
 }
 
 async function directProviderChat(settings, text, attachments, sessionId = "", options = {}) {
@@ -5604,6 +5615,20 @@ function attachmentDataUrlBuffer(dataUrl = "") {
   return match[2] ? Buffer.from(match[3], "base64") : Buffer.from(decodeURIComponent(match[3]), "utf8");
 }
 
+function persistAttachmentForMessage(attachment = {}) {
+  const name = safeAttachmentName(attachment.name, attachment.mimeType);
+  const sourcePath = sanitizeText(attachment.path || attachment.originalPath || attachment.filePath || "");
+  const result = { id: attachment.id || randomUUID(), name, mimeType: sanitizeText(attachment.mimeType || ""), sizeBytes: Number(attachment.sizeBytes || 0), textContent: sanitizeText(attachment.textContent || "") };
+  if (sourcePath && fs.existsSync(sourcePath)) return { ...result, path: sourcePath };
+  const buffer = attachmentDataUrlBuffer(attachment.dataUrl);
+  if (!buffer) return result;
+  const cacheDir = userDataPath("attachment-cache");
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const cacheFile = path.join(cacheDir, `${String(result.id).replace(/[^a-zA-Z0-9_-]/g, "_")}-${name}`);
+  if (!fs.existsSync(cacheFile)) fs.writeFileSync(cacheFile, buffer);
+  return { ...result, path: cacheFile };
+}
+
 async function executeOpenAttachment(attachment = {}) {
   if (/\.(xlsx|xls|csv)$/i.test(String(attachment.name || attachment.path || "")) && XLSX) {
     const rows = spreadsheetPreviewRows(attachment, 5000, 80);
@@ -5649,8 +5674,19 @@ async function executeOpenAttachment(attachment = {}) {
   return { ok: true, path: file };
 }
 
+function resolveAttachmentSourcePath(attachment = {}) {
+  const declaredPath = sanitizeText(attachment.path || attachment.originalPath || attachment.filePath || "");
+  const name = path.basename(String(attachment.name || ""));
+  const commonCandidates = name ? [app.getPath("desktop"), app.getPath("downloads"), app.getPath("documents")].map((dir) => path.join(dir, name)) : [];
+  const cacheDir = userDataPath("attachment-cache");
+  const cachedCandidate = name && fs.existsSync(cacheDir)
+    ? fs.readdirSync(cacheDir).filter((entry) => entry.endsWith(`-${name}`)).sort().reverse().map((entry) => path.join(cacheDir, entry))[0]
+    : "";
+  return [declaredPath, cachedCandidate, ...commonCandidates].find((candidate) => candidate && fs.existsSync(candidate)) || "";
+}
+
 function attachmentBuffer(attachment = {}) {
-  const sourcePath = sanitizeText(attachment.path || attachment.originalPath || attachment.filePath || "");
+  const sourcePath = resolveAttachmentSourcePath(attachment);
   if (sourcePath && fs.existsSync(sourcePath) && fs.statSync(sourcePath).isFile()) {
     return { buffer: fs.readFileSync(sourcePath), path: sourcePath };
   }
@@ -5715,8 +5751,7 @@ function compactSpreadsheetPreview(analysis = {}) {
 async function executePreviewAttachment(attachment = {}) {
   const name = sanitizeText(attachment.name || path.basename(attachment.path || attachment.filePath || "") || "附件");
   const mimeType = previewMimeFromName(name, sanitizeText(attachment.mimeType || ""));
-  const sourcePath = sanitizeText(attachment.path || attachment.originalPath || attachment.filePath || "");
-  const existingPath = sourcePath && fs.existsSync(sourcePath) ? sourcePath : "";
+  const existingPath = resolveAttachmentSourcePath(attachment);
   const { buffer } = attachmentBuffer(attachment);
 
   if (existingPath && (/^image\//i.test(mimeType) || /\/pdf$/i.test(mimeType) || /html/i.test(mimeType))) {
@@ -5726,6 +5761,7 @@ async function executePreviewAttachment(attachment = {}) {
     return { ok: true, kind: "image", name, mimeType, dataUrl: String(attachment.dataUrl) };
   }
   if (!buffer) return { ok: false, kind: "empty", name, mimeType, previewText: "没有可用于内嵌预览的文件内容。" };
+  if (/^image\//i.test(mimeType)) return { ok: true, kind: "image", name, mimeType, dataUrl: `data:${mimeType};base64,${buffer.toString("base64")}` };
 
   if (/\.(xlsx|xls|csv)$/i.test(name) || /spreadsheet|excel|csv/i.test(mimeType)) {
     if (!XLSX) return { ok: false, kind: "text", name, mimeType, previewText: "运行包缺少 xlsx 解析依赖，无法内嵌预览表格。" };
@@ -6652,7 +6688,8 @@ async function pollForResult(localSessionId, openclawKey, baselineCount, runId, 
 }
 
 function iconImage(size = 64) {
-  const icon = appPath("renderer", "assets", "baiqiu-icon.png");
+  const trayIcon = appPath("renderer", "assets", "baiqiu-tray.png");
+  const icon = size <= 32 && fs.existsSync(trayIcon) ? trayIcon : appPath("renderer", "assets", "baiqiu-icon.png");
   const fallback = appPath("renderer", "assets", "baiqiu-icon.ico");
   const image = nativeImage.createFromPath(fs.existsSync(icon) ? icon : fallback);
   return image.isEmpty() ? nativeImage.createEmpty() : image.resize({ width: size, height: size });
@@ -6761,7 +6798,7 @@ function createWindow() {
 }
 
 function createTray() {
-  tray = new Tray(iconImage(32).resize({ width: 16, height: 16 }));
+  tray = new Tray(iconImage(24));
   tray.setToolTip("白球 AI");
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Show / Hide", click: () => mainWindow?.isVisible() ? mainWindow.hide() : showWindow() },
@@ -7204,7 +7241,7 @@ function wireIpc() {
         appendMessage(session.id, {
           role: "user",
           text: originalText,
-          attachments: attachments.map((item) => ({ name: item.name, mimeType: item.mimeType, sizeBytes: item.sizeBytes })),
+          attachments: attachments.map(persistAttachmentForMessage),
           images: attachments.filter((item) => String(item.mimeType || "").startsWith("image/")).map((item) => item.dataUrl)
         });
         appendMessage(session.id, { role: "assistant", text: spreadsheetReply, raw: { spreadsheetAnalysis: true } });
@@ -7220,7 +7257,7 @@ function wireIpc() {
       appendMessage(session.id, {
         role: "user",
         text: originalText,
-        attachments: attachments.map((item) => ({ name: item.name, mimeType: item.mimeType, sizeBytes: item.sizeBytes })),
+        attachments: attachments.map(persistAttachmentForMessage),
         images: attachments.filter((item) => String(item.mimeType || "").startsWith("image/")).map((item) => item.dataUrl)
       });
       updateSession(session.id, { status: "running" });
@@ -7302,7 +7339,7 @@ function wireIpc() {
   ipcMain.handle("system:preview-attachment", async (_event, attachment = {}) => {
     return executePreviewAttachment(attachment);
   });
-  ipcMain.handle("system:spreadsheet-preview", (_event, attachment = {}) => ({ ok: true, rows: spreadsheetPreviewRows(attachment, 80, 18) }));
+  ipcMain.handle("system:spreadsheet-preview", (_event, attachment = {}) => ({ ok: true, rows: spreadsheetPreviewRows(attachment, 30, 8) }));
 }
 
 app.whenReady().then(() => {

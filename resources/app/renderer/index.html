@@ -5,26 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>白球 AI</title>
   <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles-115.css">
 </head>
 <body>
   <div class="app" id="app">
     <header class="titlebar">
       <div class="brand terminal-brand">
-        <div class="brand-terminal" aria-hidden="true">
-          <span>BAIQIU</span>
-          <b></b>
-        </div>
         <div>
-          <strong>白球 AI</strong>
-          <span id="gatewayStatus">白球内核待命</span>
+          <strong>白球AI</strong>
+          <span id="gatewayStatus">内核就绪</span>
         </div>
       </div>
       <div class="title-actions">
         <span id="trialStatus" class="trial-status">试用检测中</span>
-        <button id="taskBoardToggleBtn" class="task-board-toggle-btn" title="打开或收起任务看板">看板</button>
         <button id="modelBtn" title="模型">模型</button>
         <button id="skinBtn" title="主题">主题</button>
-        <button id="inviteBtn" title="购买套餐">购买套餐</button>
+        <button id="inviteBtn" title="生成客户兑换码">生成兑换码</button>
         <button id="settingsBtn" title="设置">设置</button>
         <button data-window="minimize" title="最小化">_</button>
         <button data-window="maximize" title="最大化">□</button>
@@ -53,7 +49,17 @@
         <button id="attachBtn" type="button" title="上传文件">+</button>
         <textarea id="chatInput" rows="1"></textarea>
         <button id="accessModeBtn" class="access-mode-btn" type="button" title="访问模式">完全</button>
-        <button id="sendBtn" type="submit" title="发送">↑</button>
+        <div id="reasoningWaterControl" class="reasoning-water-control" data-level="minimal">
+          <div class="reasoning-water-shell">
+            <div class="reasoning-water-flow" aria-hidden="true"></div>
+            <input id="reasoningWaterRange" type="range" min="0" max="4" step="1" value="0" aria-label="切换思考等级">
+          </div>
+          <div class="reasoning-water-copy">
+            <span>切换思考等级</span>
+            <b id="reasoningWaterLabel">最低</b>
+          </div>
+        </div>
+        <button id="sendBtn" type="submit" title="发送"><span class="send-state-ring" aria-hidden="true"><i></i></span></button>
       </form>
       <input id="fileInput" type="file" multiple hidden accept="image/*,.xlsx,.xls,.csv,.txt,.md,.json">
     </main>
@@ -112,6 +118,8 @@
 
     <div class="splitter splitter-right" aria-hidden="true"></div>
 
+    <button id="taskBoardToggleBtn" class="task-board-edge-toggle" type="button" title="展开任务看板" aria-label="展开任务看板">‹</button>
+
     <aside class="terminal">
       <div class="mini-monitor" aria-hidden="true">
         <div class="mini-monitor-screen">
@@ -158,19 +166,6 @@
       <div class="terminal-panel compact-terminal-panel">
         <div class="terminal-head">
           <div class="terminal-title">任务状态</div>
-          <div class="inline-reasoning">
-            <span>思考模式</span>
-            <select id="sideReasoningSelect" class="side-reasoning side-reasoning-inline">
-              <option value="default">默认</option>
-              <option value="off">关闭</option>
-              <option value="minimal">最低</option>
-              <option value="low">低</option>
-              <option value="medium">中</option>
-              <option value="high">高</option>
-              <option value="extra_high">最高</option>
-              <option value="maximum">极限</option>
-            </select>
-          </div>
         </div>
         <div class="stat"><span>任务</span><b id="taskState">待命</b></div>
         <div class="stat"><span>模型</span><b id="modelState">DeepSeek</b></div>
@@ -190,21 +185,16 @@
       </div>
       <div id="neuralDashboard" class="neural-dashboard" hidden>
         <div class="terminal-title">开发者驾驶舱</div>
-        <div class="stat"><span>Task ID</span><b id="productTaskId">-</b></div>
-        <div class="stat"><span>任务状态</span><b id="productTaskStatus">待命</b></div>
-        <div class="stat"><span>Agent 状态</span><b id="productAgentStatus">IDLE</b></div>
-        <div class="phase-rail" aria-label="Neural Core 阶段">
-          <span data-product-phase="UNDERSTANDING">UNDERSTANDING</span>
-          <span data-product-phase="PLANNING">PLANNING</span>
-          <span data-product-phase="EXECUTING">EXECUTING</span>
-          <span data-product-phase="VERIFYING">VERIFYING</span>
-          <span data-product-phase="LEARNING">LEARNING</span>
+        <div class="developer-admin-grid">
+          <button type="button" data-dev-admin-action="admin">管理员后台<small>客户与异常账号</small></button>
+          <button type="button" data-dev-admin-action="codes">生成兑换码<small>与后台同步</small></button>
+          <button type="button" data-dev-admin-action="update">版本更新<small>发布与更新日志</small></button>
         </div>
+        <div class="stat"><span>当前任务</span><b id="productTaskId">-</b></div>
+        <div class="stat"><span>执行状态</span><b id="productTaskStatus">待命</b></div>
+        <div class="stat"><span>处理阶段</span><b id="productAgentStatus">待命</b></div>
         <div id="productRuntimeDetails" class="runtime-details"></div>
-        <details class="timeline-panel">
-          <summary>Timeline</summary>
-          <div id="productTimeline" class="product-timeline"></div>
-        </details>
+        <div id="productTimeline" class="product-timeline" hidden></div>
       </div>
     </aside>
   </div>
@@ -243,19 +233,14 @@
             <span>模型</span>
             <select id="providerSelect"></select>
           </label>
-          <label>
-            <span>推理等级</span>
-            <select id="reasoningSelect">
-              <option value="default">默认</option>
-              <option value="off">关闭</option>
-              <option value="minimal">最低</option>
-              <option value="low">低</option>
-              <option value="medium">中</option>
-              <option value="high">高</option>
-              <option value="extra_high">最高</option>
-              <option value="maximum">极限</option>
-            </select>
-          </label>
+          <select id="reasoningSelect" hidden aria-hidden="true">
+            <option value="off">关闭</option>
+            <option value="minimal">最低</option>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+            <option value="extra_high">最高</option>
+          </select>
         </div>
         <div id="providerList" class="providers"></div>
       </section>
@@ -329,7 +314,7 @@
           <button id="publishUpdateBtn" type="button">发布客户版更新</button>
           <button id="syncUpdateServerBtn" type="button">同步到服务器</button>
           <button id="startUpdateServerBtn" type="button">启动本地更新服务器</button>
-          <div class="update-content">后续新版本直接同步到 http://108.187.15.86:18790/，不再制作桌面安装包。</div>
+          <div class="update-content">后续新版本直接同步到 https://baiqiuai.xiaoxin8.com/。</div>
         </div>
         <div class="settings-card">
           <strong>文件保存</strong>
@@ -366,56 +351,8 @@
       </section>
 
       <section class="settings-page" data-settings-page="invite">
-        <div class="settings-card">
-          <strong>购买套餐 / 兑换码</strong>
-          <div class="plan-grid member-plan-grid">
-            <button type="button" class="plan-card member-plan-card" data-buy-plan="monthly">
-              <em>新手体验</em>
-              <span>月卡</span>
-              <small>原价 ¥49.9</small>
-              <b>折扣价 ¥19.9</b>
-              <i>适用于新手体验</i>
-            </button>
-            <button type="button" class="plan-card member-plan-card" data-buy-plan="six_months">
-              <em>推荐长期使用</em>
-              <span>半年卡</span>
-              <small>原价 ¥99</small>
-              <b>折扣价 ¥88</b>
-              <i>适用于长期使用</i>
-            </button>
-            <button type="button" class="plan-card member-plan-card" data-buy-plan="yearly">
-              <em>重度使用</em>
-              <span>年卡</span>
-              <small>原价 ¥180</small>
-              <b>折扣价 ¥168</b>
-              <i>适用于重度使用</i>
-            </button>
-          </div>
-          <label>
-            <span>兑换码</span>
-            <input id="inviteInput" placeholder="XXXX-XXXX-XXXX-XXXX" maxlength="19">
-          </label>
-          <label>
-            <span>姓名</span>
-            <input id="inviteNameInput" placeholder="用于售后记录">
-          </label>
-          <label>
-            <span>手机号</span>
-            <input id="invitePhoneInput" placeholder="用于激活核验">
-          </label>
-          <button id="unlockInviteBtn" type="button">激活兑换码</button>
-          <div id="inviteStatus" class="update-content">购买套餐后等待管理员确认，或输入管理员发放的兑换码激活。</div>
-        </div>
-        <div id="ownerInvitePanel" class="settings-card" hidden>
-          <strong>兑换码管理</strong>
-          <div class="admin-web-entry">
-            <div>
-              <span>网页后台管理</span>
-              <small>打开本地授权后台，管理兑换码、客户授权和版本发布。</small>
-            </div>
-            <button id="openAdminServerBtn" type="button">打开后台</button>
-          </div>
-          <div id="adminWebStatus" class="update-content">后台地址：http://127.0.0.1:18790/admin</div>
+        <div id="ownerInvitePanel" class="settings-card developer-code-generator">
+          <strong>生成兑换码</strong>
           <label>
             <span>生成数量</span>
             <input id="inviteCountInput" type="number" min="1" max="50" value="5">
@@ -424,18 +361,17 @@
             <span>兑换码类型</span>
             <select id="inviteTypeSelect">
               <option value="lifetime">永久兑换码</option>
+              <option value="weekly">周卡兑换码</option>
               <option value="monthly">月卡兑换码</option>
-              <option value="yearly">年卡兑换码</option>
+              <option value="six_months">半年卡兑换码</option>
             </select>
+          </label>
+          <label>
+            <span>发放备注</span>
+            <input id="inviteNotesInput" placeholder="选填：客户姓名或用途">
           </label>
           <button id="generateInviteBtn" type="button">生成兑换码</button>
           <textarea id="generatedInviteOutput" rows="6" readonly placeholder="生成后发给客户。"></textarea>
-          <div class="admin-code-tools">
-            <input id="adminCodeSearchInput" placeholder="搜索兑换码/状态/备注">
-            <button id="adminRefreshCodesBtn" type="button">刷新列表</button>
-            <button id="adminExportCodesBtn" type="button">导出CSV</button>
-          </div>
-          <textarea id="adminCodeListOutput" rows="10" readonly placeholder="管理员兑换码与用户列表"></textarea>
         </div>
       </section>
 
