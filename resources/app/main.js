@@ -6802,10 +6802,27 @@ function createTray() {
   tray.setToolTip("白球 AI");
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Show / Hide", click: () => mainWindow?.isVisible() ? mainWindow.hide() : showWindow() },
+    { label: "Uninstall Baiqiu AI", click: () => launchInstalledUninstaller() },
     { type: "separator" },
     { label: "Exit", click: () => { app.isQuitting = true; app.quit(); } }
   ]));
   tray.on("click", () => mainWindow?.isVisible() ? mainWindow.hide() : showWindow());
+}
+
+function launchInstalledUninstaller() {
+  const uninstaller = path.join(path.dirname(process.execPath), "Uninstall.exe");
+  if (isDevMode || !fs.existsSync(uninstaller)) {
+    dialog.showMessageBox({
+      type: "info",
+      title: "Baiqiu AI",
+      message: "The current copy is not installed. Use the installed customer version to uninstall."
+    });
+    return;
+  }
+  const child = spawn(uninstaller, [], { detached: true, stdio: "ignore", windowsHide: false });
+  child.unref();
+  app.isQuitting = true;
+  setTimeout(() => app.quit(), 150);
 }
 
 function wireGateway() {
