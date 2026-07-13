@@ -173,7 +173,7 @@ function licenseMirrorPath(...parts) {
 }
 
 function baiqiuDataRoot(...parts) {
-  const root = path.join("D:\\BaiQiuAI", "data");
+  const root = path.join(app.getPath("appData"), "Baiqiu AI", "data");
   const full = path.join(root, ...parts);
   try { fs.mkdirSync(parts.length ? path.dirname(full) : full, { recursive: true }); } catch {}
   return full;
@@ -7362,7 +7362,6 @@ function wireIpc() {
 app.whenReady().then(() => {
   installCrashHandlers();
   devLog("system", "INFO", "[System] App started", { devMode: isDevMode, version: appVersion() });
-  resetCustomerStateForTesting();
   ensureUpdateV2Layout();
   recoverInterruptedUpdate();
   wireIpc();

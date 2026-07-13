@@ -219,7 +219,6 @@ class LicenseManager {
 
   verifyLocal(existingLicense = null) {
     const license = existingLicense || this._ensureLicense(this._readDb());
-    if (!license.unlocked) return { ok: false, message: "未激活" };
     if (!this._verifyLicense(license).ok) return { ok: false, message: "本地签名不匹配" };
 
     const boundDevice = this._decryptField(license.deviceIdEncrypted || "");
