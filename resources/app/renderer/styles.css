@@ -2984,12 +2984,14 @@ body.window-moving .app {
 }
 
 .license-panel {
-  width: min(440px, calc(100vw - 32px));
+  width: min(1120px, calc(100vw - 44px));
+  max-height: calc(100vh - 88px);
+  overflow: auto;
   border: 1px solid var(--accent);
   background: var(--panel);
-  padding: 20px;
+  padding: 30px;
   display: grid;
-  gap: 12px;
+  gap: 22px;
   box-shadow: 0 0 24px rgba(0, 255, 65, 0.14);
 }
 
@@ -3032,6 +3034,150 @@ body.window-moving .app {
 .license-customer-fields[hidden] { display: none; }
 .license-privacy { font-size: 12px; color: var(--muted); }
 .license-overlay:not([hidden]) .license-panel { transition: opacity 0.2s ease, transform 0.2s ease; }
+
+.member-pay-title {
+  text-align: center;
+  display: grid;
+  gap: 8px;
+}
+
+.member-pay-title > span {
+  color: #5ddcff;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.member-pay-title strong,
+.license-panel .member-pay-title strong {
+  color: #f4f8ff;
+  font-size: clamp(26px, 3.2vw, 38px);
+  letter-spacing: 0.02em;
+}
+
+.member-pay-title p {
+  color: #9aa9bd;
+  font-size: 17px;
+}
+
+.member-redeem-card {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.38fr) minmax(360px, 1fr);
+  align-items: center;
+  gap: 22px;
+  padding: 26px 28px;
+  border: 1px solid rgba(34, 211, 177, 0.38);
+  border-radius: 22px;
+  background:
+    linear-gradient(120deg, rgba(8, 84, 75, 0.34), rgba(21, 30, 48, 0.38)),
+    rgba(8, 13, 20, 0.9);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.member-redeem-card strong {
+  color: #eafff6;
+  font-size: 25px;
+}
+
+.member-redeem-card p {
+  margin-top: 8px;
+  color: #c7d2df;
+}
+
+.member-redeem-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 270px;
+  gap: 18px;
+}
+
+.member-redeem-row input {
+  height: 58px !important;
+  border-radius: 16px;
+  font-size: 20px;
+  background: rgba(8, 13, 20, 0.72) !important;
+}
+
+.member-redeem-row button {
+  height: 58px;
+  border-radius: 16px;
+  border: 0;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 850;
+  background: linear-gradient(135deg, #62b1ff, #7b68ff);
+  box-shadow: 0 12px 30px rgba(105, 138, 255, 0.26);
+}
+
+.member-plan-grid,
+.license-plan-grid.member-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.member-plan-card,
+button.member-plan-card {
+  min-height: 260px;
+  padding: 22px 20px;
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top right, rgba(67, 120, 255, 0.16), transparent 36%),
+    linear-gradient(180deg, rgba(18, 27, 39, 0.96), rgba(12, 18, 27, 0.96));
+  color: #eef6ff;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+
+.member-plan-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(93, 220, 255, 0.55);
+  box-shadow: 0 18px 40px rgba(40, 119, 255, 0.18);
+}
+
+.member-plan-card em {
+  padding: 6px 14px;
+  border: 1px solid rgba(93, 220, 255, 0.38);
+  border-radius: 999px;
+  background: rgba(93, 220, 255, 0.12);
+  color: #b6fff0;
+  font-style: normal;
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.member-plan-card span {
+  margin-top: 14px;
+  font-size: 26px;
+  font-weight: 900;
+  color: #f8fbff;
+}
+
+.member-plan-card small {
+  color: #b8ffdf;
+  font-size: 16px;
+}
+
+.member-plan-card b {
+  color: #ff4d5f;
+  font-size: 22px;
+  font-weight: 950;
+}
+
+.member-plan-card i {
+  margin-top: 36px;
+  color: #cdd6e3;
+  font-style: normal;
+  font-size: 20px;
+}
+
+.license-panel > .license-actions {
+  display: none;
+}
 
 /* Token display fit */
 .monitor-bars {
@@ -6548,6 +6694,41 @@ textarea::placeholder {
   font-weight: 760 !important;
 }
 
+.member-redeem-row #licenseActivateBtn {
+  height: 58px !important;
+  margin: 0 !important;
+  border-radius: 16px !important;
+  background: linear-gradient(135deg, #62b1ff, #7b68ff) !important;
+  font-size: 18px !important;
+  font-weight: 850 !important;
+}
+
+@media (max-width: 920px) {
+  .license-panel {
+    width: calc(100vw - 24px) !important;
+    padding: 20px !important;
+  }
+
+  .member-redeem-card,
+  .member-redeem-row,
+  .member-plan-grid,
+  .license-plan-grid.member-plan-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .member-plan-card,
+  button.member-plan-card {
+    min-height: 210px !important;
+  }
+}
+
+/* 2026-07-12: visible task board, energy access control and domain skins */
+.task-board-toggle-btn{min-width:58px!important;height:36px!important;color:#bfeaff!important;border-color:rgba(49,214,255,.28)!important}.task-board-toggle-btn::before{content:"▤";margin-right:6px}
+.update-server-status{display:grid;grid-template-columns:140px minmax(180px,1fr) auto;align-items:center;gap:12px;min-height:54px;padding:0 16px;border:1px solid var(--bq-line);border-radius:12px;background:#111822}.update-server-status span{color:var(--bq-sub)}.update-server-status b{color:var(--bq-text)}.update-server-status i{color:#64d38a;font-style:normal;font-size:12px}
+.access-mode-btn,.access-mode-btn[data-mode="full"],.access-mode-btn[data-mode="ask"],.access-mode-btn[data-mode="normal"]{width:212px!important;height:34px!important;padding:0 10px!important;gap:10px!important;background:transparent!important;color:#aab6c1!important}.access-energy-label{min-width:60px;font-size:12px;text-align:left}.access-energy-track{position:relative;width:126px;height:18px;display:grid;grid-template-columns:repeat(3,1fr);align-items:center;justify-items:center;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14)}.access-energy-track::before{content:"";position:absolute;inset:0 66% 0 0;background:linear-gradient(90deg,#2f9dff,#53dcff);transition:right 220ms ease}.access-mode-btn[data-mode="ask"] .access-energy-track::before{right:33%}.access-mode-btn[data-mode="full"] .access-energy-track::before{right:0;animation:energy-flow 1.8s linear infinite}.access-energy-track i{z-index:1;width:4px;height:4px;border-radius:50%;background:rgba(255,255,255,.28)}.access-energy-track b{position:absolute;z-index:2;left:2px;width:28px;height:28px;border-radius:50%;background:#f8fbff;box-shadow:0 3px 12px rgba(0,0,0,.38);transition:transform 220ms ease}.access-mode-btn[data-mode="ask"] .access-energy-track b{transform:translateX(47px)}.access-mode-btn[data-mode="full"] .access-energy-track b{transform:translateX(94px)}@keyframes energy-flow{to{filter:hue-rotate(36deg) brightness(1.1)}}
+body[data-skin="mecha"]{background:linear-gradient(rgba(4,11,17,.86),rgba(4,11,17,.94)),repeating-linear-gradient(90deg,transparent 0 58px,rgba(49,214,255,.05) 59px 60px),#05090d!important;--bq-brand:#31d6ff;--bq-brand-2:#8df1ff}body[data-skin="mecha"] .app::after{content:"MK-VII // SYSTEM ONLINE";position:fixed;right:18px;bottom:8px;color:rgba(49,214,255,.28);font:10px/1 monospace;pointer-events:none;animation:mecha-scan 3.4s ease-in-out infinite}@keyframes mecha-scan{50%{color:rgba(141,241,255,.72)}}
+body[data-skin="wasteland"]{background:linear-gradient(rgba(20,18,13,.84),rgba(11,12,10,.96)),repeating-linear-gradient(115deg,transparent 0 74px,rgba(214,178,74,.035) 75px 76px),#11100d!important;--bq-brand:#d6b24a;--bq-brand-2:#71906c}body[data-skin="wasteland"] .app::after{content:"余烬电台 97.3 · SIGNAL FOUND";position:fixed;right:18px;bottom:8px;color:rgba(214,178,74,.34);font:10px/1 monospace;pointer-events:none;animation:wasteland-radio 4s steps(2,end) infinite}@keyframes wasteland-radio{50%{opacity:.38}}
+
 .update-content,
 .skill-learn-status,
 .provider-note {
@@ -8123,7 +8304,7 @@ textarea:focus {
     border-bottom: 1px solid var(--bq-line) !important;
   }
 
-  .settings-page {
+.settings-page {
     grid-column: 1 !important;
     grid-row: 3 !important;
   }
@@ -8779,5 +8960,74 @@ body.resizing-composer * {
 
   .task-board-gallery {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Membership payment module final overrides */
+.license-panel {
+  width: min(1120px, calc(100vw - 44px)) !important;
+  max-height: calc(100vh - 88px) !important;
+  padding: 30px !important;
+  gap: 22px !important;
+}
+
+.member-redeem-card {
+  display: grid !important;
+  grid-template-columns: minmax(220px, 0.38fr) minmax(360px, 1fr) !important;
+}
+
+.member-redeem-row {
+  display: grid !important;
+  grid-template-columns: minmax(240px, 1fr) 270px !important;
+}
+
+.member-redeem-row #licenseActivateBtn {
+  width: 100% !important;
+  height: 58px !important;
+  margin: 0 !important;
+  border-radius: 16px !important;
+  background: linear-gradient(135deg, #62b1ff, #7b68ff) !important;
+  color: #ffffff !important;
+  font-size: 18px !important;
+  font-weight: 850 !important;
+}
+
+.member-plan-grid,
+.license-plan-grid.member-plan-grid {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 18px !important;
+}
+
+button.member-plan-card {
+  min-height: 260px !important;
+  padding: 22px 20px !important;
+  display: grid !important;
+  align-content: start !important;
+  justify-items: start !important;
+  gap: 14px !important;
+  border-radius: 18px !important;
+  text-align: left !important;
+}
+
+button.member-plan-card b {
+  color: #ff4d5f !important;
+}
+
+.license-panel > .license-actions {
+  display: none !important;
+}
+
+@media (max-width: 920px) {
+  .license-panel {
+    width: calc(100vw - 24px) !important;
+    padding: 20px !important;
+  }
+
+  .member-redeem-card,
+  .member-redeem-row,
+  .member-plan-grid,
+  .license-plan-grid.member-plan-grid {
+    grid-template-columns: 1fr !important;
   }
 }

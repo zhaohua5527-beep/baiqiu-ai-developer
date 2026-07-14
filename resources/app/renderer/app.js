@@ -21,14 +21,17 @@ const state = {
   previewCache: {},
   forceScrollBottom: false,
   lastRenderedSessionId: null,
+  lastMessageSignature: "",
   taskBoardTab: "overview",
-  taskBoardFocusId: ""
+  taskBoardFocusId: "",
+  taskBoardPreviewRows: {}
 };
 let pendingConfirmations = {};
 
 const $ = (id) => document.getElementById(id);
 const gatewayStatus = $("gatewayStatus");
 const trialStatus = $("trialStatus");
+const taskBoardToggleBtn = $("taskBoardToggleBtn");
 const licenseOverlay = $("licenseOverlay");
 const licenseCodeInput = $("licenseCodeInput");
 const licenseActivateBtn = $("licenseActivateBtn");
@@ -43,6 +46,9 @@ const chatForm = $("chatForm");
 const chatInput = $("chatInput");
 const sendBtn = $("sendBtn");
 const accessModeBtn = $("accessModeBtn");
+const reasoningWaterControl = $("reasoningWaterControl");
+const reasoningWaterRange = $("reasoningWaterRange");
+const reasoningWaterLabel = $("reasoningWaterLabel");
 const attachBtn = $("attachBtn");
 const fileInput = $("fileInput");
 const attachmentPreview = $("attachmentPreview");
@@ -169,6 +175,14 @@ const ACCESS_MODES = {
   full: { label: "完全访问", short: "完全访问", title: "完全访问模式：允许已授权工具直接执行。" }
 };
 
+
+const PROVIDER_REASONING_LEVELS = {
+  openai: ["minimal", "low", "medium", "high", "extra_high"],
+  deepseek: ["minimal", "low", "medium", "high"],
+  ollama: ["off", "minimal", "low", "medium", "high"],
+  openclaw: ["minimal", "low", "medium", "high"]
+};
+
 const SKIN_PRESETS = {
   black: {
     textColor: "#f3f4f6",
@@ -190,7 +204,18 @@ const SKIN_PRESETS = {
     backgroundColor: "#07090d",
     panelColor: "#111722",
     fontSize: 16
+  },
+  mecha: {
+    textColor: "#e8f7ff", accentColor: "#31d6ff", backgroundColor: "#070b0f", panelColor: "#101820", fontSize: 16
+  },
+  wasteland: {
+    textColor: "#f2ead8", accentColor: "#d6b24a", backgroundColor: "#11100d", panelColor: "#1b1a16", fontSize: 16
   }
+};
+
+const MODEL_VERSION_OPTIONS = {
+  openai: [["gpt-5.6-sol", "GPT 5.6 Sol"], ["gpt-5.6-terra", "GPT 5.6 Terra"], ["gpt-5.6-luna", "GPT 5.6 Luna"], ["gpt-4.1", "GPT 4.1 兼容"]],
+  deepseek: [["deepseek-v4-pro", "DeepSeek V4 Pro"], ["deepseek-v4-flash", "DeepSeek V4 Flash"], ["deepseek-chat", "DeepSeek Chat 兼容"]]
 };
 
 function escapeHtml(value) {
@@ -269,9 +294,8 @@ function selectedSession() {
 function statusText(status) {
   if (status === "running") return "执行中";
   if (status === "done") return "完成";
-  if (status === "timeout") return "超时";
-  if (status === "failed") return "失败";
-  if (status === "aborted") return "已中断";
+  if (status === "timeout" || status === "aborted") return "已结束";
+  if (status === "failed") return "需检查";
   return "待命";
 }
 
@@ -579,6 +603,44 @@ function reasoningLabel(value) {
   }[value || "minimal"] || value;
 }
 
+function availableReasoningLevels(providerKey = state.db?.settings?.defaultProvider || "deepseek") {
+  return PROVIDER_REASONING_LEVELS[providerKey] || PROVIDER_REASONING_LEVELS.deepseek;
+}
+
+function normalizeReasoningForProvider(value, providerKey) {
+  const levels = availableReasoningLevels(providerKey);
+  if (levels.includes(value)) return value;
+  if (value === "maximum" || value === "extra_high") return levels[levels.length - 1];
+  return levels[0];
+}
+
+function renderReasoningWater() {
+  if (!reasoningWaterControl || !reasoningWaterRange) return;
+  const providerKey = state.db?.settings?.defaultProvider || "deepseek";
+  const levels = availableReasoningLevels(providerKey);
+  const value = normalizeReasoningForProvider(state.db?.settings?.reasoning || levels[0], providerKey);
+  const index = Math.max(0, levels.indexOf(value));
+  reasoningWaterRange.max = String(levels.length - 1);
+  reasoningWaterRange.value = String(index);
+  reasoningWaterControl.dataset.level = value;
+  reasoningWaterControl.dataset.maximum = index === levels.length - 1 ? "1" : "0";
+  reasoningWaterControl.style.setProperty("--reasoning-progress", `${levels.length > 1 ? (index / (levels.length - 1)) * 100 : 0}%`);
+  if (reasoningWaterLabel) reasoningWaterLabel.textContent = reasoningLabel(value);
+  reasoningWaterControl.title = `${providerKey === "openai" ? "OpenAI" : providerKey === "deepseek" ? "DeepSeek" : "本地模型"}思考等级：${reasoningLabel(value)}`;
+}
+
+async function setReasoningFromWater(index) {
+  const providerKey = state.db?.settings?.defaultProvider || "deepseek";
+  const levels = availableReasoningLevels(providerKey);
+  const value = levels[Math.max(0, Math.min(levels.length - 1, Number(index) || 0))];
+  state.db.settings.reasoning = value;
+  if (reasoningSelect) reasoningSelect.value = value;
+  await api.saveSettings(state.db.settings);
+  state.db = await api.init();
+  renderSettings();
+  renderMetricBars(selectedSession(), []);
+}
+
 function formatTrialTime(seconds) {
   const value = Math.max(0, Number(seconds || 0));
   const min = Math.floor(value / 60);
@@ -603,13 +665,13 @@ function formatLicenseCode(value) {
 }
 
 const PLAN_CATALOG = {
-  monthly_first: { label: "月卡尝鲜", amount: "19.9", description: "首次付费折扣，原价 49.9/月" },
-  monthly: { label: "月卡", amount: "49.9", description: "月卡基础价" },
-  yearly: { label: "年卡", amount: "199", description: "年卡基础价" }
+  monthly: { label: "月卡", amount: "19.9", baseAmount: "49.9", description: "月卡首充折扣价，原价 49.9" },
+  six_months: { label: "半年卡", amount: "88", baseAmount: "99", description: "半年卡折扣价，原价 99" },
+  yearly: { label: "年卡", amount: "168", baseAmount: "180", description: "年卡折扣价，原价 180" }
 };
 
-async function createPlanOrder(planId = "monthly_first", source = "client") {
-  const plan = PLAN_CATALOG[planId] || PLAN_CATALOG.monthly_first;
+async function createPlanOrder(planId = "monthly", source = "client") {
+  const plan = PLAN_CATALOG[planId] || PLAN_CATALOG.monthly;
   const customer = {
     name: inviteNameInput?.value?.trim() || licenseNameInput?.value?.trim() || "客户",
     phone: invitePhoneInput?.value?.trim() || licensePhoneInput?.value?.trim() || ""
@@ -635,9 +697,12 @@ function renderLicenseStatus(status) {
     if (inviteStatus) inviteStatus.textContent = "开发工具面板已解锁。";
     return;
   }
+  const membershipText = status.unlocked
+    ? (status.lifetime ? "永久会员" : `${status.planName || "限时会员"} · 剩余 ${Math.max(0, Math.ceil(Number(status.membershipRemainingSeconds || 0) / 86400))} 天`)
+    : "";
   if (trialStatus) {
     trialStatus.textContent = status.unlocked
-      ? "已激活"
+      ? membershipText
       : status.locked
         ? "试用已结束"
         : `试用剩余：${formatTrialTime(status.trialRemainingSeconds)} | 购买套餐解锁`;
@@ -645,7 +710,7 @@ function renderLicenseStatus(status) {
   if (licenseOverlay) licenseOverlay.hidden = Boolean(status.unlocked || !status.locked);
   if (inviteStatus) {
     inviteStatus.textContent = status.unlocked
-      ? "已激活：当前设备可使用白球 AI。"
+      ? (status.lifetime ? "已激活：永久会员。" : `已激活：${status.planName || "限时会员"}，剩余 ${Math.max(0, Math.ceil(Number(status.membershipRemainingSeconds || 0) / 86400))} 天。`)
       : status.locked
         ? "试用已结束：请选择套餐购买，或输入兑换码激活。"
         : `试用中：剩余 ${formatTrialTime(status.trialRemainingSeconds)}。`;
@@ -1089,7 +1154,6 @@ function setBusy(value) {
   state.busy = value;
   document.body.classList.toggle("running", value);
   sendBtn.classList.toggle("abort", value);
-  sendBtn.textContent = value ? "■" : "↑";
   sendBtn.title = value ? "输入为空时中断，输入内容时加入预置任务" : "发送";
   taskState.textContent = value ? "执行中" : "待命";
   if (monitorMode) monitorMode.textContent = value ? "执行中" : "待命";
@@ -1108,12 +1172,7 @@ function renderAccessMode() {
   const mode = currentAccessMode();
   const active = ACCESS_MODES[mode] || ACCESS_MODES.ask;
   accessModeBtn.innerHTML = `
-    <span class="access-mode-icon" aria-hidden="true"></span>
-    <span class="access-mode-copy">
-      <span class="access-mode-label">权限</span>
-      <span class="access-mode-current">${active.short || active.label}</span>
-    </span>
-    <span class="access-mode-caret">⌄</span>
+    <span class="access-mode-current">${active.short || active.label}</span><span class="access-mode-caret" aria-hidden="true">⌄</span>
     <span class="access-mode-menu" role="menu">
       ${["normal", "ask", "full"].map((key) => {
         const config = ACCESS_MODES[key];
@@ -1536,16 +1595,22 @@ async function renderMessages() {
   const messageCountIncreased = messages.length > state.lastMessageCount;
   const shouldFollow = state.forceScrollBottom || sessionChanged || messageCountIncreased || isNearBottom(messageList) || state.lastMessageCount === 0;
   state.currentMessages = messages;
-  const fragment = document.createDocumentFragment();
-  if (!messages.length) addMessage({ role: "assistant", text: "发送第一条消息后，我会先引导您设定专属助手的名字、称呼和风格。" }, fragment);
-  else messages.forEach((message) => addMessage(message, fragment));
-  messageList.replaceChildren(fragment);
+  const visibleMessages = messages.slice(-120);
+  const tail = visibleMessages.slice(-3).map((message) => `${message.id || ""}:${String(message.text || message.content || "").slice(-240)}`).join("|");
+  const signature = `${session.id}:${visibleMessages.length}:${tail}`;
+  if (signature !== state.lastMessageSignature || sessionChanged) {
+    const fragment = document.createDocumentFragment();
+    if (!visibleMessages.length) addMessage({ role: "assistant", text: "发送第一条消息后，我会先引导您设定专属助手的名字、称呼和风格。" }, fragment);
+    else visibleMessages.forEach((message) => addMessage(message, fragment));
+    messageList.replaceChildren(fragment);
+    state.lastMessageSignature = signature;
+  }
   state.lastMessageCount = messages.length;
   state.lastRenderedSessionId = session.id;
   if (shouldFollow) scrollMessagesToBottom();
   setBusy(session.status === "running");
   stopProgress(session.status);
-  renderMonitorLog(session, messages);
+  renderMonitorLog(session, messages.slice(-20));
   renderMetricBars(session, messages);
   renderTaskBoard();
 }
@@ -1607,8 +1672,9 @@ function renderSettings() {
     option.selected = settings.defaultProvider === key;
     providerSelect.appendChild(option);
   }
-  reasoningSelect.value = settings.reasoning || "minimal";
+  if (reasoningSelect) reasoningSelect.value = settings.reasoning || "minimal";
   if (sideReasoningSelect) sideReasoningSelect.value = settings.reasoning || "minimal";
+  renderReasoningWater();
   renderProviderDetails();
   const current = settings.providers[settings.defaultProvider];
   modelState.textContent = `${current?.name || "DeepSeek"} / ${reasoningLabel(settings.reasoning)}`;
@@ -1653,10 +1719,13 @@ function renderProviderDetails() {
     `;
     return;
   }
+  const versions = [...(MODEL_VERSION_OPTIONS[key] || [])];
+  if (provider.model && !versions.some(([value]) => value === provider.model)) versions.unshift([provider.model, `${provider.model}（当前）`]);
   providerList.innerHTML = `
     <label>API Key <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(provider.apiKey || "")}" placeholder="sk-..."></label>
     <label>Base URL <input id="baseUrlInput" value="${escapeHtml(provider.baseURL || "")}" placeholder="https://api.deepseek.com"></label>
-    <label>模型 <input id="modelInput" value="${escapeHtml(provider.model || "")}" placeholder="deepseek-chat"></label>
+    <label>模型版本 ${versions.length ? `<select id="modelVersionSelect">${versions.map(([value, label]) => `<option value="${escapeHtml(value)}"${value === provider.model ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>` : `<input id="modelVersionSelect" value="${escapeHtml(provider.model || "")}">`}</label>
+    <div class="provider-note model-route-note">所选模型名称会原样发送给当前线路；线路必须支持该版本。</div>
   `;
 }
 
@@ -1684,14 +1753,13 @@ function readSettingsFromDialog() {
   const settings = JSON.parse(JSON.stringify(state.db.settings));
   const updateTarget = updateManifestInput?.value?.trim() || "";
   settings.defaultProvider = providerSelect.value || "deepseek";
-  settings.reasoning = reasoningSelect.value || "minimal";
-  if (settings.reasoning === "off") settings.defaultProvider = "ollama";
+  settings.reasoning = state.db?.settings?.reasoning || "minimal";
   for (const [key, provider] of Object.entries(settings.providers)) provider.enabled = key === settings.defaultProvider;
   const provider = settings.providers[settings.defaultProvider];
   if (settings.defaultProvider !== "openclaw") {
     provider.apiKey = $("apiKeyInput")?.value || "";
     provider.baseURL = $("baseUrlInput")?.value || provider.baseURL || "";
-    provider.model = $("modelInput")?.value || provider.model || "";
+    provider.model = $("modelVersionSelect")?.value || provider.model || "";
   }
   const selectedSkin = SKIN_PRESETS[skinSelect?.value] ? skinSelect.value : "custom";
   const selectedPreset = SKIN_PRESETS[selectedSkin] || SKIN_PRESETS.custom;
@@ -1831,9 +1899,9 @@ async function renderLicenseControls() {
   if (developerLogsPage) developerLogsPage.hidden = !status.devMode;
   if (applyOnlineUpdateBtn) applyOnlineUpdateBtn.hidden = Boolean(status.devMode);
   if (inviteBtn) {
-    inviteBtn.hidden = !status.owner && unlocked;
-    inviteBtn.textContent = status.owner ? "卡密管理" : "购买卡密";
-    inviteBtn.title = status.owner ? "卡密生成与管理" : "购买卡密并激活";
+    inviteBtn.hidden = !status.owner;
+    inviteBtn.textContent = "生成兑换码";
+    inviteBtn.title = "生成客户兑换码";
   }
   if (ownerInvitePanel) ownerInvitePanel.hidden = !status.owner;
   if (publishUpdatePanel) publishUpdatePanel.hidden = !status.owner;
@@ -2478,7 +2546,7 @@ syncUpdateServerBtn?.addEventListener("click", async () => {
   }
   if (!await showAppConfirm({
     title: "同步到服务器",
-    message: `生成客户版 ${version} 并同步到 http://108.187.15.86:18790/？`,
+    message: `生成客户版 ${version} 并同步到 https://baiqiuai.xiaoxin8.com/？`,
     primary: "同步",
     secondary: "取消"
   })) return;
@@ -2573,25 +2641,17 @@ inviteInput?.addEventListener("input", () => {
 licenseCodeInput?.addEventListener("input", () => {
   licenseCodeInput.value = formatLicenseCode(licenseCodeInput.value);
 });
-let licenseActivationStep = 1;
 licenseActivateBtn?.addEventListener("click", async () => {
   const code = licenseCodeInput?.value || "";
   if (!code) {
     if (licenseOverlayStatus) licenseOverlayStatus.textContent = "请输入兑换码。";
     return;
   }
-  if (licenseActivationStep === 1) {
-    licenseActivationStep = 2;
-    if (licenseCustomerFields) licenseCustomerFields.hidden = false;
-    if (licenseActivateBtn) licenseActivateBtn.textContent = "确认激活";
-    if (licenseOverlayStatus) licenseOverlayStatus.textContent = "请填写姓名和手机号，用于售后与激活记录。";
-    licenseNameInput?.focus?.();
-    return;
-  }
   const customer = {
     name: licenseNameInput?.value?.trim() || "客户",
     phone: licensePhoneInput?.value?.trim() || ""
   };
+  if (licenseOverlayStatus) licenseOverlayStatus.textContent = "正在验证兑换码...";
   const result = await (window.license.confirmActivation?.({ code, ...customer }) || window.license.verifyCode(code, customer));
   if (licenseOverlayStatus) licenseOverlayStatus.textContent = result.message || (result.ok ? "激活成功。" : "兑换码无效。");
   if (result.ok || result.success) {
@@ -2600,20 +2660,19 @@ licenseActivateBtn?.addEventListener("click", async () => {
     await renderLicenseControls();
     setTimeout(() => {
       if (licenseOverlay) licenseOverlay.hidden = true;
-      licenseActivationStep = 1;
       if (licenseCustomerFields) licenseCustomerFields.hidden = true;
-      if (licenseActivateBtn) licenseActivateBtn.textContent = "下一步";
+      if (licenseActivateBtn) licenseActivateBtn.textContent = "验证确认";
     }, 1500);
   }
 });
 licenseBuyBtn?.addEventListener("click", () => {
-  createPlanOrder("monthly_first", "overlay").catch((error) => {
+  createPlanOrder("monthly", "overlay").catch((error) => {
     if (licenseOverlayStatus) licenseOverlayStatus.textContent = `提交购买失败：${error.message || error}`;
   });
 });
 document.querySelectorAll("[data-buy-plan]").forEach((button) => {
   button.addEventListener("click", () => {
-    const planId = button.dataset.buyPlan || "monthly_first";
+    const planId = button.dataset.buyPlan || "monthly";
     createPlanOrder(planId, "plan-card").catch((error) => {
       const text = `提交购买失败：${error.message || error}`;
       if (inviteStatus) inviteStatus.textContent = text;
@@ -2683,7 +2742,7 @@ openAdminServerBtn?.addEventListener("click", async () => {
   if (adminWebStatus) adminWebStatus.textContent = "正在启动并打开后台管理网页。";
   try {
     const result = await api.openAdminServer?.();
-    const url = result?.url || "http://127.0.0.1:18790/admin";
+    const url = result?.url || "https://baiqiuai.xiaoxin8.com/admin";
     if (adminWebStatus) adminWebStatus.textContent = `${result?.message || "后台管理已打开。"} 地址：${url}`;
   } catch (error) {
     if (adminWebStatus) adminWebStatus.textContent = `打开失败：${error.message || error}`;
@@ -2705,10 +2764,19 @@ exportDeveloperLogsBtn?.addEventListener("click", async () => {
 generateInviteBtn?.addEventListener("click", async () => {
   const count = Number(inviteCountInput?.value || 5);
   const type = inviteTypeSelect?.value || "lifetime";
-  const codes = await window.admin?.generateCodes?.(count, type, `兑换码类型：${type}`)
+  const notes = $("inviteNotesInput")?.value?.trim() || `兑换码类型：${type}`;
+  const codes = await window.admin?.generateCodes?.(count, type, notes)
     .catch(async () => api.generateInvite(count))
     .catch((error) => [`生成失败：${error.message || error}`]);
   if (generatedInviteOutput) generatedInviteOutput.value = codes.join("\n");
+});
+document.querySelectorAll("[data-dev-admin-action]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const action = button.dataset.devAdminAction;
+    if (action === "codes") return openSettingsTab("invite");
+    if (action === "update") return openSettingsTab("update");
+    await api.openExternal?.("https://baiqiuai.xiaoxin8.com/admin");
+  });
 });
 sideReasoningSelect?.addEventListener("change", async () => {
   state.db.settings.reasoning = sideReasoningSelect.value || "minimal";
@@ -2719,6 +2787,16 @@ sideReasoningSelect?.addEventListener("change", async () => {
   renderSettings();
   renderMetricBars(selectedSession(), []);
 });
+reasoningWaterRange?.addEventListener("input", () => {
+  const levels = availableReasoningLevels();
+  const index = Math.max(0, Math.min(levels.length - 1, Number(reasoningWaterRange.value) || 0));
+  const value = levels[index];
+  reasoningWaterControl.dataset.level = value;
+  reasoningWaterControl.dataset.maximum = index === levels.length - 1 ? "1" : "0";
+  reasoningWaterControl.style.setProperty("--reasoning-progress", `${levels.length > 1 ? (index / (levels.length - 1)) * 100 : 0}%`);
+  if (reasoningWaterLabel) reasoningWaterLabel.textContent = reasoningLabel(value);
+});
+reasoningWaterRange?.addEventListener("change", () => setReasoningFromWater(reasoningWaterRange.value));
 document.querySelectorAll("[data-window]").forEach((button) => {
   button.addEventListener("click", () => api.windowControl(button.dataset.window));
 });
@@ -2785,7 +2863,7 @@ window.license?.onTrialWarning((status) => {
     sessionStorage.setItem("baiqiuTrialWarned", "1");
     showAppConfirm({
       title: "试用即将结束",
-      message: `白球 AI 试用还剩 ${formatTrialTime(status.trialRemainingSeconds)}，请及时购买卡密激活。`,
+      message: `白球 AI 试用还剩 ${formatTrialTime(status.trialRemainingSeconds)}，请及时购买会员或使用兑换码激活。`,
       primary: "知道了",
       secondary: "稍后"
     });
@@ -2900,7 +2978,14 @@ function collectTaskBoardAssets(messages = []) {
     }
   }
   files.push(...collectGeneratedFiles(messages));
-  return { files, images, links: collectTaskBoardLinks(messages) };
+  const uniqueFiles = new Map();
+  for (const file of files) {
+    const key = `${String(file.name || "").toLowerCase()}:${Number(file.sizeBytes || 0)}`;
+    const richness = (file.dataUrl ? 8 : 0) + (file.path || file.filePath || file.originalPath ? 4 : 0) + (file.textContent ? 2 : 0);
+    const previous = uniqueFiles.get(key);
+    if (!previous || richness > previous.richness) uniqueFiles.set(key, { file, richness });
+  }
+  return { files: [...uniqueFiles.values()].map((entry) => entry.file), images, links: collectTaskBoardLinks(messages) };
 }
 
 function ensureTaskBoardDrawer() {
@@ -2950,6 +3035,11 @@ function openTaskBoard(tab = "overview", focusId = "") {
   drawer.hidden = false;
   drawer.dataset.tab = state.taskBoardTab;
   drawer.classList.add("open");
+  if (taskBoardToggleBtn) {
+    taskBoardToggleBtn.dataset.expanded = "1";
+    taskBoardToggleBtn.title = "收起任务看板";
+    taskBoardToggleBtn.setAttribute("aria-label", "收起任务看板");
+  }
   renderTaskBoard();
 }
 
@@ -2958,16 +3048,41 @@ function closeTaskBoard() {
   if (!drawer) return;
   drawer.classList.remove("open");
   drawer.hidden = true;
+  if (taskBoardToggleBtn) {
+    taskBoardToggleBtn.dataset.expanded = "0";
+    taskBoardToggleBtn.title = "展开任务看板";
+    taskBoardToggleBtn.setAttribute("aria-label", "展开任务看板");
+  }
 }
 
 function taskBoardFileKey(file = {}) {
   return file.path || file.filePath || file.originalPath || file.url || file.id || `${file.name || "file"}-${file.sizeBytes || 0}`;
 }
 
+function taskBoardSheetPreviewHtml(rows = [], title = "表格预览", totalRows = 0) {
+  const normalized = rows.slice(0, 30).map((row) => row.slice(0, 8));
+  const headers = normalized[0] || [];
+  const records = normalized.slice(1);
+  const meta = `<div class="task-board-sheet-meta"><span>${escapeHtml(title)}</span><b>${Number(totalRows || records.length)} 行 · ${headers.length} 列</b></div>`;
+  return `${meta}<div class="task-board-table-wrap"><table class="task-board-table">${normalized.map((row, rowIndex) => `<tr>${row.map((cell) => rowIndex === 0 ? `<th>${escapeHtml(cell)}</th>` : `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}</table></div>`;
+}
+
 function renderInlinePreview(file = {}) {
   const key = taskBoardFileKey(file);
+  const rows = state.taskBoardPreviewRows[key];
+  if (Array.isArray(rows) && rows.length) {
+    return taskBoardSheetPreviewHtml(rows);
+  }
   const cached = state.previewCache[key];
   if (!cached) return `<div class="task-board-file-preview loading" data-preview-key="${escapeHtml(key)}">正在生成内嵌预览...</div>`;
+  if (cached.kind === "spreadsheet" && cached.analysis?.sheets?.[0]) {
+    const sheet = cached.analysis.sheets[0];
+    const headers = (sheet.headers || []).slice(0, 8);
+    const rows = (sheet.sampleRows || []).slice(0, 29).map((row) => headers.map((header) => row?.[header] ?? ""));
+    if (headers.length) {
+      return taskBoardSheetPreviewHtml([headers, ...rows], sheet.name || "表格预览", Number(sheet.rowCount || 0));
+    }
+  }
   if (cached.kind === "image" && (cached.dataUrl || cached.fileUrl)) {
     return `<div class="task-board-inline-media"><img src="${escapeHtml(cached.dataUrl || cached.fileUrl)}" alt="${escapeHtml(cached.name || file.name || "图片预览")}"></div>`;
   }
@@ -3009,7 +3124,10 @@ function renderTaskBoard() {
   const session = selectedSession();
   const messages = state.currentMessages || [];
   const monitorLines = (state.monitorLogLines || []).slice(-12).reverse();
-  const { files, images, links } = collectTaskBoardAssets(messages);
+  const assets = collectTaskBoardAssets(messages.slice(-120));
+  const files = assets.files.slice(-24);
+  const images = assets.images.slice(-16);
+  const links = assets.links.slice(-30);
   const currentModel = modelState?.textContent || "DeepSeek / Minimal";
   const currentTask = taskState?.textContent || statusText(session?.status);
   const currentRecord = recordState?.textContent || "-";
@@ -3053,14 +3171,31 @@ function renderTaskBoard() {
             <span>${escapeHtml(file.source || "附件")} · ${escapeHtml(file.mimeType || "未知类型")} · ${formatTaskBoardBytes(file.sizeBytes)}</span>
           </div>
           <div class="task-board-file-actions">
+            <button type="button" data-board-file-internal="${escapeHtml(id)}">内部打开</button>
             <button type="button" data-board-file-open="${escapeHtml(id)}">外部打开</button>
             <button type="button" data-board-file-copy="${escapeHtml(file.name || "")}">复制文件名</button>
           </div>
-          ${renderInlinePreview(file)}
+          ${state.taskBoardFocusId === id ? renderInlinePreview(file) : ""}
         </article>
       `;
     }).join("");
-    ensureInlinePreviews(files);
+    body.querySelectorAll("[data-board-file-internal]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const current = files.find((item) => (item.id || item.name || "") === (button.dataset.boardFileInternal || ""));
+        if (!current) return;
+        const key = taskBoardFileKey(current);
+        state.taskBoardFocusId = current.id || current.name || "";
+        button.disabled = true;
+        button.textContent = "读取中";
+        const preview = await api.spreadsheetPreview?.(current).catch(() => null);
+        if (preview?.rows?.length) state.taskBoardPreviewRows[key] = preview.rows;
+        if (!preview?.rows?.length && !state.previewCache[key] && typeof api.previewAttachment === "function") {
+          state.previewCache[key] = await api.previewAttachment(current).catch(() => ({ ok: false, previewText: "当前文件没有可展示的预览内容。" }));
+        }
+        renderTaskBoard();
+        showCopyToast(preview?.rows?.length ? "已打开美化表格预览" : "当前文件没有可展示的表格内容");
+      });
+    });
     body.querySelectorAll("[data-board-file-open]").forEach((button) => {
       button.addEventListener("click", async () => {
         const current = files.find((item) => (item.id || item.name || "") === (button.dataset.boardFileOpen || ""));
@@ -3087,7 +3222,7 @@ function renderTaskBoard() {
         const id = image.id || image.name || "";
         return `
           <figure class="task-board-image-card${state.taskBoardFocusId && state.taskBoardFocusId === id ? " active" : ""}">
-            <img src="${image.dataUrl}" alt="${escapeHtml(image.name || `图片 ${index + 1}`)}">
+            <img src="${image.dataUrl}" loading="lazy" decoding="async" alt="${escapeHtml(image.name || `图片 ${index + 1}`)}">
             <figcaption>
               <span>${escapeHtml(image.name || `图片 ${index + 1}`)} · ${escapeHtml(image.source || "会话图片")}</span>
               <button type="button" data-board-image-open="${escapeHtml(id)}">外部打开</button>
@@ -3139,6 +3274,11 @@ function renderTaskBoard() {
 }
 
 function bindTaskBoardEntrances() {
+  taskBoardToggleBtn?.addEventListener("click", () => {
+    const drawer = ensureTaskBoardDrawer();
+    if (drawer?.classList.contains("open")) closeTaskBoard();
+    else openTaskBoard(state.taskBoardTab || "overview");
+  });
   document.querySelector(".mini-monitor")?.addEventListener("click", (event) => {
     if (event.target.closest("button")) return;
     openTaskBoard("timeline");

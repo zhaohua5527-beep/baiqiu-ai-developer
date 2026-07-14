@@ -1,6 +1,6 @@
 {
   "version": "1.1.4",
-  "downloadUrl": "http://108.187.15.86:18790/baiqiu-1.1.4.zip",
+  "downloadUrl": "https://baiqiuai.xiaoxin8.com/baiqiu-1.1.4.zip",
   "installerUrl": "",
   "forceUpdate": true,
   "changelog": "安装后桌面仅保留白球AI快捷方式，并自动清理旧版桌面文件夹；已输入过卡密的用户，重装或更新后会自动保留授权，不需要二次输入。"

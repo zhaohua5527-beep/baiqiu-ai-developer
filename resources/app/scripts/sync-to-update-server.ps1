@@ -83,9 +83,9 @@ New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
   version = $Version
   deployedAt = (Get-Date).ToString("o")
   remote = "\${target}:$RemoteDir"
-  url = "http://108.187.15.86:18790/"
+  url = "https://baiqiuai.xiaoxin8.com/"
 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stateDir "last-deploy.json") -Encoding UTF8
 
-Write-Host "Synced to http://108.187.15.86:18790/"
+Write-Host "Synced to https://baiqiuai.xiaoxin8.com/"
 Write-Host "Remote: \${target}:$RemoteDir"
 Write-Host "Version: $Version"
