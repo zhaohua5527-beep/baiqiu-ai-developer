@@ -60,6 +60,8 @@ const settingsDialog = $("settingsDialog");
 const settingsCloseBtn = $("settingsCloseBtn");
 const providerList = $("providerList");
 const providerSelect = $("providerSelect");
+const agentRuntimeSelect = $("agentRuntimeSelect");
+const agentRuntimeNote = $("agentRuntimeNote");
 const reasoningSelect = $("reasoningSelect");
 const sideReasoningSelect = $("sideReasoningSelect");
 const contextMenu = $("contextMenu");
@@ -180,8 +182,15 @@ const PROVIDER_REASONING_LEVELS = {
   openai: ["minimal", "low", "medium", "high", "extra_high"],
   deepseek: ["minimal", "low", "medium", "high"],
   ollama: ["off", "minimal", "low", "medium", "high"],
-  openclaw: ["minimal", "low", "medium", "high"]
+  openclaw: ["minimal", "low", "medium", "high"],
+  hermes: ["minimal", "low", "medium", "high"],
+  relay: ["minimal", "low", "medium", "high"]
 };
+
+const AGENT_RUNTIME_OPTIONS = [
+  ["openclaw", "OpenClaw", "走本机 OpenClaw 网关（现网默认兼容路径）。"],
+  ["hermes", "Hermes", "走 Hermes Runtime；可配置本地启动或远程 Base URL。"]
+];
 
 const SKIN_PRESETS = {
   black: {
@@ -1090,7 +1099,8 @@ function contextLimitForSettings() {
   if (model.includes("gpt-4.1") || model.includes("4.1")) return 1047576;
   if (model.includes("kimi") || model.includes("moonshot")) return 128000;
   if (model.includes("deepseek")) return 64000;
-  if (settings.defaultProvider === "openclaw") return 128000;
+  if (settings.defaultProvider === "openclaw" || settings.defaultProvider === "hermes") return 128000;
+  if (settings.agentRuntime === "hermes") return 128000;
   return 64000;
 }
 
@@ -1600,8 +1610,33 @@ async function renderMessages() {
   const signature = `${session.id}:${visibleMessages.length}:${tail}`;
   if (signature !== state.lastMessageSignature || sessionChanged) {
     const fragment = document.createDocumentFragment();
-    if (!visibleMessages.length) addMessage({ role: "assistant", text: "发送第一条消息后，我会先引导您设定专属助手的名字、称呼和风格。" }, fragment);
-    else visibleMessages.forEach((message) => addMessage(message, fragment));
+    if (!visibleMessages.length) {
+      const empty = document.createElement("div");
+      empty.className = "chat-empty-state";
+      empty.innerHTML = `
+        <div class="chat-empty-card">
+          <div class="chat-empty-badge">ORBIT READY</div>
+          <h2>把任务交给白球</h2>
+          <p>这不是只能聊天的窗口。描述目标后，白球会规划、调用本地能力，并把可验证结果带回这里。</p>
+          <div class="chat-empty-tips">
+            <button type="button" class="chat-empty-tip" data-empty-prompt="帮我整理桌面上的工作文件">整理桌面文件</button>
+            <button type="button" class="chat-empty-tip" data-empty-prompt="分析这份表格并给出结论">分析表格</button>
+            <button type="button" class="chat-empty-tip" data-empty-prompt="把今天的待办整理成清单">整理待办清单</button>
+          </div>
+        </div>
+      `;
+      empty.querySelectorAll("[data-empty-prompt]").forEach((button) => {
+        button.addEventListener("click", () => {
+          if (!chatInput) return;
+          chatInput.value = button.getAttribute("data-empty-prompt") || "";
+          chatInput.focus();
+          adjustComposerHeight?.();
+        });
+      });
+      fragment.appendChild(empty);
+    } else {
+      visibleMessages.forEach((message) => addMessage(message, fragment));
+    }
     messageList.replaceChildren(fragment);
     state.lastMessageSignature = signature;
   }
@@ -1659,13 +1694,56 @@ function renderQueue() {
   });
 }
 
+function currentAgentRuntime(settings = state.db?.settings || {}) {
+  const runtimeId = String(settings.agentRuntime || settings.runtimeId || "").toLowerCase();
+  if (runtimeId === "hermes" || runtimeId === "openclaw") return runtimeId;
+  const provider = String(settings.defaultProvider || "").toLowerCase();
+  if (provider === "hermes") return "hermes";
+  if (provider === "openclaw") return "openclaw";
+  return "openclaw";
+}
+
+function renderAgentRuntimeControls() {
+  const settings = state.db?.settings || {};
+  settings.agentRuntime = currentAgentRuntime(settings);
+  settings.hermes ||= {
+    enabled: false,
+    baseURL: "http://127.0.0.1:18791/v1",
+    host: "127.0.0.1",
+    port: 18791,
+    model: "hermes-default",
+    apiKey: "",
+    command: "",
+    args: [],
+    autoStart: true
+  };
+  if (agentRuntimeSelect) {
+    agentRuntimeSelect.innerHTML = "";
+    for (const [value, label] of AGENT_RUNTIME_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      option.selected = settings.agentRuntime === value;
+      agentRuntimeSelect.appendChild(option);
+    }
+  }
+  const meta = AGENT_RUNTIME_OPTIONS.find(([value]) => value === settings.agentRuntime) || AGENT_RUNTIME_OPTIONS[0];
+  if (agentRuntimeNote) {
+    agentRuntimeNote.textContent = settings.agentRuntime === "hermes"
+      ? `${meta[2]} 当前：Hermes · ${settings.hermes?.baseURL || "http://127.0.0.1:18791/v1"}`
+      : `${meta[2]} 当前：OpenClaw 网关`;
+  }
+}
+
 function renderSettings() {
   providerSelect.innerHTML = "";
   const settings = state.db.settings;
   settings.appearance ||= {};
   settings.appearance.skin = SKIN_PRESETS[settings.appearance.skin] ? settings.appearance.skin : "custom";
   const skinPreset = SKIN_PRESETS[settings.appearance.skin] || SKIN_PRESETS.custom;
-  for (const [key, provider] of Object.entries(settings.providers)) {
+  settings.agentRuntime = currentAgentRuntime(settings);
+  renderAgentRuntimeControls();
+  for (const [key, provider] of Object.entries(settings.providers || {})) {
     const option = document.createElement("option");
     option.value = key;
     option.textContent = provider.name || key;
@@ -1676,8 +1754,9 @@ function renderSettings() {
   if (sideReasoningSelect) sideReasoningSelect.value = settings.reasoning || "minimal";
   renderReasoningWater();
   renderProviderDetails();
-  const current = settings.providers[settings.defaultProvider];
-  modelState.textContent = `${current?.name || "DeepSeek"} / ${reasoningLabel(settings.reasoning)}`;
+  const current = settings.providers?.[settings.defaultProvider];
+  const runtimeLabel = settings.agentRuntime === "hermes" ? "Hermes" : "OpenClaw";
+  modelState.textContent = `${current?.name || "DeepSeek"} / ${runtimeLabel} / ${reasoningLabel(settings.reasoning)}`;
   if (monitorModel) monitorModel.textContent = (current?.name || "DeepSeek").toUpperCase();
   if (skinSelect) skinSelect.value = settings.appearance.skin;
   if (textColorInput) textColorInput.value = settings.appearance.textColor || skinPreset.textColor;
@@ -1709,13 +1788,33 @@ function renderSettings() {
 function renderProviderDetails() {
   const settings = state.db.settings;
   const key = providerSelect.value || settings.defaultProvider || "deepseek";
-  const provider = settings.providers[key];
+  const provider = settings.providers?.[key] || {};
+  const runtimeId = currentAgentRuntime(settings);
   providerList.hidden = false;
   if (key === "openclaw") {
     providerList.innerHTML = `
       <div class="provider-note">
         OpenClaw 已套入白球 AI：选择这个模型后，会直接走本机 OpenClaw 网关，不需要 API Key。
+        当前 Agent 内核：<b>${runtimeId === "hermes" ? "Hermes" : "OpenClaw"}</b>。
       </div>
+    `;
+    return;
+  }
+  if (key === "hermes" || runtimeId === "hermes") {
+    const hermes = settings.hermes || {};
+    const baseURL = hermes.baseURL || provider.baseURL || "http://127.0.0.1:18791/v1";
+    const model = hermes.model || provider.model || "hermes-default";
+    const apiKey = hermes.apiKey || provider.apiKey || "";
+    const command = hermes.command || "";
+    const autoStart = hermes.autoStart !== false;
+    providerList.innerHTML = `
+      <div class="provider-note">Hermes Runtime：优先连接本地/远程 Hermes；可填写启动命令用于本机拉起。</div>
+      <label>API Key <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(apiKey)}" placeholder="可选"></label>
+      <label>Base URL <input id="baseUrlInput" value="${escapeHtml(baseURL)}" placeholder="http://127.0.0.1:18791/v1"></label>
+      <label>模型版本 <input id="modelVersionSelect" value="${escapeHtml(model)}" placeholder="hermes-default"></label>
+      <label>启动命令 <input id="hermesCommandInput" value="${escapeHtml(command)}" placeholder="可选，例如 C:\\Hermes\\hermes.exe"></label>
+      <label class="checkbox-row"><input id="hermesAutoStartInput" type="checkbox"${autoStart ? " checked" : ""}> 端口未监听时尝试自动启动</label>
+      <div class="provider-note model-route-note">保存后，外部 Agent 路径将使用 Hermes Runtime（settings.agentRuntime=hermes）。</div>
     `;
     return;
   }
@@ -1725,7 +1824,7 @@ function renderProviderDetails() {
     <label>API Key <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" value="${escapeHtml(provider.apiKey || "")}" placeholder="sk-..."></label>
     <label>Base URL <input id="baseUrlInput" value="${escapeHtml(provider.baseURL || "")}" placeholder="https://api.deepseek.com"></label>
     <label>模型版本 ${versions.length ? `<select id="modelVersionSelect">${versions.map(([value, label]) => `<option value="${escapeHtml(value)}"${value === provider.model ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>` : `<input id="modelVersionSelect" value="${escapeHtml(provider.model || "")}">`}</label>
-    <div class="provider-note model-route-note">所选模型名称会原样发送给当前线路；线路必须支持该版本。</div>
+    <div class="provider-note model-route-note">所选模型名称会原样发送给当前线路；线路必须支持该版本。当前 Agent 内核：${runtimeId === "hermes" ? "Hermes" : "OpenClaw"}。</div>
   `;
 }
 
@@ -1752,14 +1851,63 @@ async function renderAll() {
 function readSettingsFromDialog() {
   const settings = JSON.parse(JSON.stringify(state.db.settings));
   const updateTarget = updateManifestInput?.value?.trim() || "";
+  settings.agentRuntime = agentRuntimeSelect?.value || currentAgentRuntime(settings);
   settings.defaultProvider = providerSelect.value || "deepseek";
   settings.reasoning = state.db?.settings?.reasoning || "minimal";
+  settings.providers ||= {};
+  // Keep provider list compatible if hermes was just introduced.
+  settings.providers.hermes ||= {
+    name: "Hermes",
+    enabled: false,
+    baseURL: "http://127.0.0.1:18791/v1",
+    apiKey: "",
+    model: "hermes-default"
+  };
   for (const [key, provider] of Object.entries(settings.providers)) provider.enabled = key === settings.defaultProvider;
-  const provider = settings.providers[settings.defaultProvider];
-  if (settings.defaultProvider !== "openclaw") {
+  const provider = settings.providers[settings.defaultProvider] || settings.providers.relay || {};
+  settings.hermes ||= {
+    enabled: settings.agentRuntime === "hermes",
+    baseURL: "http://127.0.0.1:18791/v1",
+    host: "127.0.0.1",
+    port: 18791,
+    model: "hermes-default",
+    apiKey: "",
+    command: "",
+    args: [],
+    autoStart: true
+  };
+  if (settings.defaultProvider === "hermes" || settings.agentRuntime === "hermes") {
+    const apiKey = $("apiKeyInput")?.value || settings.hermes.apiKey || provider.apiKey || "";
+    const baseURL = $("baseUrlInput")?.value || settings.hermes.baseURL || provider.baseURL || "http://127.0.0.1:18791/v1";
+    const model = $("modelVersionSelect")?.value || settings.hermes.model || provider.model || "hermes-default";
+    const command = $("hermesCommandInput")?.value || settings.hermes.command || "";
+    const autoStart = $("hermesAutoStartInput") ? Boolean($("hermesAutoStartInput").checked) : settings.hermes.autoStart !== false;
+    settings.hermes = {
+      ...settings.hermes,
+      enabled: true,
+      apiKey,
+      baseURL,
+      model,
+      command,
+      autoStart
+    };
+    settings.providers.hermes = {
+      ...(settings.providers.hermes || {}),
+      name: "Hermes",
+      enabled: settings.defaultProvider === "hermes",
+      apiKey,
+      baseURL,
+      model
+    };
+    // Selecting Hermes provider implies hermes runtime.
+    if (settings.defaultProvider === "hermes") settings.agentRuntime = "hermes";
+  } else if (settings.defaultProvider !== "openclaw") {
     provider.apiKey = $("apiKeyInput")?.value || "";
     provider.baseURL = $("baseUrlInput")?.value || provider.baseURL || "";
     provider.model = $("modelVersionSelect")?.value || provider.model || "";
+  }
+  if (settings.defaultProvider === "openclaw") {
+    settings.agentRuntime = settings.agentRuntime === "hermes" ? "hermes" : "openclaw";
   }
   const selectedSkin = SKIN_PRESETS[skinSelect?.value] ? skinSelect.value : "custom";
   const selectedPreset = SKIN_PRESETS[selectedSkin] || SKIN_PRESETS.custom;
@@ -2426,7 +2574,40 @@ $("saveSettingsBtn").addEventListener("click", async (event) => {
   renderSettings();
   settingsDialog.close();
 });
-providerSelect.addEventListener("change", renderProviderDetails);
+providerSelect.addEventListener("change", () => {
+  const settings = state.db?.settings;
+  if (!settings) return;
+  // Choosing Hermes provider implies Hermes runtime for external agent path.
+  if (providerSelect.value === "hermes") {
+    settings.agentRuntime = "hermes";
+    if (agentRuntimeSelect) agentRuntimeSelect.value = "hermes";
+  }
+  renderAgentRuntimeControls();
+  renderProviderDetails();
+});
+agentRuntimeSelect?.addEventListener("change", () => {
+  const settings = state.db?.settings;
+  if (!settings) return;
+  settings.agentRuntime = agentRuntimeSelect.value || "openclaw";
+  // Keep provider list coherent when switching runtime.
+  if (settings.agentRuntime === "hermes") {
+    settings.providers ||= {};
+    settings.providers.hermes ||= {
+      name: "Hermes",
+      enabled: false,
+      baseURL: settings.hermes?.baseURL || "http://127.0.0.1:18791/v1",
+      apiKey: settings.hermes?.apiKey || "",
+      model: settings.hermes?.model || "hermes-default"
+    };
+    if (!settings.providers[settings.defaultProvider]) settings.defaultProvider = "hermes";
+  }
+  renderAgentRuntimeControls();
+  renderProviderDetails();
+  const current = settings.providers?.[settings.defaultProvider];
+  if (modelState) {
+    modelState.textContent = `${current?.name || "DeepSeek"} / ${settings.agentRuntime === "hermes" ? "Hermes" : "OpenClaw"} / ${reasoningLabel(settings.reasoning)}`;
+  }
+});
 skinSelect?.addEventListener("change", () => applySkinPreset(skinSelect.value));
 [textColorInput, accentColorInput, backgroundColorInput, panelColorInput, fontSizeInput].forEach((input) => {
   input?.addEventListener("input", () => {
@@ -2834,14 +3015,18 @@ api.onGatewayStatus((status) => {
   if (key === lastGatewayRenderState && now - lastGatewayRenderAt < 30000) return;
   lastGatewayRenderAt = now;
   lastGatewayRenderState = key;
+  const runtimeId = currentAgentRuntime(state.db?.settings || {});
+  const runtimeName = runtimeId === "hermes" ? "Hermes" : "OpenClaw";
   const map = {
-    connecting: "白球内核启动中",
-    connected: "白球内核已就绪",
-    disconnected: "白球内核重连中",
-    error: `白球内核异常 ${status.message || ""}`,
-    auth_failed: "白球内核鉴权失败"
+    connecting: `${runtimeName} 启动中`,
+    connected: `${runtimeName} 已就绪`,
+    disconnected: `${runtimeName} 重连中`,
+    error: `${runtimeName} 异常 ${status.message || ""}`,
+    auth_failed: `${runtimeName} 鉴权失败`,
+    unavailable: `${runtimeName} 不可用 ${status.message || ""}`,
+    idle: `${runtimeName} 待命`
   };
-  gatewayStatus.textContent = map[status.state] || status.state || "白球内核";
+  gatewayStatus.textContent = map[status.state] || status.state || `${runtimeName} 内核`;
 });
 
 window.updater?.onUpdateAvailable((data) => {

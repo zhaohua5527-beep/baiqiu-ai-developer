@@ -9,7 +9,7 @@ const { createHash, randomUUID } = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, shell, clipboard, dialog } = require("electron");
 const { getOpenClawConfig, CLOUD_MODEL_DEFAULTS, DEFAULT_RELAY_PROVIDER } = require("./config");
-const { GatewayClient } = require("./gateway-client");
+const { getAgentRuntime, RUNTIME_IDS, resolveRuntimeIdFromSettings } = require("./services/runtime");
 const { ToolRegistry } = require("./tool-registry");
 const { loadTools } = require("./tool-loader");
 const { ToolLogger } = require("./tool-logger");
@@ -63,8 +63,8 @@ try {
 
 let mainWindow;
 let tray;
-let gateway;
-let gatewayStartPromise = null;
+let agentRuntime = null;
+let gateway = null; // compatibility alias: OpenClaw GatewayClient via AgentRuntime
 let toolRegistry = null;
 let auditLogger = null;
 let memoryManager = null;
@@ -430,6 +430,18 @@ function defaultDb() {
     queue: [],
     settings: {
       defaultProvider: "relay",
+      agentRuntime: "openclaw",
+      hermes: {
+        enabled: false,
+        baseURL: "http://127.0.0.1:18791/v1",
+        host: "127.0.0.1",
+        port: 18791,
+        model: "hermes-default",
+        apiKey: "",
+        command: "",
+        args: [],
+        autoStart: true
+      },
       reasoning: "minimal",
       appearance: {
         skin: "custom",
@@ -506,6 +518,7 @@ function defaultDb() {
       providers: {
         relay: { ...DEFAULT_RELAY_PROVIDER, enabled: true, apiKey: "" },
         openclaw: { name: "OpenClaw", enabled: false, baseURL: "", apiKey: "", model: "gateway" },
+        hermes: { name: "Hermes", enabled: false, baseURL: "http://127.0.0.1:18791/v1", apiKey: "", model: "hermes-default" },
         deepseek: { name: CLOUD_MODEL_DEFAULTS.deepseek.name, enabled: false, baseURL: CLOUD_MODEL_DEFAULTS.deepseek.baseURL, apiKey: "", model: CLOUD_MODEL_DEFAULTS.deepseek.model },
         openai: { ...PRESET_PROVIDERS.openai, enabled: false, apiKey: "" },
         kimi: { ...PRESET_PROVIDERS.kimi, enabled: false, apiKey: "" },
@@ -532,6 +545,8 @@ function loadDb() {
   db.queue ||= [];
   db.settings ||= base.settings;
   db.settings.defaultProvider ||= "relay";
+  db.settings.agentRuntime ||= base.settings.agentRuntime || "openclaw";
+  db.settings.hermes = { ...base.settings.hermes, ...(db.settings.hermes || {}) };
   db.settings.reasoning ||= "minimal";
   db.settings.appearance = { ...base.settings.appearance, ...(db.settings.appearance || {}) };
   db.settings.license = { ...base.settings.license, ...(db.settings.license || {}) };
@@ -3021,55 +3036,49 @@ async function autoCheckForUpdates() {
   }
 }
 
-async function ensureGatewayRunning() {
-  const config = getOpenClawConfig();
-  if (await canConnect(config.port, config.host)) return true;
-  if (gatewayStartPromise) return gatewayStartPromise;
-  const gatewayCmd = path.join(app.getPath("home"), ".openclaw", "gateway.cmd");
-  const bundledEntry = bundledOpenClawEntry();
-  const openclawEntry = path.join(app.getPath("appData"), "npm", "node_modules", "openclaw", "dist", "index.js");
-  const nodeRunner = nodeLikeCommand();
-  let command = nodeRunner.command;
-  let args = [];
-  let cwd = "";
-  let extraEnv = nodeRunner.env;
-  if (bundledEntry) {
-    args = [bundledEntry, "gateway", "--port", String(config.port)];
-    cwd = path.dirname(bundledEntry);
-  } else if (fs.existsSync(openclawEntry)) {
-    args = [openclawEntry, "gateway", "--port", String(config.port)];
-    cwd = path.dirname(openclawEntry);
-  } else if (fs.existsSync(gatewayCmd)) {
-    command = "cmd.exe";
-    args = ["/c", gatewayCmd];
-    cwd = path.dirname(gatewayCmd);
-    extraEnv = {};
-  } else {
-    return false;
+function currentRuntimeSettings() {
+  try {
+    return loadDb()?.settings || {};
+  } catch {
+    return {};
   }
-  const child = spawn(command, args, {
-    cwd,
-    detached: true,
-    windowsHide: true,
-    stdio: "ignore",
-    env: { ...process.env, ...extraEnv, OPENCLAW_GATEWAY_PORT: String(config.port), OPENCLAW_SERVICE_MARKER: "openclaw" }
+}
+
+function ensureAgentRuntime(forceId = "") {
+  const settings = currentRuntimeSettings();
+  const runtimeId = forceId || resolveRuntimeIdFromSettings(settings, RUNTIME_IDS.OPENCLAW);
+  const hermes = settings.hermes || {};
+  const hermesProvider = settings.providers?.hermes || {};
+  const next = getAgentRuntime({
+    id: runtimeId,
+    appRoot: __dirname,
+    resourcesPath: process.resourcesPath,
+    getAppDataPath: () => app.getPath("appData"),
+    getHomePath: () => app.getPath("home"),
+    canConnect,
+    nodeLikeCommand,
+    config: runtimeId === RUNTIME_IDS.HERMES ? {
+      baseURL: hermes.baseURL || hermesProvider.baseURL || "http://127.0.0.1:18791/v1",
+      host: hermes.host || "127.0.0.1",
+      port: Number(hermes.port || 18791),
+      model: hermes.model || hermesProvider.model || "hermes-default",
+      apiKey: hermes.apiKey || hermesProvider.apiKey || "",
+      command: hermes.command || "",
+      args: Array.isArray(hermes.args) ? hermes.args : [],
+      autoStart: hermes.autoStart !== false
+    } : undefined
   });
-  child.unref();
-  gatewayStartPromise = new Promise((resolve) => {
-    const started = Date.now();
-    const timer = setInterval(async () => {
-      if (await canConnect(config.port, config.host, 800)) {
-        clearInterval(timer);
-        gatewayStartPromise = null;
-        resolve(true);
-      } else if (Date.now() - started > 60000) {
-        clearInterval(timer);
-        gatewayStartPromise = null;
-        resolve(false);
-      }
-    }, 500);
-  });
-  return gatewayStartPromise;
+  if (agentRuntime !== next) {
+    agentRuntime = next;
+    gateway = agentRuntime.getClient?.() || null;
+  } else {
+    gateway = agentRuntime.getClient?.() || gateway;
+  }
+  return agentRuntime;
+}
+
+async function ensureGatewayRunning() {
+  return ensureAgentRuntime().ensureStarted();
 }
 
 function sanitizeText(text) {
@@ -6598,17 +6607,19 @@ function resultMessages(raw = []) {
 
 async function pollForResult(localSessionId, openclawKey, baselineCount, runId, prefixText = "", options = {}) {
   const signal = options.signal || null;
+  const runtime = ensureAgentRuntime();
+  gateway = runtime.getClient();
   const started = Date.now();
   let lastFingerprint = "";
   let stable = 0;
   const handledToolIntents = new Set();
-  const debugRunId = agentDebugRunId("openclaw");
+  const debugRunId = agentDebugRunId(runtime.id || "openclaw");
   let loopNo = 0;
-  writeAgentDebugLog(debugRunId, `====================\nRun: ${debugRunId}\nOpenClaw Session: ${openclawKey}\n====================`);
+  writeAgentDebugLog(debugRunId, `====================\nRun: ${debugRunId}\n${runtime.name || "Runtime"} Session: ${openclawKey}\n====================`);
   while (Date.now() - started < 180000) {
     ensureRunActive(signal);
     await new Promise((resolve) => setTimeout(resolve, 500));
-    const history = await gateway.history(openclawKey, 120).catch(() => null);
+    const history = await runtime.history(openclawKey, 120).catch(() => null);
     const raw = (history && (history.messages || history.items)) || [];
     const responses = resultMessages(raw);
     const fingerprint = raw.map((message) => `${message.role}:${contentText(message.content || message.text).slice(0, 100)}`).join("|");
@@ -6656,10 +6667,10 @@ async function pollForResult(localSessionId, openclawKey, baselineCount, runId, 
             duration: item.response.duration
           })), null, 2)
         ].join("\n");
-        updateSession(localSessionId, { status: "running", openclawKey, lastRunId: runId || null });
+        updateSession(localSessionId, { status: "running", openclawKey, runtimeSessionKey: openclawKey, runtimeId: runtime.id, lastRunId: runId || null });
         mainWindow?.webContents.send("session:changed", loadDb());
-        devLog("agent", "INFO", "[OpenClaw] 回填 Tool Result", { sessionId: localSessionId, runId, toolCount: executed.length });
-        await gateway.sendChat({
+        devLog("agent", "INFO", `[${runtime.name || "Runtime"}] 回填 Tool Result`, { sessionId: localSessionId, runId, toolCount: executed.length });
+        await runtime.sendChat({
           sessionKey: openclawKey,
           message: toolResultMessage,
           systemPrompt: buildSystemPrompt(getPersonaProfile(loadDb().settings), loadDb().settings, loadDb().sessions.find((item) => item.id === localSessionId)?.memory || {}),
@@ -6827,8 +6838,9 @@ function launchInstalledUninstaller() {
 }
 
 function wireGateway() {
-  gateway = new GatewayClient();
-  gateway.on("status", (status) => {
+  const runtime = ensureAgentRuntime();
+  gateway = runtime.getClient();
+  runtime.onStatus((status) => {
     const now = Date.now();
     const state = String(status.state || "");
     const message = String(status.message || "");
@@ -6839,11 +6851,11 @@ function wireGateway() {
     }
     if ((status.state === "disconnected" || status.state === "error") && now - lastGatewayReconnectAt >= 30000) {
       lastGatewayReconnectAt = now;
-      ensureGatewayRunning().then(() => gateway.connect()).catch(() => {});
+      runtime.ensureStarted().then(() => runtime.connect()).catch(() => {});
     }
   });
-  gateway.on("event", (frame) => mainWindow?.webContents.send("gateway:event", frame));
-  ensureGatewayRunning().then(() => gateway.connect()).catch((error) => {
+  runtime.onEvent((frame) => mainWindow?.webContents.send("gateway:event", frame));
+  runtime.ensureStarted().then(() => runtime.connect()).catch((error) => {
     mainWindow?.webContents.send("gateway:status", { state: "error", message: error.message });
   });
 }
@@ -6851,40 +6863,49 @@ function wireGateway() {
 async function sendWithOpenClaw(session, payload, attachments, settings, prefixText = "", options = {}) {
   const signal = options.signal || null;
   ensureRunActive(signal);
-  await ensureGatewayRunning();
-  if (!gateway.connected) gateway.connect();
-  await gateway.waitUntilReady();
-  const openclawKey = session.openclawKey || `agent:main:desktop:${randomUUID()}`;
-  const history = await gateway.history(openclawKey, 120).catch(() => null);
+  const runtime = ensureAgentRuntime();
+  gateway = runtime.getClient();
+  await runtime.ensureStarted();
+  if (!runtime.connected) runtime.connect();
+  await runtime.waitUntilReady();
+  const sessionPrefix = runtime.id === RUNTIME_IDS.HERMES ? "agent:main:hermes" : "agent:main:desktop";
+  const openclawKey = session.runtimeSessionKey || session.openclawKey || `${sessionPrefix}:${randomUUID()}`;
+  const history = await runtime.history(openclawKey, 120).catch(() => null);
   const baseline = resultMessages((history && (history.messages || history.items)) || []).length;
   const systemPrompt = buildSystemPrompt(getPersonaProfile(settings), settings, session.memory || {});
   const userMessage = appendAttachmentText(applyChatOptions(payload.text, settings), attachments);
-  devLog("agent", "INFO", "[OpenClaw] 发送请求", {
+  const runtimeModel = settings.providers?.[runtime.id]?.model
+    || settings.providers?.[settings.defaultProvider]?.model
+    || settings.hermes?.model
+    || runtime.id;
+  devLog("agent", "INFO", `[${runtime.name || "Runtime"}] 发送请求`, {
     sessionId: session.id,
+    runtimeId: runtime.id,
     openclawKey,
-    model: settings.providers?.openclaw?.model || "openclaw",
+    model: runtimeModel,
     attachments: attachments.length
   });
   const startedAt = Date.now();
-  const result = await gateway.sendChat({
+  const result = await runtime.sendChat({
     sessionKey: openclawKey,
     message: `${systemPrompt}\n\n${userMessage}`,
     systemPrompt,
     attachments: attachments.map(gatewayAttachment).filter(Boolean),
     tools: toolSchemasForFunctionCalling()
   });
-  devLog("agent", "INFO", "[OpenClaw] 请求已发送", {
+  devLog("agent", "INFO", `[${runtime.name || "Runtime"}] 请求已发送`, {
     sessionId: session.id,
+    runtimeId: runtime.id,
     openclawKey,
     runId: result?.runId || null,
     durationMs: Date.now() - startedAt,
     tokenUsage: result?.usage || null
   });
-  updateSession(session.id, { openclawKey, status: "running", lastRunId: result?.runId || null });
+  updateSession(session.id, { openclawKey, runtimeSessionKey: openclawKey, runtimeId: runtime.id, status: "running", lastRunId: result?.runId || null });
   mainWindow?.webContents.send("session:changed", loadDb());
   const final = await pollForResult(session.id, openclawKey, baseline, result?.runId, prefixText, { signal });
   mainWindow?.webContents.send("session:changed", loadDb());
-  return { openclawKey, runId: result?.runId || null, ...final };
+  return { openclawKey, runtimeSessionKey: openclawKey, runtimeId: runtime.id, runId: result?.runId || null, ...final };
 }
 
 function wireIpc() {
@@ -6935,7 +6956,30 @@ function wireIpc() {
   });
   ipcMain.handle("settings:save", (_event, settings) => {
     const db = loadDb();
+    const previousRuntime = resolveRuntimeIdFromSettings(db.settings || {}, RUNTIME_IDS.OPENCLAW);
     db.settings = settings;
+    db.settings.agentRuntime ||= previousRuntime || "openclaw";
+    db.settings.hermes = {
+      ...(defaultDb().settings.hermes || {}),
+      ...(db.settings.hermes || {})
+    };
+    db.settings.providers ||= {};
+    db.settings.providers.hermes = {
+      name: "Hermes",
+      enabled: false,
+      baseURL: "http://127.0.0.1:18791/v1",
+      apiKey: "",
+      model: "hermes-default",
+      ...(db.settings.providers.hermes || {})
+    };
+    // Keep runtime/provider coherent.
+    if (String(db.settings.defaultProvider || "").toLowerCase() === "hermes") {
+      db.settings.agentRuntime = "hermes";
+      db.settings.providers.hermes.enabled = true;
+    }
+    if (String(db.settings.agentRuntime || "").toLowerCase() === "hermes") {
+      db.settings.hermes.enabled = true;
+    }
     const locked = normalizePersonaMemory(db.settings);
     db.settings.personaMemory = {
       ...locked,
@@ -6945,7 +6989,22 @@ function wireIpc() {
       persona: sanitizeText(db.settings.persona?.personality || locked.persona || defaultDb().settings.persona.personality)
     };
     syncPersonaMemory(db.settings);
-    return saveDb(db).settings;
+    const saved = saveDb(db).settings;
+    const nextRuntime = resolveRuntimeIdFromSettings(saved, RUNTIME_IDS.OPENCLAW);
+    // Rebuild runtime singleton when user switches OpenClaw/Hermes.
+    if (nextRuntime !== previousRuntime || nextRuntime === RUNTIME_IDS.HERMES) {
+      agentRuntime = null;
+      gateway = null;
+      try {
+        const runtime = ensureAgentRuntime(nextRuntime);
+        runtime.ensureStarted?.().then(() => {
+          if (!runtime.connected) runtime.connect?.();
+        }).catch(() => {});
+      } catch (error) {
+        console.error("[Runtime] switch failed:", error.message || error);
+      }
+    }
+    return saved;
   });
   ipcMain.handle("settings:choose-save-location", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -7323,7 +7382,8 @@ function wireIpc() {
     const session = loadDb().sessions.find((item) => item.id === id);
     const run = activeRuns.get(id);
     if (run?.controller && !run.controller.signal.aborted) run.controller.abort();
-    if (session?.openclawKey) await gateway.abortChat({ sessionKey: session.openclawKey, runId: session.lastRunId }).catch(() => null);
+    const runtimeKey = session?.runtimeSessionKey || session?.openclawKey;
+    if (runtimeKey) await ensureAgentRuntime().abortChat({ sessionKey: runtimeKey, runId: session.lastRunId }).catch(() => null);
     ensureTaskOrchestrator().cancelSession(id, "用户点击终止按钮。");
     recordAgentState(id, "cancelled", { intent: session?.agent?.intent || "general.chat", logicalTool: "abort" });
     mainWindow?.webContents?.send("session:changed", loadDb());

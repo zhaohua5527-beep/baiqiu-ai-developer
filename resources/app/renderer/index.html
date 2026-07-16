@@ -6,25 +6,26 @@
   <title>白球 AI</title>
   <link rel="stylesheet" href="./styles.css">
   <link rel="stylesheet" href="./styles-115.css">
+  <link rel="stylesheet" href="./styles-system.css">
 </head>
-<body>
+<body class="bq-orbital">
   <div class="app" id="app">
     <header class="titlebar">
       <div class="brand terminal-brand">
-        <div>
-          <strong>白球AI</strong>
-          <span id="gatewayStatus">内核就绪</span>
+        <div class="brand-copy">
+          <strong>白球 AI</strong>
+          <span id="gatewayStatus" class="orbit-status">内核就绪</span>
         </div>
       </div>
       <div class="title-actions">
         <span id="trialStatus" class="trial-status">试用检测中</span>
-        <button id="modelBtn" title="模型">模型</button>
-        <button id="skinBtn" title="主题">主题</button>
-        <button id="inviteBtn" title="生成客户兑换码">生成兑换码</button>
-        <button id="settingsBtn" title="设置">设置</button>
-        <button data-window="minimize" title="最小化">_</button>
-        <button data-window="maximize" title="最大化">□</button>
-        <button data-window="close" title="关闭到托盘">×</button>
+        <button id="modelBtn" class="btn-chip" title="模型">模型</button>
+        <button id="skinBtn" class="btn-chip" title="主题">主题</button>
+        <button id="inviteBtn" class="btn-chip" title="生成客户兑换码">生成兑换码</button>
+        <button id="settingsBtn" class="btn-chip" title="设置">设置</button>
+        <button data-window="minimize" class="btn-win" title="最小化">–</button>
+        <button data-window="maximize" class="btn-win" title="最大化">□</button>
+        <button data-window="close" class="btn-win btn-win-close" title="关闭到托盘">×</button>
       </div>
     </header>
 
@@ -45,9 +46,9 @@
         <div class="queue-title">预置任务</div>
         <div id="queueList" class="queue-list"></div>
       </section>
-      <form id="chatForm" class="composer">
+      <form id="chatForm" class="composer orbit-composer">
         <button id="attachBtn" type="button" title="上传文件">+</button>
-        <textarea id="chatInput" rows="1"></textarea>
+        <textarea id="chatInput" rows="1" placeholder="描述任务，例如：整理桌面文件 / 分析表格 / 生成本周计划"></textarea>
         <button id="accessModeBtn" class="access-mode-btn" type="button" title="访问模式">完全</button>
         <div id="reasoningWaterControl" class="reasoning-water-control" data-level="minimal">
           <div class="reasoning-water-shell">
@@ -55,11 +56,11 @@
             <input id="reasoningWaterRange" type="range" min="0" max="4" step="1" value="0" aria-label="切换思考等级">
           </div>
           <div class="reasoning-water-copy">
-            <span>切换思考等级</span>
+            <span>思考等级</span>
             <b id="reasoningWaterLabel">最低</b>
           </div>
         </div>
-        <button id="sendBtn" type="submit" title="发送"><span class="send-state-ring" aria-hidden="true"><i></i></span></button>
+        <button id="sendBtn" class="orbit-send" type="submit" title="发送"><span class="send-state-ring" aria-hidden="true"><i></i></span></button>
       </form>
       <input id="fileInput" type="file" multiple hidden accept="image/*,.xlsx,.xls,.csv,.txt,.md,.json">
     </main>
@@ -67,46 +68,58 @@
     <div id="licenseOverlay" class="license-overlay" hidden>
       <div class="license-panel">
         <div class="member-pay-title">
-          <span>您的免费试用已结束</span>
-          <strong>开通会员继续使用白球 AI</strong>
-          <p>选择套餐购买，或输入管理员发放的兑换码激活。</p>
+          <span>Trial Ended</span>
+          <strong>继续使用白球 AI</strong>
+          <p>先兑换码激活，或选择套餐开通会员。激活后本机能力立即恢复。</p>
         </div>
+
         <section class="member-redeem-card">
-          <div>
+          <div class="member-redeem-copy">
+            <span class="settings-chip">最快路径</span>
             <strong>兑换码激活</strong>
-            <p>管理员发放的永久兑换码，可直接在这里验证。</p>
+            <p>管理员发放的兑换码，粘贴后即可验证确认。</p>
           </div>
           <div class="member-redeem-row">
             <input id="licenseCodeInput" placeholder="BQ-XXXX-XXXX-XXXX" maxlength="19">
             <button id="licenseActivateBtn" type="button">验证确认</button>
           </div>
         </section>
-        <div class="plan-grid license-plan-grid member-plan-grid">
-          <button type="button" class="plan-card member-plan-card" data-buy-plan="monthly">
-            <em>新手体验</em>
-            <span>月卡</span>
-            <small>原价 ¥49.9</small>
-            <b>折扣价 ¥19.9</b>
-            <i>适用于新手体验</i>
-          </button>
-          <button type="button" class="plan-card member-plan-card" data-buy-plan="six_months">
-            <em>推荐长期使用</em>
-            <span>半年卡</span>
-            <small>原价 ¥99</small>
-            <b>折扣价 ¥88</b>
-            <i>适用于长期使用</i>
-          </button>
-          <button type="button" class="plan-card member-plan-card" data-buy-plan="yearly">
-            <em>重度使用</em>
-            <span>年卡</span>
-            <small>原价 ¥180</small>
-            <b>折扣价 ¥168</b>
-            <i>适用于重度使用</i>
-          </button>
+
+        <div class="member-plan-section">
+          <div class="member-plan-head">
+            <strong>选择套餐</strong>
+            <span>适合不同使用强度</span>
+          </div>
+          <div class="plan-grid license-plan-grid member-plan-grid">
+            <button type="button" class="plan-card member-plan-card" data-buy-plan="monthly">
+              <em>新手体验</em>
+              <span>月卡</span>
+              <small>原价 ¥49.9</small>
+              <b>¥19.9</b>
+              <i>轻量试用与短期项目</i>
+            </button>
+            <button type="button" class="plan-card member-plan-card is-featured" data-buy-plan="six_months">
+              <em>推荐</em>
+              <span>半年卡</span>
+              <small>原价 ¥99</small>
+              <b>¥88</b>
+              <i>长期使用更划算</i>
+            </button>
+            <button type="button" class="plan-card member-plan-card" data-buy-plan="yearly">
+              <em>重度使用</em>
+              <span>年卡</span>
+              <small>原价 ¥180</small>
+              <b>¥168</b>
+              <i>高频任务与团队场景</i>
+            </button>
+          </div>
         </div>
+
         <div id="licenseCustomerFields" class="license-customer-fields" hidden>
-          <input id="licenseNameInput" placeholder="姓名">
-          <input id="licensePhoneInput" placeholder="手机号">
+          <div class="settings-form-grid">
+            <input id="licenseNameInput" placeholder="姓名">
+            <input id="licensePhoneInput" placeholder="手机号">
+          </div>
           <p class="license-privacy">仅用于购买记录、售后和设备激活核验，不会用于无关用途。</p>
         </div>
         <div class="license-actions">
@@ -215,8 +228,11 @@
 
   <dialog id="settingsDialog" class="settings-dialog settings-hub">
     <form method="dialog">
-      <header>
-        <strong>白球 AI 设置中心</strong>
+      <header class="settings-header">
+        <div>
+          <span class="settings-kicker">Control Deck</span>
+          <strong>设置中心</strong>
+        </div>
         <button id="settingsCloseBtn" type="button" aria-label="关闭设置">×</button>
       </header>
       <div class="settings-tabs" role="tablist">
@@ -228,26 +244,64 @@
       </div>
 
       <section class="settings-page active" data-settings-page="model">
-        <div class="model-simple">
-          <label>
-            <span>模型</span>
-            <select id="providerSelect"></select>
-          </label>
-          <select id="reasoningSelect" hidden aria-hidden="true">
-            <option value="off">关闭</option>
-            <option value="minimal">最低</option>
-            <option value="low">低</option>
-            <option value="medium">中</option>
-            <option value="high">高</option>
-            <option value="extra_high">最高</option>
-          </select>
+        <div class="settings-section-head">
+          <div>
+            <span class="settings-section-kicker">Runtime</span>
+            <h3>模型与内核</h3>
+          </div>
+          <p>先选执行内核，再配置线路与密钥。默认保持 OpenClaw 兼容路径。</p>
         </div>
-        <div id="providerList" class="providers"></div>
+        <div class="settings-stack">
+          <div class="settings-card settings-card-primary">
+            <div class="settings-card-head">
+              <strong>执行路径</strong>
+              <span class="settings-chip">优先设置</span>
+            </div>
+            <div class="model-simple">
+              <label>
+                <span>Agent 内核</span>
+                <select id="agentRuntimeSelect">
+                  <option value="openclaw">OpenClaw</option>
+                  <option value="hermes">Hermes</option>
+                </select>
+              </label>
+              <label>
+                <span>模型线路</span>
+                <select id="providerSelect"></select>
+              </label>
+              <select id="reasoningSelect" hidden aria-hidden="true">
+                <option value="off">关闭</option>
+                <option value="minimal">最低</option>
+                <option value="low">低</option>
+                <option value="medium">中</option>
+                <option value="high">高</option>
+                <option value="extra_high">最高</option>
+              </select>
+            </div>
+            <div id="agentRuntimeNote" class="provider-note runtime-note">默认使用 OpenClaw 内核；切换到 Hermes 后，外部 Agent 路径将走 Hermes Runtime。</div>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head">
+              <strong>线路参数</strong>
+              <span class="settings-chip subtle">API / Base URL</span>
+            </div>
+            <div id="providerList" class="providers"></div>
+          </div>
+        </div>
       </section>
 
       <section class="settings-page" data-settings-page="skin">
-        <div class="appearance-settings">
-          <strong>经典主题</strong>
+        <div class="settings-section-head">
+          <div>
+            <span class="settings-section-kicker">Appearance</span>
+            <h3>外观主题</h3>
+          </div>
+          <p>主题决定整体气质；颜色与字号可继续细调。</p>
+        </div>
+        <div class="appearance-settings settings-card">
+          <div class="settings-card-head">
+            <strong>主题预设</strong>
+          </div>
           <label>
             <span>主题</span>
             <select id="skinSelect">
@@ -258,28 +312,32 @@
               <option value="wasteland">余烬荒原</option>
             </select>
           </label>
-          <label class="skin-image-picker">
-            <span>皮肤图片</span>
-            <input id="skinImageInput" type="file" accept="image/*">
-          </label>
-          <button id="clearSkinImageBtn" type="button">清除皮肤图片</button>
+          <div class="settings-inline-actions">
+            <label class="skin-image-picker">
+              <span>皮肤图片</span>
+              <input id="skinImageInput" type="file" accept="image/*">
+            </label>
+            <button id="clearSkinImageBtn" type="button">清除皮肤图片</button>
+          </div>
           <div id="skinImageStatus" class="update-content">上传图片后会作为白球背景皮肤。</div>
-          <label>
-            <span>文字颜色</span>
-            <input id="textColorInput" type="color" value="#f2ff64">
-          </label>
-          <label>
-            <span>主光颜色</span>
-            <input id="accentColorInput" type="color" value="#f7ff2f">
-          </label>
-          <label>
-            <span>背景颜色</span>
-            <input id="backgroundColorInput" type="color" value="#020402">
-          </label>
-          <label>
-            <span>面板颜色</span>
-            <input id="panelColorInput" type="color" value="#071008">
-          </label>
+          <div class="settings-color-grid">
+            <label>
+              <span>文字颜色</span>
+              <input id="textColorInput" type="color" value="#f2ff64">
+            </label>
+            <label>
+              <span>主光颜色</span>
+              <input id="accentColorInput" type="color" value="#f7ff2f">
+            </label>
+            <label>
+              <span>背景颜色</span>
+              <input id="backgroundColorInput" type="color" value="#020402">
+            </label>
+            <label>
+              <span>面板颜色</span>
+              <input id="panelColorInput" type="color" value="#071008">
+            </label>
+          </div>
           <label class="skin-picker">
             <span>文字大小</span>
             <input id="fontSizeInput" type="range" min="12" max="22" step="1" value="16">
@@ -288,49 +346,83 @@
       </section>
 
       <section class="settings-page" data-settings-page="update">
-        <div class="settings-card">
-          <strong>版本更新</strong>
-          <div class="stat"><span>当前版本</span><b id="appVersion">0.2.0</b></div>
-          <div class="update-server-status"><span>更新服务器</span><b>白球官方线路</b><i>自动连接</i></div>
-          <button id="updateCheckBtn" type="button">检查服务器更新</button>
-          <button id="applyOnlineUpdateBtn" type="button" hidden>确认更新</button>
-          <button id="syncOpenClawBtn" type="button" hidden>同步 OpenClaw 最新功能</button>
-          <label>
-            <span>开机自启动</span>
-            <input id="autoLaunchInput" type="checkbox">
-          </label>
-          <div id="updateContent" class="update-content">等待检查。</div>
+        <div class="settings-section-head">
+          <div>
+            <span class="settings-section-kicker">System</span>
+            <h3>更新与存储</h3>
+          </div>
+          <p>版本检查、开机启动和文件落盘位置集中在这里。</p>
         </div>
-        <div id="publishUpdatePanel" class="settings-card" hidden>
-          <strong>发布客户更新</strong>
-          <label>
-            <span>新版本号</span>
-            <input id="publishVersionInput" placeholder="例如：1.0.1">
-          </label>
-          <label class="skill-editor-row">
-            <span>更新说明</span>
-            <textarea id="publishNotesInput" rows="4" placeholder="写给客户看的更新内容。"></textarea>
-          </label>
-          <button id="publishUpdateBtn" type="button">发布客户版更新</button>
-          <button id="syncUpdateServerBtn" type="button">同步到服务器</button>
-          <button id="startUpdateServerBtn" type="button">启动本地更新服务器</button>
-          <div class="update-content">后续新版本直接同步到 https://baiqiuai.xiaoxin8.com/。</div>
-        </div>
-        <div class="settings-card">
-          <strong>文件保存</strong>
-          <label>
-            <span>保存位置</span>
-            <input id="saveLocationInput" readonly value="desktop">
-          </label>
-          <button id="chooseSaveLocationBtn" type="button">选择文件夹</button>
-          <button id="resetSaveLocationBtn" type="button">恢复桌面</button>
-          <div class="update-content">白球生成的表格、文本和导出文件默认保存到这里。</div>
+        <div class="settings-stack">
+          <div class="settings-card">
+            <div class="settings-card-head">
+              <strong>版本更新</strong>
+              <span class="settings-chip">官方线路</span>
+            </div>
+            <div class="settings-meta-row">
+              <div class="stat"><span>当前版本</span><b id="appVersion">0.2.0</b></div>
+              <div class="update-server-status"><span>更新服务器</span><b>白球官方线路</b><i>自动连接</i></div>
+            </div>
+            <div class="settings-inline-actions">
+              <button id="updateCheckBtn" type="button">检查服务器更新</button>
+              <button id="applyOnlineUpdateBtn" type="button" hidden>确认更新</button>
+              <button id="syncOpenClawBtn" type="button" hidden>同步 OpenClaw 最新功能</button>
+            </div>
+            <label class="checkbox-row settings-check-row">
+              <input id="autoLaunchInput" type="checkbox">
+              <span>开机自启动</span>
+            </label>
+            <div id="updateContent" class="update-content">等待检查。</div>
+          </div>
+          <div id="publishUpdatePanel" class="settings-card" hidden>
+            <div class="settings-card-head">
+              <strong>发布客户更新</strong>
+              <span class="settings-chip subtle">开发者</span>
+            </div>
+            <label>
+              <span>新版本号</span>
+              <input id="publishVersionInput" placeholder="例如：1.0.1">
+            </label>
+            <label class="skill-editor-row">
+              <span>更新说明</span>
+              <textarea id="publishNotesInput" rows="4" placeholder="写给客户看的更新内容。"></textarea>
+            </label>
+            <div class="settings-inline-actions">
+              <button id="publishUpdateBtn" type="button">发布客户版更新</button>
+              <button id="syncUpdateServerBtn" type="button">同步到服务器</button>
+              <button id="startUpdateServerBtn" type="button">启动本地更新服务器</button>
+            </div>
+            <div class="update-content">后续新版本直接同步到 https://baiqiuai.xiaoxin8.com/。</div>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head">
+              <strong>文件保存</strong>
+            </div>
+            <label>
+              <span>保存位置</span>
+              <input id="saveLocationInput" readonly value="desktop">
+            </label>
+            <div class="settings-inline-actions">
+              <button id="chooseSaveLocationBtn" type="button">选择文件夹</button>
+              <button id="resetSaveLocationBtn" type="button">恢复桌面</button>
+            </div>
+            <div class="update-content">白球生成的表格、文本和导出文件默认保存到这里。</div>
+          </div>
         </div>
       </section>
 
       <section class="settings-page" data-settings-page="persona">
+        <div class="settings-section-head">
+          <div>
+            <span class="settings-section-kicker">Identity</span>
+            <h3>助手人设</h3>
+          </div>
+          <p>名字、性格与能力会进入后续回复与执行风格。</p>
+        </div>
         <div class="settings-card">
-          <strong>Agent 设定</strong>
+          <div class="settings-card-head">
+            <strong>Agent 设定</strong>
+          </div>
           <label>
             <span>名字</span>
             <input id="personaNameSettingsInput" placeholder="例如：白球、运营执行官、小白">
@@ -351,21 +443,33 @@
       </section>
 
       <section class="settings-page" data-settings-page="invite">
+        <div class="settings-section-head">
+          <div>
+            <span class="settings-section-kicker">License</span>
+            <h3>兑换码发放</h3>
+          </div>
+          <p>生成后直接复制发给客户，可附备注方便追溯。</p>
+        </div>
         <div id="ownerInvitePanel" class="settings-card developer-code-generator">
-          <strong>生成兑换码</strong>
-          <label>
-            <span>生成数量</span>
-            <input id="inviteCountInput" type="number" min="1" max="50" value="5">
-          </label>
-          <label>
-            <span>兑换码类型</span>
-            <select id="inviteTypeSelect">
-              <option value="lifetime">永久兑换码</option>
-              <option value="weekly">周卡兑换码</option>
-              <option value="monthly">月卡兑换码</option>
-              <option value="six_months">半年卡兑换码</option>
-            </select>
-          </label>
+          <div class="settings-card-head">
+            <strong>生成兑换码</strong>
+            <span class="settings-chip subtle">管理员</span>
+          </div>
+          <div class="settings-form-grid">
+            <label>
+              <span>生成数量</span>
+              <input id="inviteCountInput" type="number" min="1" max="50" value="5">
+            </label>
+            <label>
+              <span>兑换码类型</span>
+              <select id="inviteTypeSelect">
+                <option value="lifetime">永久兑换码</option>
+                <option value="weekly">周卡兑换码</option>
+                <option value="monthly">月卡兑换码</option>
+                <option value="six_months">半年卡兑换码</option>
+              </select>
+            </label>
+          </div>
           <label>
             <span>发放备注</span>
             <input id="inviteNotesInput" placeholder="选填：客户姓名或用途">
@@ -375,49 +479,76 @@
         </div>
       </section>
 
-      <section class="settings-page" data-settings-page="skills">        <div class="settings-card">
-          <strong>当前 OpenClaw 技能</strong>
-          <div id="skillList" class="skill-list">读取中。</div>
+      <section class="settings-page" data-settings-page="skills">
+        <div class="settings-section-head">
+          <div>
+            <span class="settings-section-kicker">Skills</span>
+            <h3>技能与记忆</h3>
+          </div>
+          <p>已有技能、自建技能、长期记忆和专业学习分区管理。</p>
         </div>
-        <div class="settings-card">
-          <strong>白球 AI 自学习技能</strong>
-          <label>
-            <span>技能名</span>
-            <input id="skillNameInput" placeholder="例如：美团运营分析">
-          </label>
-          <label class="skill-editor-row">
-            <span>技能内容</span>
-            <textarea id="skillBodyInput" rows="6" placeholder="写入技能规则、流程、常用判断方式。保存后会进入白球 AI 技能库。"></textarea>
-          </label>
-          <button id="addSkillBtn" type="button">添加技能</button>
-        </div>
-        <div class="settings-card">
-          <strong>白球长期记忆</strong>
-          <label class="skill-editor-row">
-            <span>记忆内容</span>
-            <textarea id="memoryInput" rows="4" placeholder="例如：老板喜欢直接给结论；小柴购相关文件不要移动；表格默认保存在桌面。"></textarea>
-          </label>
-          <button id="addMemoryBtn" type="button">保存记忆</button>
-          <div id="memoryList" class="skill-list memory-list" hidden>后台记忆已开启。</div>
-        </div>
-        <div class="settings-card">
-          <strong>专业技能学习</strong>
-          <label>
-            <span>技能名</span>
-            <input id="learnSkillNameInput" placeholder="可选，例如：外卖运营诊断">
-          </label>
-          <label>
-            <span>资料/主题</span>
-            <input id="learnSkillSourceInput" placeholder="粘贴专业资料网址，或输入要学习的专业主题">
-          </label>
-          <button id="learnSkillBtn" type="button">学习专业技能</button>
-          <div id="learnSkillStatus" class="skill-learn-status"></div>
+        <div class="settings-stack">
+          <div class="settings-card">
+            <div class="settings-card-head">
+              <strong>当前 OpenClaw 技能</strong>
+            </div>
+            <div id="skillList" class="skill-list">读取中。</div>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head">
+              <strong>白球 AI 自学习技能</strong>
+            </div>
+            <label>
+              <span>技能名</span>
+              <input id="skillNameInput" placeholder="例如：美团运营分析">
+            </label>
+            <label class="skill-editor-row">
+              <span>技能内容</span>
+              <textarea id="skillBodyInput" rows="6" placeholder="写入技能规则、流程、常用判断方式。保存后会进入白球 AI 技能库。"></textarea>
+            </label>
+            <button id="addSkillBtn" type="button">添加技能</button>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head">
+              <strong>白球长期记忆</strong>
+            </div>
+            <label class="skill-editor-row">
+              <span>记忆内容</span>
+              <textarea id="memoryInput" rows="4" placeholder="例如：老板喜欢直接给结论；小柴购相关文件不要移动；表格默认保存在桌面。"></textarea>
+            </label>
+            <button id="addMemoryBtn" type="button">保存记忆</button>
+            <div id="memoryList" class="skill-list memory-list" hidden>后台记忆已开启。</div>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head">
+              <strong>专业技能学习</strong>
+            </div>
+            <label>
+              <span>技能名</span>
+              <input id="learnSkillNameInput" placeholder="可选，例如：外卖运营诊断">
+            </label>
+            <label>
+              <span>资料/主题</span>
+              <input id="learnSkillSourceInput" placeholder="粘贴专业资料网址，或输入要学习的专业主题">
+            </label>
+            <button id="learnSkillBtn" type="button">学习专业技能</button>
+            <div id="learnSkillStatus" class="skill-learn-status"></div>
+          </div>
         </div>
       </section>
 
       <section id="developerLogsPage" class="settings-page" data-settings-page="developerLogs" hidden>
+        <div class="settings-section-head">
+          <div>
+            <span class="settings-section-kicker">Diagnostics</span>
+            <h3>开发者日志</h3>
+          </div>
+          <p>仅开发者版本可见，用于排查系统、Agent 与更新问题。</p>
+        </div>
         <div class="settings-card">
-          <strong>开发者日志</strong>
+          <div class="settings-card-head">
+            <strong>日志查看</strong>
+          </div>
           <label>
             <span>日志类型</span>
             <select id="developerLogTypeSelect">
@@ -427,7 +558,7 @@
               <option value="error">错误日志</option>
             </select>
           </label>
-          <div class="admin-code-tools">
+          <div class="admin-code-tools settings-inline-actions">
             <button id="refreshDeveloperLogsBtn" type="button">刷新日志</button>
             <button id="exportDeveloperLogsBtn" type="button">导出日志</button>
           </div>
@@ -435,8 +566,9 @@
         </div>
       </section>
 
-      <menu>
-        <button id="saveSettingsBtn" value="default">保存</button>
+      <menu class="settings-footer">
+        <div class="settings-footer-copy">修改后记得保存，内核切换会在保存后生效。</div>
+        <button id="saveSettingsBtn" value="default">保存设置</button>
       </menu>
     </form>
   </dialog>
