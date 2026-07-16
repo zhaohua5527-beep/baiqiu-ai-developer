@@ -16,7 +16,12 @@ class AgentServices {
   }
 
   canUseOpenClaw(input) {
-    return input.settings?.defaultProvider === "openclaw";
+    // Compatible name kept for strategy wiring.
+    // Routes to external agent runtime (OpenClaw or Hermes).
+    const provider = String(input.settings?.defaultProvider || "").toLowerCase();
+    const runtimeId = String(input.settings?.agentRuntime || input.settings?.runtimeId || "").toLowerCase();
+    if (runtimeId === "hermes" || provider === "hermes") return true;
+    return provider === "openclaw" || runtimeId === "openclaw";
   }
 
   async executeImageGuard(input) {
@@ -129,20 +134,23 @@ class AgentServices {
   }
 
   async executeOpenClaw(input) {
+    // Compatible method name kept for strategy wiring; implementation is runtime-agnostic.
     const { session, payload, effectiveText, attachments, settings, personaPrefix, controller, traceId } = input;
     const { loadDb, recordAgentState, detectIntent, sendWithOpenClaw } = this.deps;
     const modelSession = loadDb().sessions.find((item) => item.id === session.id) || session;
-    recordAgentState(session.id, "intent_detected", { intent: detectIntent(effectiveText), logicalTool: "openclaw_agent_loop", currentAgent: "supervisor", goal: effectiveText });
-    recordAgentState(session.id, "executing", { intent: detectIntent(effectiveText), logicalTool: "openclaw_agent_loop", currentAgent: "executor", goal: effectiveText });
+    const runtimeId = String(settings?.agentRuntime || settings?.runtimeId || settings?.defaultProvider || "openclaw").toLowerCase();
+    const logicalTool = runtimeId === "hermes" ? "hermes_agent_loop" : "external_agent_loop";
+    recordAgentState(session.id, "intent_detected", { intent: detectIntent(effectiveText), logicalTool, currentAgent: "supervisor", goal: effectiveText });
+    recordAgentState(session.id, "executing", { intent: detectIntent(effectiveText), logicalTool, currentAgent: "executor", goal: effectiveText });
     const result = await sendWithOpenClaw(modelSession, { ...payload, text: effectiveText }, attachments, settings, personaPrefix, { signal: controller.signal, traceId });
     const ok = result?.status === "done" || result?.status === "success";
-    recordAgentState(session.id, ok ? "completed" : "failed", { intent: detectIntent(effectiveText), logicalTool: "openclaw_agent_loop" });
+    recordAgentState(session.id, ok ? "completed" : "failed", { intent: detectIntent(effectiveText), logicalTool });
     return {
       success: ok,
       status: ok ? "success" : "failed",
       message: result?.text || "",
       raw: result,
-      clientResponse: { ok: true, sessionId: session.id, ...result, agentController: true }
+      clientResponse: { ok: true, sessionId: session.id, ...result, agentController: true, runtimeId: result?.runtimeId || runtimeId || "openclaw" }
     };
   }
 

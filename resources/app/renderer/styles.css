@@ -900,6 +900,22 @@ body.running .progress span {
   gap: 10px;
 }
 
+.runtime-note {
+  margin: 0 0 12px;
+}
+
+.checkbox-row {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  grid-template-columns: none !important;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
 .model-simple span {
   color: var(--muted);
 }
