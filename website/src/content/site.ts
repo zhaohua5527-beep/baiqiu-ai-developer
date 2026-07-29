@@ -6,7 +6,7 @@ export const site = {
   year: 2026,
   platform: "Windows",
   platformStatus: "Windows 桌面端",
-  downloadUrl: null as string | null,
+  downloadUrl: "/download",
   docsUrl: null as string | null,
   contactUrl: null as string | null,
   privacyUrl: "/privacy",
