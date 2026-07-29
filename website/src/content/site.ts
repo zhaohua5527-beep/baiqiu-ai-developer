@@ -6,7 +6,6 @@ export const site = {
   year: 2026,
   platform: "Windows",
   platformStatus: "Windows 桌面端",
-  githubUrl: "https://github.com/zhaohua5527-beep/baiqiu-ai-developer",
   downloadUrl: null as string | null,
   docsUrl: null as string | null,
   contactUrl: null as string | null,
@@ -25,33 +24,23 @@ export const site = {
     "OpenClaw",
   ],
   hero: {
-    titleLines: ["一个 AI，", "帮你把事情真正做完。"],
+    titleLines: ["把想法交给白球。", "让结果回到你手上。"],
     subtitle:
-      "白球 AI 不止回答问题。它理解你的目标，整理信息，调用工具，并把复杂任务一步步推进到结果。",
-    primaryCta: { label: "认识白球 AI", href: "#capabilities" },
-    secondaryCta: {
-      label: "查看 GitHub",
-      href: "https://github.com/zhaohua5527-beep/baiqiu-ai-developer",
-      external: true,
-    },
+      "白球理解目标、组织信息、调用工具，把复杂任务推进到可验证的结果。",
+    primaryCta: { label: "看看白球怎么完成", href: "#journey" },
   },
   brandStatement: {
-    headline: "普通 AI 给你答案，白球 AI 帮你继续往下做。",
-    body: "描述一个目标，白球会拆解步骤、调用本地能力、验证结果，再把可继续使用的成果交还给你。",
+    headline: "不是多聊几句，是继续往下做。",
+    body: "从理解目标到调用本地能力，白球把一次请求变成可观察、可验证的执行过程。",
   },
   brandClose: {
-    headline: "把想法交给白球，把结果留给自己。",
-    body: "从桌面文件到表格分析，从模糊计划到可执行清单，白球把执行过程留在你的电脑工作流里。",
+    headline: "把复杂过程交给白球，把可用结果留给自己。",
+    body: "桌面文件、表格、资料和计划，都能在同一条任务轨道里继续推进。",
   },
   finalCta: {
-    title: "开始认识白球 AI",
-    body: "探索产品能力，或在 GitHub 查看项目源码与开发者版本。",
+    title: "让白球从一个目标开始。",
+    body: "先看看它如何理解任务、调用能力，再把结果带回你的桌面。",
     primary: { label: "探索白球 AI", href: "#product" },
-    secondary: {
-      label: "在 GitHub 查看项目",
-      href: "https://github.com/zhaohua5527-beep/baiqiu-ai-developer",
-      external: true,
-    },
     downloadLabel: "Windows 版本准备中",
   },
   desktop: {
@@ -73,7 +62,8 @@ export const site = {
     ],
   },
   nav: [
-    { label: "产品能力", href: "#capabilities" },
+    { label: "能力", href: "#capabilities" },
+    { label: "如何完成", href: "#journey" },
     { label: "使用场景", href: "#usecases" },
     { label: "产品界面", href: "#product" },
     { label: "常见问题", href: "#faq" },

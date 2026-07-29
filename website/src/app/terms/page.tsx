@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { BrandMark } from "@/components/BrandMark";
-import { site } from "@/content/site";
 
 export default function TermsPage() {
   return (
@@ -26,13 +25,6 @@ export default function TermsPage() {
           </p>
           <p>
             软件按现状提供。开发者版本、试用与会员能力可能随版本变化。具体许可状态以客户端内显示为准。
-          </p>
-          <p>
-            项目源码与更新见{" "}
-            <a className="text-[#1a2430] underline" href={site.githubUrl}>
-              {site.githubUrl}
-            </a>
-            。
           </p>
         </div>
       </main>

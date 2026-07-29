@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { BrandMark } from "@/components/BrandMark";
-import { site } from "@/content/site";
 
 export default function PrivacyPage() {
   return (
@@ -26,13 +25,6 @@ export default function PrivacyPage() {
           </p>
           <p>
             购买与兑换流程中如收集姓名或手机号，产品界面说明用于购买记录、售后和设备激活核验，不用于无关用途。更完整的数据处理说明将在正式隐私政策中发布。
-          </p>
-          <p>
-            如需了解项目现状，请访问{" "}
-            <a className="text-[#1a2430] underline" href={site.githubUrl}>
-              GitHub 仓库
-            </a>
-            。
           </p>
         </div>
       </main>

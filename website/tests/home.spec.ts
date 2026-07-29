@@ -5,7 +5,7 @@ test.describe("白球 AI marketing site", () => {
     await page.goto("/");
     await expect(page).toHaveTitle(/白球 AI/);
     await expect(page.getByRole("heading", { level: 1 })).toContainText(
-      "帮你把事情真正做完",
+      "把想法交给白球",
     );
     await expect(page.locator("#capabilities")).toBeVisible();
     await expect(page.locator("#usecases")).toBeVisible();
@@ -14,6 +14,12 @@ test.describe("白球 AI marketing site", () => {
 
     await page.getByRole("link", { name: "产品能力" }).first().click();
     await expect(page.locator("#capabilities")).toBeInViewport();
+  });
+
+  test("does not expose GitHub marketing links", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByRole("link", { name: /GitHub|查看项目/i })).toHaveCount(0);
+    await expect(page.getByText(/在 GitHub 查看项目|查看 GitHub/)).toHaveCount(0);
   });
 
   test("faq accordion is keyboard operable", async ({ page }) => {
