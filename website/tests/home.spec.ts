@@ -22,6 +22,14 @@ test.describe("白球 AI marketing site", () => {
     await expect(page.getByText(/在 GitHub 查看项目|查看 GitHub/)).toHaveCount(0);
   });
 
+  test("renders structural design primitives", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".floating-nav")).toBeVisible();
+    await expect(page.locator(".bezel").first()).toBeVisible();
+    await expect(page.locator(".z-card").first()).toBeVisible();
+    await expect(page.locator(".orbital-window")).toBeVisible();
+  });
+
   test("faq accordion is keyboard operable", async ({ page }) => {
     await page.goto("/#faq");
     const first = page.locator("#faq button").first();
