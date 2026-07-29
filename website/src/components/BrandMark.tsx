@@ -15,7 +15,7 @@ export function BrandMark({
     <span className={cn("inline-flex items-center gap-2.5", className)}>
       <span
         aria-hidden="true"
-        className="relative grid place-items-center overflow-hidden rounded-[22%] bg-white shadow-[0_8px_24px_rgba(15,23,42,0.12)]"
+        className="brand-mark__symbol relative grid place-items-center overflow-hidden rounded-[28%] bg-white shadow-[0_8px_24px_rgba(15,23,42,0.12)]"
         style={{ width: size, height: size }}
       >
         <svg viewBox="0 0 64 64" width={size * 0.72} height={size * 0.72}>
@@ -43,7 +43,7 @@ export function BrandMark({
         </svg>
       </span>
       {showWordmark ? (
-        <span className="text-[0.98rem] font-semibold tracking-tight text-[var(--page-fg)]">
+        <span className="brand-mark__wordmark text-[0.98rem] font-semibold tracking-tight text-[var(--page-fg)]">
           白球 AI
         </span>
       ) : null}

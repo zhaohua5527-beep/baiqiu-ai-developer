@@ -22,6 +22,19 @@ test.describe("白球 AI marketing site", () => {
     await expect(page.getByText(/在 GitHub 查看项目|查看 GitHub/)).toHaveCount(0);
   });
 
+  test("floating nav and mobile overlay work", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".floating-nav")).toBeVisible();
+    await expect(page.getByRole("link", { name: "开始探索" })).toHaveCount(1);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const menu = page.getByRole("button", { name: "打开菜单" });
+    await menu.click();
+    await expect(menu).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByRole("navigation", { name: "移动导航" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveAttribute("aria-expanded", "false");
+  });
+
   test("renders structural design primitives", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".floating-nav")).toBeVisible();
