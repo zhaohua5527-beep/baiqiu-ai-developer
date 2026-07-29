@@ -14,15 +14,7 @@ export function Footer() {
         </div>
         <div className="grid grid-cols-2 gap-6 text-sm">
           <div className="space-y-2">
-            <p className="font-medium">项目</p>
-            <a
-              href={site.githubUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="block text-[var(--page-muted)] hover:text-[var(--page-fg)]"
-            >
-              GitHub
-            </a>
+            <p className="font-medium">产品</p>
             <a
               href="#capabilities"
               className="block text-[var(--page-muted)] hover:text-[var(--page-fg)]"

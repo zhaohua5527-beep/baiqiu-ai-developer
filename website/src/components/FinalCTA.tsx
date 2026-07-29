@@ -26,14 +26,6 @@ export function FinalCTA() {
             <span className="orbit-ring" aria-hidden="true" />
             {site.finalCta.primary.label}
           </a>
-          <a
-            href={site.finalCta.secondary.href}
-            target="_blank"
-            rel="noreferrer"
-            className="btn btn-secondary"
-          >
-            {site.finalCta.secondary.label}
-          </a>
         </div>
         {!site.downloadUrl ? (
           <p className="mt-5 text-sm text-[var(--page-muted)]">
