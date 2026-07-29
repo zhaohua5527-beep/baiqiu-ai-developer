@@ -12,7 +12,7 @@ test.describe("白球 AI marketing site", () => {
     await expect(page.locator("#product")).toBeVisible();
     await expect(page.locator("#faq")).toBeVisible();
 
-    await page.getByRole("link", { name: "产品能力" }).first().click();
+    await page.getByRole("link", { name: "能力", exact: true }).first().click();
     await expect(page.locator("#capabilities")).toBeInViewport();
   });
 
