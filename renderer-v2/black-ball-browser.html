@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>黑球浏览器</title>
+  <link rel="stylesheet" href="black-ball-browser.css">
+</head>
+<body>
+  <header class="browser-toolbar">
+    <div class="browser-brand" title="黑球浏览器"><i></i><span>黑球</span></div>
+    <nav aria-label="网页导航">
+      <button id="backBtn" type="button" title="后退" aria-label="后退">&#x2190;</button>
+      <button id="forwardBtn" type="button" title="前进" aria-label="前进">&#x2192;</button>
+      <button id="reloadBtn" type="button" title="刷新" aria-label="刷新">&#x21bb;</button>
+      <button id="homeBtn" type="button" title="主页" aria-label="主页">&#x2302;</button>
+    </nav>
+    <form id="addressForm">
+      <span id="securityState" title="网页连接状态">&#x25cf;</span>
+      <input id="addressInput" type="text" autocomplete="off" spellcheck="false" aria-label="网址或搜索词" placeholder="输入网址或使用 Google 搜索">
+    </form>
+    <div class="browser-actions">
+      <span id="loadingState" aria-live="polite"></span>
+      <button id="analyzeBtn" class="primary" type="button" title="提取当前页面内容并发送到原会话">分析当前页</button>
+      <button id="externalBtn" type="button" title="使用系统浏览器打开当前网页" aria-label="外部打开">外部打开</button>
+    </div>
+  </header>
+  <div id="errorBar" class="browser-error" hidden></div>
+  <script src="black-ball-browser.js"></script>
+</body>
+</html>

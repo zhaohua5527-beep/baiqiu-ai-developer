@@ -1,0 +1,42 @@
+:root {
+  color-scheme: light;
+  --browser-background: #ffffff;
+  --browser-surface: #ffffff;
+  --browser-panel: #ffffff;
+  --browser-text: #172033;
+  --browser-muted: #737a84;
+  --browser-accent: #2563eb;
+  --browser-line: #e5e8eb;
+  --browser-line-strong: #d8dde2;
+  --browser-accent-soft: #eaf1ff;
+  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  background: var(--browser-background);
+  color: var(--browser-text);
+}
+
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--browser-background); color: var(--browser-text); }
+button, input { font: inherit; }
+.browser-toolbar { display: grid; grid-template-columns: auto auto minmax(220px, 1fr) auto; height: 58px; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--browser-line); background: var(--browser-surface); }
+.browser-brand { display: flex; align-items: center; gap: 7px; min-width: 62px; font-size: 13px; font-weight: 700; }
+.browser-brand i { width: 16px; height: 16px; border-radius: 50%; background: var(--browser-text); box-shadow: inset 0 0 0 4px var(--browser-muted); }
+nav, .browser-actions { display: flex; align-items: center; gap: 4px; }
+button { display: inline-grid; min-width: 34px; height: 34px; place-items: center; padding: 0 9px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--browser-text); cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--browser-line-strong); background: var(--browser-accent-soft); }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { opacity: .35; cursor: default; }
+button.primary { border-color: var(--browser-accent); background: var(--browser-accent); color: #fff; white-space: nowrap; }
+button.primary:hover:not(:disabled) { filter: brightness(.92); }
+#addressForm { display: grid; grid-template-columns: auto minmax(0, 1fr); height: 38px; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--browser-line-strong); border-radius: 7px; background: var(--browser-panel); }
+#addressForm:focus-within { border-color: var(--browser-accent); box-shadow: 0 0 0 2px var(--browser-accent-soft); }
+#addressInput { width: 100%; border: 0; outline: 0; background: transparent; color: var(--browser-text); font-size: 13px; }
+#securityState { color: var(--browser-muted); font-size: 9px; }
+#securityState[data-secure="true"] { color: #2c9a62; }
+#loadingState { min-width: 36px; color: var(--browser-muted); font-size: 11px; }
+.browser-error { position: fixed; top: 58px; right: 0; left: 0; z-index: 10; padding: 7px 14px; border-bottom: 1px solid #e4b4b4; background: #fff0f0; color: #a22b2b; font-size: 12px; }
+@media (max-width: 880px) {
+  .browser-brand span, #loadingState { display: none; }
+  .browser-toolbar { grid-template-columns: auto auto minmax(180px, 1fr) auto; gap: 5px; padding-inline: 7px; }
+  button.primary { width: 34px; overflow: hidden; color: transparent; }
+  button.primary::after { color: #fff; content: "AI"; }
+}

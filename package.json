@@ -1,0 +1,139 @@
+{
+  "name": "baiqiu-ai",
+  "version": "3.0.4",
+  "description": "Baiqiu AI desktop client powered by Hermes Agent",
+  "main": "main.js",
+  "scripts": {
+    "build": "electron-builder --win --config",
+    "build:dir": "electron-builder --win --dir",
+    "prepare:hms": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\scripts\\prepare-bundled-hms.ps1",
+    "build:hms": "npm run prepare:hms && electron-builder --win --config",
+    "test:hms-background-install": "node --test test/hms-background-install.test.js",
+    "test:conversation-routing": "node --test test/conversation-routing.test.js",
+    "test:hermes-prompt-timeout": "node --test test/hermes-acp-client-timeout.test.js",
+    "test:progressive-typing": "node --test test/progressive-typing-render.test.js",
+    "test:sidebar-typography": "node --test test/sidebar-typography.test.js"
+  },
+  "private": true,
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.3.0",
+    "adler-32": "^1.3.1",
+    "better-sqlite3": "^13.0.1",
+    "cheerio": "^1.1.2",
+    "docx": "^9.5.1",
+    "fast-xml-parser": "^5.7.0",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.0",
+    "marked": "^15.0.12",
+    "pdf-parse": "^1.1.1",
+    "ws": "^8.18.0",
+    "xlsx": "^0.18.5",
+    "yaml": "^2.8.1",
+    "zod": "^4.4.3"
+  },
+  "productName": "白球AI",
+  "build": {
+    "appId": "com.baiqiu.ai",
+    "productName": "白球AI",
+    "directories": {
+      "output": "dist"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "compression": "store",
+    "asar": false,
+    "asarUnpack": [
+      "node_modules/@agentclientprotocol/sdk/**/*",
+      "node_modules/zod/**/*",
+      "services/hermes-direct-delegation.py"
+    ],
+    "win": {
+      "target": [
+        "nsis-web",
+        "zip"
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "include": "build/installer.nsh",
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "白球AI"
+    },
+    "nsisWeb": {
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "白球AI",
+      "appPackageUrl": "http://47.108.191.67/download/baiqiu-ai-3.0.4-r2-x64.nsis.7z"
+    },
+    "artifactName": "BaiqiuAI-Setup-${version}.${ext}",
+    "extraResources": [
+      {
+        "from": ".hms-bundle",
+        "to": "hms-bundle",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "files": [
+      "*.js",
+      "*.json",
+      "!app.js",
+      "assets/**/*",
+      "core/**/*",
+      "products/**/*",
+      "renderer-v2/**/*",
+      "server/*.js",
+      "server/*.json",
+      "services/**/*",
+      "!services/agents{,/**/*}",
+      "!services/attention{,/**/*}",
+      "!services/context-management{,/**/*}",
+      "!services/decision-intelligence{,/**/*}",
+      "!services/evaluation{,/**/*}",
+      "!services/evolution-network{,/**/*}",
+      "!services/goal-intelligence{,/**/*}",
+      "!services/learning{,/**/*}",
+      "!services/memory-architecture{,/**/*}",
+      "!services/self-awareness{,/**/*}",
+      "!services/self-improvement{,/**/*}",
+      "!services/simulation{,/**/*}",
+      "!services/strategy-intelligence{,/**/*}",
+      "!services/neural-core/agent-manager.js",
+      "!services/neural-core/agent-registry.js",
+      "!services/neural-core/collaboration-protocol.js",
+      "!services/planner-agent.js",
+      "!services/product-sdk/index.js",
+      "!services/product-sdk/product-event-adapter.js",
+      "!services/reply-builder.js",
+      "!services/task-orchestrator.js",
+      "skills/**/*",
+      "tools/**/*",
+      "updater/**/*",
+      "!backups{,/**/*}",
+      "!dist{,/**/*}",
+      "!qa{,/**/*}",
+      "!server/downloads{,/**/*}",
+      "!server/releases{,/**/*}",
+      "!test-data{,/**/*}",
+      "!test-userdata{,/**/*}",
+      "!tests{,/**/*}",
+      "!resources{,/**/*}",
+      "!.hms-runtime{,/**/*}",
+      "!.hms-bundle{,/**/*}",
+      "!_asar_temp{,/**/*}",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/*/{test,tests,__tests__,example,examples}/**/*",
+      "!**/*.map"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "rcedit": "^5.0.2"
+  }
+}

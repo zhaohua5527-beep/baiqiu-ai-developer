@@ -1,0 +1,217 @@
+﻿const { contextBridge, ipcRenderer } = require("electron");
+
+const { webUtils } = require("electron");
+
+contextBridge.exposeInMainWorld("heiqiu", {
+  init: () => ipcRenderer.invoke("app:init"),
+  createSession: () => ipcRenderer.invoke("session:create"),
+  createProject: (input) => ipcRenderer.invoke("project:create", input),
+  updateProject: (id, patch) => ipcRenderer.invoke("project:update", id, patch),
+  reorderProjects: (ids) => ipcRenderer.invoke("project:reorder", ids),
+  deleteProject: (id) => ipcRenderer.invoke("project:delete", id),
+  deleteProjects: (ids) => ipcRenderer.invoke("project:delete-many", ids),
+  createProjectAgent: (projectId, input) => ipcRenderer.invoke("project-agent:create", projectId, input),
+  updateProjectAgent: (sessionId, input) => ipcRenderer.invoke("project-agent:update", sessionId, input),
+  createProjectConsciousBackup: (projectId) => ipcRenderer.invoke("project-conscious-backup:create", projectId),
+  saveConsciousState: (scope, sourceId) => ipcRenderer.invoke("conscious-center:save", { scope, sourceId }),
+  consciousSnapshots: (options) => ipcRenderer.invoke("conscious-center:list", options || {}),
+  consciousSnapshot: (id) => ipcRenderer.invoke("conscious-center:get", id),
+  deleteConsciousSnapshot: (id) => ipcRenderer.invoke("conscious-center:delete", id),
+  pruneConsciousSnapshots: () => ipcRenderer.invoke("conscious-center:prune"),
+  restoreConsciousSnapshot: (id) => ipcRenderer.invoke("conscious-center:restore", id),
+  continueConsciousSnapshot: (id) => ipcRenderer.invoke("conscious-center:continue", id),
+  markConsciousSnapshotImportant: (id, important) => ipcRenderer.invoke("conscious-center:important", id, important),
+  archiveConsciousSnapshot: (id, archived = true) => ipcRenderer.invoke("conscious-center:archive", id, archived),
+  consciousProtection: (scope, sourceId) => ipcRenderer.invoke("conscious-center:protection", scope, sourceId),
+  blackCoreStatus: () => ipcRenderer.invoke("black-core:status"),
+  blackCoreProfile: (scope, sourceId) => ipcRenderer.invoke("black-core:profile", scope, sourceId),
+  knowledgeVaultState: () => ipcRenderer.invoke("knowledge:vault-state"),
+  knowledgeNoteCreate: (payload) => ipcRenderer.invoke("knowledge:note-create", payload || {}),
+  knowledgeNoteRead: (noteId) => ipcRenderer.invoke("knowledge:note-read", noteId),
+  knowledgeNoteUpdate: (noteId, payload) => ipcRenderer.invoke("knowledge:note-update", noteId, payload || {}),
+  knowledgeNoteDelete: (noteId) => ipcRenderer.invoke("knowledge:note-delete", noteId),
+  exportKnowledgeAssets: () => ipcRenderer.invoke("knowledge:export"),
+  openKnowledgeVault: () => ipcRenderer.invoke("knowledge:open-vault"),
+  showKnowledgeInFolder: (noteId) => ipcRenderer.invoke("knowledge:show-in-folder", noteId || ""),
+  taskBrainState: (sessionId, limit = 20) => ipcRenderer.invoke("task-brain:state", sessionId, limit),
+  tasksNeedingReconfirmation: (limit = 100) => ipcRenderer.invoke("task-brain:reconfirmation-list", limit),
+  reconfirmTaskBrainTask: (taskId) => ipcRenderer.invoke("task-brain:reconfirm", taskId),
+  discardTaskBrainReconfirmation: (taskId) => ipcRenderer.invoke("task-brain:discard-reconfirmation", taskId),
+  runAgentHealthCheck: () => ipcRenderer.invoke("agent-health:run"),
+  onAgentHealthProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("agent-health:progress", listener);
+    return () => ipcRenderer.removeListener("agent-health:progress", listener);
+  },
+  latestAgentHealthReport: () => ipcRenderer.invoke("agent-health:latest"),
+  agentHealthHistory: () => ipcRenderer.invoke("agent-health:history"),
+  agentHealthConnectTool: (capabilityId) => ipcRenderer.invoke("agent-health:connect-tool", capabilityId),
+  onAgentHealthToolProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("agent-health:tool-progress", listener);
+    return () => ipcRenderer.removeListener("agent-health:tool-progress", listener);
+  },
+  blackBallScan: () => ipcRenderer.invoke("black-ball:scan"),
+  blackBallRepair: (scanId) => ipcRenderer.invoke("black-ball:repair", scanId),
+  onBlackBallProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("black-ball:progress", listener);
+    return () => ipcRenderer.removeListener("black-ball:progress", listener);
+  },
+  runDebugCenter: () => ipcRenderer.invoke("debug-center:run"),
+  latestDebugReport: () => ipcRenderer.invoke("debug-center:latest"),
+  debugReportHistory: () => ipcRenderer.invoke("debug-center:history"),
+  onDebugCenterProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("debug-center:progress", listener);
+    return () => ipcRenderer.removeListener("debug-center:progress", listener);
+  },
+  selectSession: (id) => ipcRenderer.invoke("session:select", id),
+  renameSession: (id, title) => ipcRenderer.invoke("session:rename", id, title),
+  deleteSession: (id) => ipcRenderer.invoke("session:delete", id),
+  deleteSessions: (ids) => ipcRenderer.invoke("session:delete-many", ids),
+  archiveSessions: (ids, archived = true) => ipcRenderer.invoke("session:archive-many", ids, archived),
+  favoriteSession: (id, pinned) => ipcRenderer.invoke("session:favorite", id, pinned),
+  duplicateSession: (id) => ipcRenderer.invoke("session:duplicate", id),
+  undoSession: (id) => ipcRenderer.invoke("session:undo", id),
+  reorderSessions: (ids) => ipcRenderer.invoke("session:reorder", ids),
+  messages: (id) => ipcRenderer.invoke("session:messages", id),
+  appendMessage: (id, message) => ipcRenderer.invoke("session:append-message", id, message),
+  pathForFile: (file) => webUtils.getPathForFile(file),
+  saveSettings: (settings) => ipcRenderer.invoke("settings:save", settings),
+  completeCustomerProfile: (profile) => ipcRenderer.invoke("customer-profile:complete", profile),
+  listModels: (provider) => ipcRenderer.invoke("models:list", provider),
+  verifyModel: (provider) => ipcRenderer.invoke("models:verify", provider),
+  activateModel: (providerId) => ipcRenderer.invoke("models:activate", providerId),
+  chooseSaveLocation: () => ipcRenderer.invoke("settings:choose-save-location"),
+  updateInfo: () => ipcRenderer.invoke("app:update-info"),
+  downloadUpdate: () => ipcRenderer.invoke("update:download"),
+  currentVersion: () => ipcRenderer.invoke("update:current-version"),
+  applyOnlineUpdate: (options) => ipcRenderer.invoke("app:apply-online-update", options || {}),
+  publishUpdate: (payload) => ipcRenderer.invoke("admin:publish-update", payload),
+  startUpdateServer: () => ipcRenderer.invoke("admin:start-update-server"),
+  openAdminServer: () => ipcRenderer.invoke("admin:open-server"),
+  verifyInvite: (code) => ipcRenderer.invoke("license:verify", code),
+  confirmActivation: (payload) => ipcRenderer.invoke("license:confirm-activation", payload),
+  generateInvite: (count) => ipcRenderer.invoke("license:generate", count),
+  ownerStatus: () => ipcRenderer.invoke("license:owner-status"),
+  createPurchaseOrder: (payload) => ipcRenderer.invoke("purchase:create-order", payload),
+  getAutoLaunch: () => ipcRenderer.invoke("app:get-auto-launch"),
+  setAutoLaunch: (enabled) => ipcRenderer.invoke("app:set-auto-launch", enabled),
+  skills: () => ipcRenderer.invoke("hermes:skills"),
+  addSkill: (skill) => ipcRenderer.invoke("hermes:skill-add", skill),
+  learnSkill: (payload) => ipcRenderer.invoke("hermes:skill-learn", payload),
+  testSkill: (id) => ipcRenderer.invoke("hermes:skill-test", id),
+  verifySkill: (id) => ipcRenderer.invoke("hermes:skill-verify", id),
+  deduplicateSkills: () => ipcRenderer.invoke("hermes:skill-deduplicate"),
+  skillDeduplicationHistory: () => ipcRenderer.invoke("hermes:skill-dedup-history"),
+  deleteSkill: (id) => ipcRenderer.invoke("hermes:skill-delete", id),
+  addMemory: (memory) => ipcRenderer.invoke("baiqiu:memory-add", memory),
+  deleteMemory: (id) => ipcRenderer.invoke("baiqiu:memory-delete", id),
+  verifyMemoryRecall: () => ipcRenderer.invoke("baiqiu:memory-verify-recall"),
+  productSubmitTask: (payload) => ipcRenderer.invoke("product:submit-task", payload),
+  productQueryTask: (taskId) => ipcRenderer.invoke("product:query-task", taskId),
+  productTaskStatus: (taskId) => ipcRenderer.invoke("product:task-status", taskId),
+  productTaskResult: (taskId) => ipcRenderer.invoke("product:task-result", taskId),
+  productTaskHistory: (options) => ipcRenderer.invoke("product:task-history", options),
+  abortChat: (id) => ipcRenderer.invoke("chat:abort", id),
+  copyText: (text) => ipcRenderer.invoke("clipboard:write-text", text),
+  windowControl: (action) => ipcRenderer.invoke("window:control", action),
+  openExternal: (target) => ipcRenderer.invoke("system:open-external", target),
+  openPath: (target) => ipcRenderer.invoke("system:open-path", target),
+  openAttachment: (attachment) => ipcRenderer.invoke("system:open-attachment", attachment),
+  openOriginalAttachment: (attachment) => ipcRenderer.invoke("system:open-original-attachment", attachment),
+  showAttachmentInFolder: (attachment) => ipcRenderer.invoke("system:show-attachment-in-folder", attachment),
+  spreadsheetPreview: (attachment) => ipcRenderer.invoke("system:spreadsheet-preview", attachment),
+  spreadsheetSave: (payload) => ipcRenderer.invoke("system:spreadsheet-save", payload),
+  previewAttachment: (attachment) => ipcRenderer.invoke("system:preview-attachment", attachment),
+  previewWebpage: (target) => ipcRenderer.invoke("system:preview-webpage", target),
+  browserSearch: (query, maxResults = 8) => ipcRenderer.invoke("browser:search", query, maxResults),
+  browserOpen: (target) => ipcRenderer.invoke("browser:open", target),
+  browserState: () => ipcRenderer.invoke("browser:get-state"),
+  browserTheme: (theme) => ipcRenderer.invoke("browser:theme", theme),
+  browserEmbed: (payload) => ipcRenderer.invoke("browser:embed", payload),
+  browserNavigate: (target) => ipcRenderer.invoke("browser:navigate", target),
+  browserBack: () => ipcRenderer.invoke("browser:back"),
+  browserForward: () => ipcRenderer.invoke("browser:forward"),
+  browserReload: () => ipcRenderer.invoke("browser:reload"),
+  browserStop: () => ipcRenderer.invoke("browser:stop"),
+  browserAnalyzeCurrent: () => ipcRenderer.invoke("black-ball-browser:analyze-current"),
+  onBrowserState: (handler) => ipcRenderer.on("browser:state", (_event, state) => handler(state)),
+  onBrowserOpenRequest: (handler) => ipcRenderer.on("browser:open-request", (_event, payload) => handler(payload)),
+  onBrowserAnalyzeRequest: (handler) => ipcRenderer.on("browser:analyze-request", (_event, payload) => handler(payload)),
+  onGatewayStatus: (handler) => ipcRenderer.on("gateway:status", (_event, status) => handler(status)),
+  onGatewayEvent: (handler) => ipcRenderer.on("gateway:event", (_event, frame) => handler(frame)),
+  onChatStream: (handler) => {
+    const listener = (_event, frame) => handler(frame);
+    ipcRenderer.on("chat:stream", listener);
+    return () => ipcRenderer.removeListener("chat:stream", listener);
+  },
+  onUpdateDownloadProgress: (handler) => ipcRenderer.on("update:download-progress", (_event, progress) => handler(progress)),
+  onUpdateProgress: (handler) => ipcRenderer.on("update:progress", (_event, state) => handler(state)),
+  onProjectConsciousBackupProgress: (handler) => ipcRenderer.on("project-conscious-backup:progress", (_event, state) => handler(state)),
+  onConsciousCenterProgress: (handler) => ipcRenderer.on("conscious-center:progress", (_event, state) => handler(state)),
+  onConsciousAutoSaved: (handler) => ipcRenderer.on("conscious-center:auto-saved", (_event, state) => handler(state)),
+  onSkillLearningProgress: (handler) => ipcRenderer.on("skill-learning:progress", (_event, state) => handler(state)),
+  onToolConfirmation: (handler) => ipcRenderer.on("tool:confirmation-request", (_event, data) => handler(data)),
+  confirmTool: (id, confirmed, mode) => ipcRenderer.send("tool:confirmation-response", { id, confirmed, mode }),
+  onWindowActivity: (handler) => ipcRenderer.on("window:activity", (_event, state) => handler(state)),
+  onCloseRequest: (handler) => ipcRenderer.on("close:request", (_event, data) => handler(data)),
+  onSessionChanged: (handler) => ipcRenderer.on("session:changed", (_event, db) => handler(db)),
+  // Phase 2: SQLite 记忆搜索
+  memorySearch: (query, options) => ipcRenderer.invoke("memory:search", query, options || {}),
+  memoryStats: () => ipcRenderer.invoke("memory:stats"),
+  memoryHistory: (sessionId, limit) => ipcRenderer.invoke("memory:history", sessionId, limit || 50),
+  memoryRelated: (sessionId, limit) => ipcRenderer.invoke("memory:related", sessionId, limit || 5),
+  // Phase 3: 模型切换优化
+  modelHealthCheck: (providerId) => ipcRenderer.invoke("model:health-check", providerId || null),
+  modelStatusReport: () => ipcRenderer.invoke("model:status-report"),
+  modelFallback: (failedId, constraints) => ipcRenderer.invoke("model:fallback", failedId, constraints || {}),
+  modelCapabilities: (modelName) => ipcRenderer.invoke("model:capabilities", modelName),
+  modelFallbackHistory: (limit) => ipcRenderer.invoke("model:fallback-history", limit || 10),
+modelRecommend: (taskType) => ipcRenderer.invoke("model:recommend", taskType || 'conversation'),
+modelDetectTaskType: (message) => ipcRenderer.invoke("model:detect-task-type", message || ''),
+exportToFile: (defaultName, content) => ipcRenderer.invoke("export:to-file", defaultName, content)
+});
+
+contextBridge.exposeInMainWorld("updater", {
+  checkForUpdate: () => ipcRenderer.invoke("update:check"),
+  downloadUpdate: () => ipcRenderer.invoke("update:download"),
+  getCurrentVersion: () => ipcRenderer.invoke("update:current-version"),
+  onUpdateAvailable: (callback) => ipcRenderer.on("update-available", (_event, data) => callback(data)),
+  onDownloadProgress: (callback) => ipcRenderer.on("update:download-progress", (_event, progress) => callback(progress))
+});
+
+contextBridge.exposeInMainWorld("license", {
+  getStatus: () => ipcRenderer.invoke("license:status"),
+  verifyCode: (code, customer) => ipcRenderer.invoke("license:verify", code, customer),
+  confirmActivation: (payload) => ipcRenderer.invoke("license:confirm-activation", payload),
+  activatePlan: (payload) => ipcRenderer.invoke("license:activate-plan", payload),
+  createOrder: (payload) => ipcRenderer.invoke("license:create-order", payload),
+  checkOrder: (payload) => ipcRenderer.invoke("license:check-order", payload),
+  getTrialInfo: () => ipcRenderer.invoke("license:trial-info"),
+  getRemainingTrial: () => ipcRenderer.invoke("license:trial-remaining"),
+  onLocked: (callback) => ipcRenderer.on("license:locked", (_event, data) => callback(data)),
+  onTrialWarning: (callback) => ipcRenderer.on("license:trial-warning", (_event, data) => callback(data)),
+  onTrialUpdate: (callback) => ipcRenderer.on("license:trial-update", (_event, data) => callback(data))
+});
+
+contextBridge.exposeInMainWorld("admin", {
+  generateCodes: (count, type, notes) => ipcRenderer.invoke("admin:generate-codes", count, type, notes),
+  exportCodes: (format) => ipcRenderer.invoke("admin:export-codes", format),
+  getCodeList: () => ipcRenderer.invoke("admin:code-list"),
+  manageCode: (code, action) => ipcRenderer.invoke("admin:manage-code", code, action),
+  listOrders: () => ipcRenderer.invoke("admin:orders"),
+  confirmOrder: (orderId) => ipcRenderer.invoke("admin:confirm-order", orderId),
+  publishUpdate: (payload) => ipcRenderer.invoke("admin:publish-update", payload),
+  startUpdateServer: () => ipcRenderer.invoke("admin:start-update-server"),
+  openAdminServer: () => ipcRenderer.invoke("admin:open-server"),
+  readLogs: (type, limit) => ipcRenderer.invoke("dev:logs", type, limit),
+  exportLogs: () => ipcRenderer.invoke("dev:logs-export"),
+  banCode: (code) => ipcRenderer.invoke("admin:ban-code", code),
+  unbindCode: (code) => ipcRenderer.invoke("admin:unbind-code", code)
+});
+
+
+
+

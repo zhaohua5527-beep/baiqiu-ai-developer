@@ -1,0 +1,10 @@
+{
+  "version": "2.1.1",
+  "releaseNotes": "2.1.1 full-client update with executable, runtime and resources replacement.",
+  "changelog": "2.1.1 full-client update with executable, runtime and resources replacement.",
+  "downloadUrl": "https://baiqiuai.xiaoxin8.com/baiqiu-2.1.1.zip",
+  "sha256": "43ea63f626404a553389922b886cae5ab85231fa78c9e83b559f2fb12a87718c",
+  "size": 125908316,
+  "packageType": "full-client",
+  "forceUpdate": false
+}

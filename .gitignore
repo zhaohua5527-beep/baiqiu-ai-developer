@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+_asar_temp/
+
+# HMS bundle (symlink to external runtime, not source code)
+.hms-bundle
+.hms-runtime
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# License database (contains real license codes)
+server/license-db.json
+
+# Server runtime data
+server/releases/
+server/downloads/
+
+# Test data & user data (generated at runtime)
+backups/
+qa/
+test-data/
+test-userdata/
+tests/
+resources/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Release packages
+*.7z
+*.nsis.7z
+
+# Update staging
+.update-stage-*/

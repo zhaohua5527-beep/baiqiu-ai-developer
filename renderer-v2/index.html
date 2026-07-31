@@ -1,0 +1,1131 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>白球 AI</title>
+  <link rel="icon" href="./assets/baiqiu-tray.png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="titlebar">
+      <div class="drag-region" aria-hidden="true"></div>
+      <div class="title-actions">
+        <span id="trialStatus" class="trial-status">试用检测中</span>
+        <button data-window="minimize" title="最小化">_</button>
+        <button data-window="maximize" title="最大化">□</button>
+        <button data-window="close" title="关闭到托盘">×</button>
+      </div>
+    </header>
+
+    <aside class="sessions">
+      <div class="sidebar-brand">
+        <img src="./assets/baiqiu-tray.png" alt="白球 AI" decoding="async">
+        <strong>白球 AI</strong>
+      </div>
+      <div class="sessions-head">
+        <button id="newProjectBtn" title="新建项目"><span aria-hidden="true">＋</span>项目</button>
+        <button id="newSessionBtn" title="新建普通聊天"><span aria-hidden="true">＋</span>会话</button>
+        <button id="batchManageBtn" title="批量管理聊天会话" aria-pressed="false" data-active="0"><span class="batch-manage-label">批量</span></button>
+      </div>
+      <label class="session-search">
+        <span aria-hidden="true">⌕</span>
+        <input id="sessionSearch" type="search" placeholder="搜索项目和会话" autocomplete="off">
+      </label>
+      <div id="sessionList" class="session-list project-tree"></div>
+      <div class="sidebar-footer">
+        <button id="consciousBtn" title="意识中心"><span class="quick-action-icon quick-action-conscious-icon" aria-hidden="true">
+          <svg viewBox="0 0 32 32" focusable="false">
+            <circle cx="16" cy="16" r="10.5" fill="var(--panel)" stroke="currentColor" stroke-width="1.6"/>
+            <ellipse cx="16" cy="16" rx="5.2" ry="8.2" fill="none" stroke="currentColor" stroke-width="1.35" opacity=".82"/>
+            <ellipse cx="16" cy="16" rx="8.2" ry="5.2" fill="none" stroke="currentColor" stroke-width="1.35" opacity=".82"/>
+            <circle cx="16" cy="16" r="2.3" fill="currentColor"/>
+            <path d="M16 2.7v3.2M16 26.1v3.2M2.7 16h3.2M26.1 16h3.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55"/>
+            <circle cx="16" cy="2.7" r="1.15" fill="currentColor"/><circle cx="29.3" cy="16" r="1.15" fill="currentColor"/>
+          </svg>
+        </span><span>意识中心</span></button>
+        <button id="growthCenterBtn" title="知识星球">
+          <span aria-hidden="true" class="growth-center-icon">
+            <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+              <circle cx="12" cy="12" r="8.5"></circle>
+              <path d="M7.5 13.5 11.2 9.8 13.6 12.2 16.9 8.9"></path>
+              <path d="M16.8 8.9h-2.2m2.2 0v2.2"></path>
+            </svg>
+          </span>
+          <span>知识星球</span>
+        </button>
+        <button id="updateQuickBtn" title="检查更新"><span aria-hidden="true">↻</span><span>检查更新</span><b id="updateQuickBadge" class="update-quick-badge" hidden>1</b></button>
+        <button id="settingsBtn" title="设置"><span aria-hidden="true">⚙</span><span>设置</span></button>
+      </div>
+    </aside>
+
+    <div class="splitter splitter-left" aria-hidden="true"></div>
+
+    <main class="chat">
+      <header class="chat-header">
+        <div>
+          <strong id="currentChatTitle">新对话</strong>
+          <small id="sessionRoleBadge" class="session-role-badge" hidden></small>
+          <button id="currentModelBadge" type="button">DeepSeek</button>
+        </div>
+        <div class="chat-header-tools">
+          <div id="contextHeaderBar" class="system-state-rail" role="progressbar" aria-label="上下文压缩剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+            <span id="contextHeaderFill"></span>
+          </div>
+        </div>
+      </header>
+      <nav id="taskProgressRail" class="task-progress-rail" aria-label="当前任务执行阶段"></nav>
+      <div id="taskStagePopover" class="task-stage-popover" hidden></div>
+      <div id="conversationStage" class="conversation-stage">
+        <section id="messageList" class="message-list"></section>
+        <aside id="composerClarification" class="intent-predict-panel" aria-label="意图预测选项" hidden>
+          <div class="intent-predict-head">
+            <strong>意图预测</strong>
+            <button id="composerClarificationAbort" class="intent-predict-abort" type="button" title="终止当前任务" aria-label="终止当前任务">×</button>
+          </div>
+          <div id="composerClarificationOptions" class="intent-predict-options"></div>
+        </aside>
+      </div>
+      <section id="productTaskStrip" class="product-task-strip" hidden></section>
+      <section id="attachmentPreview" class="attachment-preview" hidden></section>
+      <section id="queuePanel" class="queue-panel" aria-label="预置任务" hidden>
+        <div class="queue-heading">
+          <span><strong>预置任务</strong><small>按顺序等待执行</small></span>
+          <button id="queueClearBtn" type="button">清空</button>
+        </div>
+        <div id="queueList" class="queue-list"></div>
+      </section>
+      <section id="readingControls" class="reading-controls" hidden>
+        <button id="newOutputBtn" type="button" hidden>↓ 新内容已生成</button>
+      </section>
+      <form id="chatForm" class="composer">
+        <section id="slashCommandMenu" class="slash-command-menu" role="listbox" aria-label="白球斜杠命令" hidden>
+          <header><strong>白球命令</strong><span id="slashCommandCount"></span></header>
+          <div id="slashCommandList" class="slash-command-list"></div>
+        </section>
+        <nav id="composerReplyNav" class="composer-reply-nav" aria-label="当前内容目录" hidden>
+          <div id="composerReplyNavItems" class="composer-reply-nav-items"></div>
+          <div id="composerReplyNavOverflow" class="composer-reply-nav-overflow" hidden>
+            <button id="composerReplyNavMore" class="composer-reply-nav-more" type="button" aria-haspopup="menu" aria-expanded="false" title="更多目录项">...</button>
+            <div id="composerReplyNavMenu" class="composer-reply-nav-menu" role="menu" hidden></div>
+          </div>
+        </nav>
+        <section id="composerQuote" class="composer-quote" hidden>
+          <button id="composerQuoteJump" class="composer-quote-jump" type="button" title="定位原消息">
+            <span id="composerQuoteSource"></span>
+            <strong id="composerQuoteText"></strong>
+          </button>
+          <button id="composerQuoteClose" class="composer-quote-close" type="button" title="取消引用" aria-label="取消引用">×</button>
+        </section>
+        <div id="composerResizeHandle" class="composer-resize-handle" role="separator" aria-label="调整输入框高度" aria-orientation="horizontal" title="拖动调整输入框高度，双击恢复默认" tabindex="0"></div>
+        <textarea id="chatInput" rows="1" placeholder="给 Gantz 发送消息"></textarea>
+        <div id="modelRecommendBadge" class="composer-recommend-badge" hidden>
+          <span id="recommendBadgeText"></span>
+          <button id="recommendBadgeSwitch" type="button">切换</button>
+          <button id="recommendBadgeClose" type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="composer-tools">
+        <button id="attachBtn" type="button" title="上传文件">＋</button>
+        <button id="accessModeBtn" class="access-mode-btn" type="button" aria-haspopup="menu" aria-expanded="false" title="访问模式">权限信任</button>
+        <button id="reasoningWaterControl" class="reasoning-mode-btn" type="button" data-level="minimal" aria-haspopup="menu" aria-expanded="false" title="推理等级">
+          <span class="reasoning-mode-label">推理</span>
+          <strong id="reasoningWaterLabel">低</strong>
+          <span id="reasoningModeMenu" class="reasoning-mode-menu" role="menu"></span>
+        </button>
+        <button id="intentPredictBtn" class="intent-predict-btn" type="button" data-enabled="0" data-open="0" aria-haspopup="menu" aria-expanded="false" title="意图预测">
+          <span class="intent-predict-label">意图预测</span>
+          <strong id="intentPredictLabel">关</strong>
+          <span id="intentPredictModeMenu" class="intent-predict-menu" role="menu">
+            <span class="intent-predict-option" data-value="1" role="menuitemradio">开<i aria-hidden="true">✓</i></span>
+            <span class="intent-predict-option active" data-value="0" role="menuitemradio">关<i aria-hidden="true">✓</i></span>
+          </span>
+        </button>
+        <button id="sendBtn" type="submit" title="发送"><span class="send-state-ring" aria-hidden="true"><i></i></span></button>
+        </div>
+      </form>
+      <input id="fileInput" type="file" multiple hidden accept="image/*,.xlsx,.xls,.csv,.docx,.pdf,.pptx,.txt,.md,.json,.html,.htm,.zip">
+    </main>
+
+    <div id="licenseOverlay" class="license-overlay" hidden>
+      <div class="license-panel">
+        <div class="license-heading">
+          <span>您的免费试用已结束</span>
+          <strong>开通会员继续使用白球 AI</strong>
+          <p>选择套餐购买，或输入管理员发放的兑换码激活。</p>
+        </div>
+        <div class="license-redeem-card">
+          <div>
+            <b>兑换码激活</b>
+            <span>管理员发放的兑换码，可直接在这里验证。</span>
+          </div>
+          <div class="license-redeem-row">
+            <input id="licenseCodeInput" placeholder="兑换码：BQ-XXXX-XXXX-XXXX" maxlength="19">
+            <button id="licenseActivateBtn" type="button">验证确认</button>
+          </div>
+        </div>
+        <div class="membership-plans license-plan-grid">
+          <button id="licenseMonthlyBtn" class="license-plan-card" type="button">
+            <span class="plan-tag">新手体验</span>
+            <b>月卡</b>
+            <span class="plan-origin">原价 ¥49.9</span>
+            <span class="plan-price">首充 ¥19.9</span>
+            <em>适用于新手体验</em>
+          </button>
+          <button id="licenseSixMonthsBtn" class="license-plan-card featured" type="button">
+            <span class="plan-tag">推荐长期使用</span>
+            <b>半年卡</b>
+            <span class="plan-origin">原价 ¥99</span>
+            <span class="plan-price">折扣价 ¥88</span>
+            <em>适用于长期使用</em>
+          </button>
+          <button id="licenseYearlyBtn" class="license-plan-card" type="button">
+            <span class="plan-tag">重度使用</span>
+            <b>年卡</b>
+            <span class="plan-origin">原价 ¥180</span>
+            <span class="plan-price">折扣价 ¥168</span>
+            <em>适用于重度使用</em>
+          </button>
+        </div>
+        <div id="licenseOverlayStatus" class="license-status"></div>
+      </div>
+    </div>
+
+    <div id="customerProfileOverlay" class="customer-profile-overlay" hidden>
+      <form id="customerProfileForm" class="customer-profile-panel" novalidate>
+        <span class="profile-kicker">欢迎使用白球 AI</span>
+        <strong>完善客户资料</strong>
+        <p>首次使用需要登记姓名和手机号，用于会员、售后和设备激活核验。填写完成后将不再提示。</p>
+        <label>
+          <span>姓名</span>
+          <input id="customerProfileName" maxlength="30" autocomplete="name" placeholder="请输入姓名" required>
+        </label>
+        <label>
+          <span>手机号</span>
+          <input id="customerProfilePhone" maxlength="11" inputmode="numeric" autocomplete="tel" placeholder="请输入 11 位手机号" required>
+        </label>
+        <div id="customerProfileError" class="customer-profile-error" aria-live="polite"></div>
+        <button id="customerProfileSubmit" type="submit">确认并进入白球 AI</button>
+      </form>
+    </div>
+
+    <div class="splitter splitter-right" aria-hidden="true"></div>
+
+    <button id="taskBoardToggleBtn" class="task-board-edge-toggle" data-edge="right" type="button" title="展开任务看板" aria-label="展开任务看板">‹</button>
+
+    <aside class="terminal">
+      <div class="mini-monitor" aria-hidden="true">
+        <div class="mini-monitor-screen">
+          <div class="monitor-corner">LV-426 AUX</div>
+          <div class="monitor-sync">SYNC</div>
+          <div class="monitor-frame">
+            <div class="monitor-left">
+              <div class="monitor-label">AI 工作台</div>
+              <div class="monitor-meta">
+                <span>模型</span><b id="monitorModel">DEEPSEEK</b>
+                <span>会话</span><b id="monitorSession">待命</b>
+                <span>上下文</span><b id="monitorContext">压缩剩余</b>
+              </div>
+              <div id="monitorLog" class="monitor-log">
+                <span>需求通道已就绪</span>
+                <span>产品层连接完成</span>
+                <span>任务体验已同步</span>
+                <span>模型路由已连接</span>
+                <span>本地记录在线</span>
+              </div>
+            </div>
+            <div class="monitor-radar">
+              <div class="radar-ring">
+                <div class="radar-core"></div>
+                <div class="radar-sweep"></div>
+              </div>
+              <span id="monitorMode">待命</span>
+              <small>BAIQIU AI</small>
+            </div>
+          </div>
+          <div class="monitor-bars">
+            <span class="monitor-grid">GRID 09-27</span>
+            <span>已用 <b id="barUsed"></b></span>
+            <span>剩余 <b id="barRemain"></b></span>
+            <span class="monitor-auth">toekn <b id="barToken"></b></span>
+          </div>
+          <div class="monitor-footer ecg-footer">
+            <span class="ecg-line"></span>
+            <span class="ecg-line"></span>
+            <span class="ecg-line"></span>
+          </div>
+        </div>
+      </div>
+      <div class="terminal-panel compact-terminal-panel">
+        <div class="terminal-head">
+          <div class="terminal-title">任务状态</div>
+        </div>
+        <div class="stat"><span>任务</span><b id="taskState">待命</b></div>
+        <div class="stat"><span>模型</span><b id="modelState">DeepSeek</b></div>
+        <div class="stat"><span>记录</span><b id="recordState">本地保存</b></div>
+        <div class="progress compact-progress"><span id="progressFill"></span></div>
+        <div class="context-compress-card" aria-label="上下文压缩剩余">
+          <div class="context-compress-head">
+            <span>上下文压缩</span>
+            <b id="contextCompressState">剩余 100%</b>
+          </div>
+          <div class="context-compress-meta">
+            <span id="contextCompressDetail">可用 64K / 已用 0</span>
+            <span id="contextCompressMode">本地估算</span>
+          </div>
+          <div class="context-compress-bar"><span id="contextCompressFill"></span></div>
+        </div>
+      </div>
+      <div id="neuralDashboard" class="neural-dashboard" hidden>
+        <div class="terminal-title">开发者驾驶舱</div>
+        <div class="stat"><span>Task ID</span><b id="productTaskId">-</b></div>
+        <div class="stat"><span>任务状态</span><b id="productTaskStatus">待命</b></div>
+        <div class="stat"><span>Agent 状态</span><b id="productAgentStatus">IDLE</b></div>
+        <div class="phase-rail" aria-label="Neural Core 阶段">
+          <span data-product-phase="UNDERSTANDING">UNDERSTANDING</span>
+          <span data-product-phase="PLANNING">PLANNING</span>
+          <span data-product-phase="EXECUTING">EXECUTING</span>
+          <span data-product-phase="VERIFYING">VERIFYING</span>
+          <span data-product-phase="LEARNING">LEARNING</span>
+        </div>
+        <div id="productRuntimeDetails" class="runtime-details"></div>
+        <details class="timeline-panel">
+          <summary>Timeline</summary>
+          <div id="productTimeline" class="product-timeline"></div>
+        </details>
+      </div>
+    </aside>
+  </div>
+
+  <div id="contextMenu" class="context-menu" hidden></div>
+  <div id="messageContextMenu" class="message-context-menu" role="menu" aria-label="消息操作" hidden>
+    <button id="messageQuoteBtn" type="button" role="menuitem"><span aria-hidden="true">↳</span><strong>引用</strong></button>
+  </div>
+  <div id="presetTaskContextMenu" class="preset-task-context-menu" role="menu" aria-label="预置任务操作" hidden>
+    <button id="presetTaskEditBtn" type="button" role="menuitem"><span aria-hidden="true">✎</span><strong>编辑</strong></button>
+  </div>
+  <div id="copyToast" class="copy-toast" hidden>已复制</div>
+  <div id="closeConfirmLayer" class="app-modal-layer" hidden>
+    <div class="app-modal-panel close-confirm-panel" role="dialog" aria-modal="true" aria-labelledby="closeConfirmTitle">
+      <strong id="closeConfirmTitle">关闭白球 AI</strong>
+      <p id="closeConfirmText">您想彻底关闭，还是隐藏到托盘继续后台运行？</p>
+      <div class="app-modal-actions">
+        <button id="closeHideBtn" type="button">隐藏到托盘</button>
+        <button id="closeQuitBtn" type="button">彻底关闭</button>
+        <button id="closeCancelBtn" type="button">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <dialog id="settingsDialog" class="settings-dialog settings-hub">
+    <form method="dialog">
+      <header>
+        <strong>设置</strong>
+        <button id="settingsCloseBtn" type="button" aria-label="关闭设置">×</button>
+      </header>
+      <div class="settings-tabs" role="tablist">
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="health"><span>黑球状态</span><small class="settings-tab-summary">运行状态</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="skin"><span>主题设置</span><small class="settings-tab-summary">当前主题</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="debug"><span>自检中心</span><small class="settings-tab-summary">尚未自检</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="invite"><span>会员中心</span><small class="settings-tab-summary">会员状态</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="model"><span>模型管理</span><small class="settings-tab-summary">当前模型</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="general"><span>通用设置</span><small class="settings-tab-summary">启动与文件</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="skills"><span>工具中心</span><small class="settings-tab-summary">技能状态</small></button>
+        <button id="updateTabBtn" type="button" class="settings-tab internal-tab" data-settings-tab="update"><span>系统更新</span><small class="settings-tab-summary">当前版本</small></button>
+        <button id="developerLogsTab" type="button" class="settings-tab internal-tab" data-settings-tab="developerLogs" hidden>开发日志</button>
+      </div>
+
+      <section class="settings-page model-center-page active" data-settings-page="model">
+        <div class="model-center-header">
+          <div><span>AI MODEL CENTER</span><strong>模型中心</strong></div>
+          <button id="addModelBtn" type="button">+ 添加模型</button>
+        </div>
+
+        <section id="currentModelCard" class="current-model-card" data-state="offline">
+          <div class="current-model-identity">
+            <span>当前使用模型</span>
+            <strong id="modelCenterCurrentName">正在读取</strong>
+            <small id="modelCenterCurrentId">--</small>
+          </div>
+          <div class="current-model-state">
+            <span>连接状态</span>
+            <strong><i></i><b id="modelCenterCurrentStatus">检测中</b></strong>
+          </div>
+          <div class="current-model-capabilities">
+            <span>核心能力</span>
+            <div><b>通用对话</b><b>任务规划</b><b>文件分析</b></div>
+          </div>
+        </section>
+
+        <section class="model-center-section configured-models-section">
+          <div class="model-center-section-heading"><div><strong>已配置模型</strong><span>可用模型与连接状态</span></div><b id="configuredModelCount">0</b></div>
+          <div id="configuredModelList" class="configured-model-list"></div>
+        </section>
+
+        <section class="model-center-section provider-health-section">
+          <div class="model-center-section-heading"><div><strong>供应商健康度</strong><span>实时状态与性能评分</span></div><button id="refreshProviderHealthBtn" type="button" class="health-refresh-btn">刷新</button></div>
+          <div id="providerHealthList" class="provider-health-list">
+            <div class="provider-health-loading">正在检测...</div>
+          </div>
+        </section>
+
+        <section class="model-center-section smart-recommend-section">
+          <div class="model-center-section-heading"><div><strong>智能推荐</strong><span>根据任务类型推荐最佳模型</span></div></div>
+          <div id="smartRecommendPanel" class="smart-recommend-panel">
+            <div class="recommend-task-picker">
+              <button class="recommend-task-btn active" data-task-type="conversation">💬 对话</button>
+              <button class="recommend-task-btn" data-task-type="coding">💻 编程</button>
+              <button class="recommend-task-btn" data-task-type="writing">📝 写作</button>
+              <button class="recommend-task-btn" data-task-type="analysis">🔍 分析</button>
+              <button class="recommend-task-btn" data-task-type="vision">👁️ 视觉</button>
+            </div>
+            <div id="recommendResult" class="recommend-result">
+              <div class="recommend-loading">点击任务类型获取推荐</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="model-center-section model-advanced-section" hidden>
+          <select id="providerSelect" hidden aria-hidden="true"></select>
+          <select id="reasoningSelect" hidden aria-hidden="true">
+            <option value="off">关闭</option>
+            <option value="minimal">最低</option>
+            <option value="low">低</option>
+            <option value="medium">中</option>
+            <option value="high">高</option>
+            <option value="extra_high">最高</option>
+          </select>
+          <div id="providerList" class="providers"></div>
+        </section>
+
+        <div id="modelConfigLayer" class="model-config-layer" hidden>
+          <button class="model-config-backdrop" type="button" data-model-config-close aria-label="关闭模型配置"></button>
+          <aside class="model-config-drawer" role="dialog" aria-modal="true" aria-labelledby="modelConfigTitle">
+            <header>
+              <div><span>MODEL CONFIGURATION</span><strong id="modelConfigTitle">模型配置</strong></div>
+              <button id="modelConfigCloseBtn" type="button" aria-label="关闭模型配置">×</button>
+            </header>
+            <div id="modelConfigBody" class="model-config-body"></div>
+            <footer class="model-config-actions">
+              <button id="testModelConnectionBtn" type="button">测试连接</button>
+              <span id="modelConfigSaveState" class="model-config-save-state" role="status">✓ 已保存</span>
+              <button id="modelConfigCancelBtn" type="button">取消</button>
+              <button id="saveModelConfigBtn" class="primary" type="button">保存配置</button>
+            </footer>
+          </aside>
+        </div>
+      </section>
+
+      <section class="settings-page theme-settings-page" data-settings-page="skin">
+        <header class="theme-settings-header">
+          <div><span>APPEARANCE</span><strong>主题与外观</strong></div>
+          <small>选择后立即预览</small>
+        </header>
+
+        <div class="theme-compact-list">
+          <label class="theme-setting-row">
+            <span><strong>主题</strong><small>切换整体明暗与视觉风格</small></span>
+            <select id="skinSelect">
+              <option value="custom">白球蓝调</option>
+              <option value="black">经典暗黑</option>
+              <option value="blue">深海幽蓝</option>
+              <option value="green">森林青绿</option>
+              <option value="mecha">磁暴装甲</option>
+              <option value="wasteland">余烬荒原</option>
+            </select>
+          </label>
+          <div class="theme-setting-row skin-image-picker">
+            <span><strong>皮肤图片</strong><small>使用本地图片作为界面背景</small></span>
+            <div class="theme-file-actions">
+              <label class="theme-file-button" for="skinImageInput">选择文件</label>
+              <input id="skinImageInput" type="file" accept="image/*">
+              <button id="clearSkinImageBtn" type="button">清除</button>
+            </div>
+          </div>
+          <label class="theme-setting-row">
+            <span><strong>照片显示</strong><small>控制背景图片适配方式</small></span>
+            <select id="skinImageFitSelect">
+              <option value="cover">铺满界面</option>
+              <option value="contain">完整显示</option>
+              <option value="original">原始大小</option>
+              <option value="tile">平铺显示</option>
+            </select>
+          </label>
+        </div>
+
+        <section class="theme-palette-section">
+          <div class="theme-section-heading"><div><strong>官方色盘</strong><span>一键应用推荐配色</span></div></div>
+          <div class="theme-palette-list" role="list" aria-label="官方主题色盘">
+            <button type="button" data-theme-palette="baiqiu"><i><b></b><b></b><b></b></i><span>白球蓝调</span></button>
+            <button type="button" data-theme-palette="tech-black"><i><b></b><b></b><b></b></i><span>科技暗黑</span></button>
+            <button type="button" data-theme-palette="space-gray"><i><b></b><b></b><b></b></i><span>深空银灰</span></button>
+            <button type="button" data-theme-palette="minimal-white"><i><b></b><b></b><b></b></i><span>极简纯白</span></button>
+            <button type="button" data-theme-palette="eye-green"><i><b></b><b></b><b></b></i><span>护眼青绿</span></button>
+          </div>
+        </section>
+
+        <section class="theme-color-section">
+          <div class="theme-section-heading"><div><strong>自定义配色</strong><span>颜色修改将实时应用到界面</span></div></div>
+          <div class="theme-color-list">
+            <label class="theme-color-row"><span>文字颜色</span><span class="theme-color-control"><input id="textColorInput" type="color" value="#20242b" aria-label="选择文字颜色"><input id="textColorHexInput" type="text" value="#20242B" maxlength="7" spellcheck="false" aria-label="文字颜色 HEX"></span></label>
+            <label class="theme-color-row"><span>主光颜色</span><span class="theme-color-control"><input id="accentColorInput" type="color" value="#315fca" aria-label="选择主光颜色"><input id="accentColorHexInput" type="text" value="#315FCA" maxlength="7" spellcheck="false" aria-label="主光颜色 HEX"></span></label>
+            <label class="theme-color-row"><span>背景颜色</span><span class="theme-color-control"><input id="backgroundColorInput" type="color" value="#f6f7f9" aria-label="选择背景颜色"><input id="backgroundColorHexInput" type="text" value="#F6F7F9" maxlength="7" spellcheck="false" aria-label="背景颜色 HEX"></span></label>
+            <label class="theme-color-row"><span>面板颜色</span><span class="theme-color-control"><input id="panelColorInput" type="color" value="#ffffff" aria-label="选择面板颜色"><input id="panelColorHexInput" type="text" value="#FFFFFF" maxlength="7" spellcheck="false" aria-label="面板颜色 HEX"></span></label>
+          </div>
+        </section>
+
+        <label class="theme-setting-row theme-font-row">
+          <span><strong>文字大小</strong><small>调整界面基础字号</small></span>
+          <input id="fontSizeInput" type="range" min="12" max="22" step="1" value="16">
+        </label>
+        <div id="skinImageStatus" class="theme-inline-status" role="status" hidden></div>
+        <div class="theme-page-actions"><button id="saveThemeSettingsBtn" type="button" hidden>保存修改</button></div>
+      </section>
+
+      <section class="settings-page general-settings-page" data-settings-page="general">
+        <header class="general-settings-header">
+          <strong>通用设置</strong>
+          <span>管理启动行为与文件保存位置</span>
+        </header>
+        <div class="general-settings-list">
+          <section class="general-settings-section">
+            <strong>启动设置</strong>
+            <div class="general-setting-row general-setting-toggle-row">
+              <div class="general-setting-copy">
+                <span>开机自启动</span>
+                <small>启动白球AI时自动运行</small>
+              </div>
+              <label class="general-switch" title="开机自启动">
+                <input id="autoLaunchInput" type="checkbox">
+                <i aria-hidden="true"></i>
+              </label>
+            </div>
+          </section>
+          <section class="general-settings-section">
+            <strong>文件保存</strong>
+            <div class="general-save-field">
+              <label for="saveLocationInput">保存位置</label>
+              <input id="saveLocationInput" readonly value="desktop">
+              <small>白球生成文件默认保存位置。</small>
+            </div>
+            <div class="general-save-actions">
+              <button id="chooseSaveLocationBtn" type="button">选择文件夹</button>
+              <button id="resetSaveLocationBtn" type="button">恢复默认</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="settings-page" data-settings-page="update">
+        <div class="settings-card">
+          <strong>版本更新</strong>
+          <div class="stat"><span>当前版本</span><b id="appVersion">2.1.0-beta.1</b></div>
+          <div class="update-server-status"><span>更新服务器</span><b>白球官方线路</b><i>自动连接</i></div>
+          <div class="update-actions">
+            <button id="updateCheckBtn" type="button">检查更新</button>
+            <button id="applyOnlineUpdateBtn" type="button" hidden>立即更新</button>
+          </div>
+          <div id="updateContent" class="update-content" aria-live="polite">
+            <div class="update-state-head"><b>准备就绪</b><span>真实在线检测</span></div>
+            <p>点击“检查更新”读取服务器版本；发现新版本后可在白球内下载、校验并安装。</p>
+          </div>
+        </div>
+        <div id="publishUpdatePanel" class="settings-card" hidden>
+          <strong>发布客户更新</strong>
+          <label>
+            <span>新版本号</span>
+            <input id="publishVersionInput" placeholder="例如：1.0.1">
+          </label>
+          <label class="skill-editor-row">
+            <span>更新说明</span>
+            <textarea id="publishNotesInput" rows="4" placeholder="写给客户看的更新内容。"></textarea>
+          </label>
+          <button id="publishUpdateBtn" type="button">发布客户版更新</button>
+          <button id="startUpdateServerBtn" type="button">启动更新服务器</button>
+          <div class="update-content">只在开发工具面板显示。发布后，客户版可在“更新”里下载。</div>
+        </div>
+      </section>
+
+      <section class="settings-page agent-health-page" data-settings-page="health">
+        <div class="agent-health-header">
+          <div class="agent-health-orbit" id="agentHealthOrbit" data-status="idle" data-display="empty" aria-hidden="true">
+            <svg class="agent-health-ring" viewBox="0 0 100 100" focusable="false">
+              <circle class="agent-health-ring-track" cx="50" cy="50" r="42"></circle>
+              <circle class="agent-health-ring-progress" cx="50" cy="50" r="42"></circle>
+            </svg>
+            <span id="blackBallRingLabel" class="agent-health-ring-label">--</span>
+          </div>
+          <div class="agent-health-info">
+            <div class="agent-health-title">
+              <span>黑球状态检测中心</span>
+              <strong id="agentHealthStatus">等待检测</strong>
+              <small id="agentHealthMeta">本地数据检查与确定性修复</small>
+            </div>
+          </div>
+          <div class="agent-health-score" aria-live="polite">
+            <div class="agent-health-score-head">
+              <span>问题数量</span>
+              <button id="blackBallLogBtn" type="button" title="查看问题日志" aria-label="查看问题日志" hidden>日志</button>
+            </div>
+            <strong id="agentHealthScore">--</strong>
+          </div>
+          <div class="agent-health-actions"><button id="runAgentHealthBtn" type="button">开始检测</button></div>
+          </div>
+          <div class="agent-health-section-head agent-health-overview-head"><strong>核心能力状态</strong></div>
+          <div id="agentHealthDimensions" class="agent-health-dimensions" aria-live="polite"></div>
+          <section class="black-ball-repair-panel" aria-live="polite">
+          <div class="black-ball-repair-head">
+            <div><span>本地故障恢复</span><strong id="blackBallRepairStatus">尚未检测</strong></div>
+            <small id="blackBallRepairMeta">不调用网络、模型或 LLM，仅按确定性规则处理本地数据</small>
+          </div>
+          <div id="blackBallRepairSummary" class="black-ball-repair-summary">点击“开始检测”扫描历史任务、意识快照和项目树结构。</div>
+          </section>
+          <div id="agentHealthRun" class="agent-health-run" data-active="false" aria-live="polite">
+          <div class="agent-health-run-head">
+            <div><span>本地规则检测</span><strong id="agentHealthPhase">等待开始</strong></div>
+            <b id="agentHealthProgressCount">0/3</b>
+          </div>
+          <div class="agent-health-current-task">
+            <span>当前任务</span>
+            <strong id="agentHealthCurrentTask">等待开始检测</strong>
+            <small id="agentHealthCurrentDetail">检测开始后将扫描历史任务、意识快照和项目树结构</small>
+          </div>
+          <div id="agentHealthTestList" class="agent-health-test-list"></div>
+        </div>
+        <div class="agent-health-section-head"><strong id="agentHealthReportTitle">详细能力分析</strong><span id="agentHealthVersion">--</span></div>
+        <div id="agentHealthModules" class="agent-health-modules"></div>
+        <div class="agent-health-section-head"><strong>最近检测记录</strong><span>能力变化</span></div>
+        <div id="agentHealthHistory" class="agent-health-history"></div>
+        <div class="agent-health-section-head"><strong>技能缺口</strong><span>频率 × 价值 ÷ 难度</span></div>
+        <div id="agentHealthGaps" class="agent-health-gaps"></div>
+      </section>
+
+      <section class="settings-page debug-center-page" data-settings-page="debug">
+        <div class="debug-center-header">
+          <div><span>BAIQIU AI DEBUG CENTER</span><strong>系统自检中心</strong><small>由独立 QA Agent 调用真实接口并保存检测证据</small></div>
+          <button id="runDebugCenterBtn" class="debug-center-run" type="button">
+            <span><i aria-hidden="true"></i><strong id="debugCenterRunLabel">运行全链路自检</strong></span>
+            <small id="debugCenterRunMeta">9 项真实系统探针</small>
+          </button>
+        </div>
+        <div class="debug-center-summary">
+          <div><span>检测状态</span><strong id="debugCenterStatus">未检测</strong></div>
+          <div><span>当前阶段</span><strong id="debugCenterStage">等待开始</strong></div>
+          <div><span>通过项目</span><strong id="debugCenterPassed">0 / 9</strong></div>
+          <div><span>失败项目</span><strong id="debugCenterFailed">0</strong></div>
+        </div>
+        <div id="debugCenterChecks" class="debug-center-checks" aria-live="polite">
+          <article data-debug-check="licenseState"><i></i><div><strong>会员授权</strong><small>本地签名、会员状态与权限来源</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="agentRuntime"><i></i><div><strong>黑球连接</strong><small>ACP 真实模型链路</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="ceoAgent"><i></i><div><strong>CEO Agent</strong><small>项目与 CEO 会话绑定</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="childCommunication"><i></i><div><strong>子 Agent 通信</strong><small>消息持久化与状态同步</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="toolCall"><i></i><div><strong>工具调用</strong><small>真实工具执行结果</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="modelCall"><i></i><div><strong>模型调用</strong><small>当前模型真实响应</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="fileProcessing"><i></i><div><strong>文件处理</strong><small>创建、解析、关联与清理</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="updateService"><i></i><div><strong>更新服务</strong><small>版本服务器与版本比较</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="skillSystem"><i></i><div><strong>Skill 系统</strong><small>声明、注册与真实调用</small></div><b>未检测</b><p></p></article>
+        </div>
+        <div id="debugCenterReport" class="debug-center-report"><span>报告位置</span><strong>尚未生成 QA 测试报告</strong><small>--</small></div>
+      </section>
+
+      <section class="settings-page" data-settings-page="persona">
+        <div class="settings-card">
+          <strong>Agent 设定</strong>
+          <label>
+            <span>名字</span>
+            <input id="personaNameSettingsInput" placeholder="例如：Gantz、运营执行官、小白">
+          </label>
+          <label class="skill-editor-row">
+            <span>性格</span>
+            <textarea id="personaPersonalitySettingsInput" rows="4" placeholder="例如：直接、稳定、少废话、执行力强。"></textarea>
+          </label>
+          <label class="skill-editor-row">
+            <span>能力</span>
+            <textarea id="personaAbilitiesSettingsInput" rows="4" placeholder="例如：操作电脑、分析表格、整理桌面、学习技能、执行任务。"></textarea>
+          </label>
+          <label class="skill-editor-row">
+            <span>备注</span>
+            <textarea id="personaNotesSettingsInput" rows="5" placeholder="写给主人偏好、业务背景、禁忌、默认保存位置等。"></textarea>
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-page membership-center-page" data-settings-page="invite">
+        <div class="membership-center-header">
+          <div><span>BAIQIU MEMBERSHIP</span><strong>会员中心</strong></div>
+          <small>管理会员状态、权益与续费</small>
+        </div>
+
+        <section id="membershipStatusCard" class="membership-status-card" data-state="inactive">
+          <div class="membership-status-main">
+            <div class="membership-status-title">
+              <span>当前会员</span>
+              <strong id="membershipPlanName">正在读取</strong>
+              <b id="membershipLevelBadge" class="membership-level-badge">永久会员</b>
+            </div>
+            <dl class="membership-status-facts">
+              <div><dt>状态</dt><dd><i></i><span id="membershipActivationState">读取中</span></dd></div>
+              <div><dt>有效期</dt><dd id="membershipValidity">--</dd></div>
+            </dl>
+          </div>
+          <div class="membership-benefits">
+            <strong>会员权益</strong>
+            <ul>
+              <li><span aria-hidden="true">✓</span>无限使用 AI 对话</li>
+              <li><span aria-hidden="true">✓</span>多模型调用权限</li>
+              <li><span aria-hidden="true">✓</span>AI Agent 创建权限</li>
+              <li><span aria-hidden="true">✓</span>文件分析与处理</li>
+              <li><span aria-hidden="true">✓</span>图片识别能力</li>
+              <li><span aria-hidden="true">✓</span>高级工具中心</li>
+              <li><span aria-hidden="true">✓</span>意识中心长期记忆</li>
+              <li><span aria-hidden="true">✓</span>优先体验新功能</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="membership-center-section membership-upgrade-section">
+          <div class="membership-section-heading"><div><strong>升级会员</strong><span>选择适合你的使用周期</span></div></div>
+          <div class="settings-membership-plans">
+            <button id="settingsMonthlyBtn" class="membership-plan-option" data-membership-plan="monthly" type="button" aria-pressed="false"><b>月卡</b><em>¥19.9</em><small>适合初次体验</small><span class="membership-plan-action">立即开通</span></button>
+            <button id="settingsSixMonthsBtn" class="membership-plan-option selected" data-membership-plan="six_months" type="button" aria-pressed="true"><b>6个月</b><em>¥88</em><small>适合持续使用</small><span class="membership-plan-badge">推荐</span><span class="membership-plan-action">立即开通</span></button>
+            <button id="settingsYearlyBtn" class="membership-plan-option" data-membership-plan="yearly" type="button" aria-pressed="false"><b>12个月</b><em>¥168</em><small>适合高频使用</small><span class="membership-plan-action">立即开通</span></button>
+          </div>
+          <div id="paymentPanel" class="membership-payment-panel" data-state="idle" hidden>
+            <div class="membership-payment-head">
+              <div><span>安全支付</span><strong id="paymentTitle">订单待付款</strong></div>
+              <button id="paymentCloseBtn" type="button" title="关闭支付区域" aria-label="关闭支付区域">×</button>
+            </div>
+            <div class="membership-payment-body">
+              <div class="membership-payment-summary">
+                <div><span>应付金额</span><b id="paymentAmount">--</b></div>
+                <span id="paymentOrderId">订单号：-</span>
+              </div>
+              <div class="membership-payment-methods" role="group" aria-label="支付方式">
+                <button class="selected" type="button" data-payment-method="wechat" aria-pressed="true">微信支付</button>
+                <button type="button" data-payment-method="alipay" aria-pressed="false">支付宝支付</button>
+              </div>
+              <div class="membership-payment-qr">
+                <div data-payment-qr="wechat">
+                  <button class="membership-payment-qr-trigger" type="button" data-payment-preview="wechat" aria-label="放大查看微信支付二维码">
+                    <strong>微信支付</strong>
+                    <img src="./assets/payment/wechat.jpg" alt="微信支付二维码" loading="lazy" decoding="async">
+                    <span>点击查看大图</span>
+                  </button>
+                </div>
+                <div data-payment-qr="alipay" hidden>
+                  <button class="membership-payment-qr-trigger" type="button" data-payment-preview="alipay" aria-label="放大查看支付宝支付二维码">
+                    <strong>支付宝支付</strong>
+                    <img src="./assets/payment/alipay.jpg" alt="支付宝支付二维码" loading="lazy" decoding="async">
+                    <span>点击查看大图</span>
+                  </button>
+                </div>
+              </div>
+              <p id="paymentHint">扫码付款后，点击“查询支付结果”。</p>
+              <div id="paymentStatus" class="membership-payment-status" aria-live="polite"></div>
+              <div class="membership-payment-actions">
+                <button id="paymentCheckBtn" type="button">查询支付结果</button>
+                <button id="paymentCopyBtn" type="button">复制订单号</button>
+              </div>
+            </div>
+            <div class="membership-payment-success">
+              <i aria-hidden="true">✓</i>
+              <strong>开通成功</strong>
+              <span>会员状态和有效期已更新，可以继续使用白球 AI。</span>
+              <button id="paymentReturnBtn" type="button">返回会员中心</button>
+            </div>
+          </div>
+          <div id="paymentQrPreview" class="membership-qr-preview" role="dialog" aria-modal="true" aria-labelledby="paymentQrPreviewTitle" hidden>
+            <section class="membership-qr-preview-card">
+              <button id="paymentQrPreviewClose" class="membership-qr-preview-close" type="button" title="关闭二维码大图" aria-label="关闭二维码大图">×</button>
+              <strong id="paymentQrPreviewTitle">微信支付</strong>
+              <img id="paymentQrPreviewImage" src="./assets/payment/wechat.jpg" alt="微信支付二维码大图" loading="lazy" decoding="async">
+              <span id="paymentQrPreviewHint">请使用微信扫码支付</span>
+            </section>
+          </div>
+        </section>
+
+        <section class="membership-center-section membership-redeem-section">
+          <div class="membership-section-heading"><div><strong>兑换会员</strong><span>已有兑换码可直接激活</span></div></div>
+          <div class="membership-redeem-row">
+            <input id="inviteInput" aria-label="会员兑换码" placeholder="输入兑换码：XXXX-XXXX-XXXX-XXXX" maxlength="19">
+            <button id="unlockInviteBtn" type="button">立即兑换</button>
+          </div>
+          <div id="inviteStatus" class="membership-redeem-status" aria-live="polite">输入管理员发放的兑换码即可激活会员。</div>
+        </section>
+
+        <div id="ownerInvitePanel" class="settings-card" hidden>
+          <strong>会员与兑换码管理</strong>
+          <label>
+            <span>生成数量</span>
+            <input id="inviteCountInput" type="number" min="1" max="50" value="5">
+          </label>
+          <button id="generateInviteBtn" type="button">生成永久兑换码</button>
+          <textarea id="generatedInviteOutput" rows="6" readonly placeholder="生成后复制给客户。"></textarea>
+          <div class="admin-code-tools">
+            <input id="adminCodeSearchInput" placeholder="搜索兑换码/状态/备注">
+            <button id="adminRefreshCodesBtn" type="button">刷新列表</button>
+            <button id="adminExportCodesBtn" type="button">导出CSV</button>
+          </div>
+          <textarea id="adminCodeListOutput" rows="10" readonly placeholder="管理员兑换码与会员列表"></textarea>
+        </div>
+      </section>
+
+      <section class="settings-page tool-center-page" data-settings-page="skills">
+        <header class="tool-center-header">
+          <div><span>AI CAPABILITIES</span><strong>工具中心</strong></div>
+          <small id="toolCenterSummary">正在读取工具状态</small>
+        </header>
+
+        <section class="tool-center-section installed-tools-section">
+          <div class="tool-section-heading"><div><strong>已安装工具</strong><span>当前可用能力</span></div><b id="installedToolCount">0</b></div>
+          <div id="installedToolList" class="tool-management-list" aria-live="polite">读取中。</div>
+        </section>
+
+        <section class="tool-center-section my-skills-section">
+          <div class="tool-section-heading"><div><strong>技能管理</strong><span>管理白球 AI 已安装的专业能力</span></div><div class="tool-section-actions"><b id="mySkillCount">0</b><button id="openCustomSkillBtn" type="button">＋ 创建自定义技能</button></div></div>
+          <div id="skillList" class="skill-management-grid">读取中。</div>
+          <div id="customSkillEditor" class="custom-skill-editor" hidden>
+            <div><strong>创建自定义技能</strong><span>定义固定规则和专业处理流程</span></div>
+            <label><span>技能名称</span><input id="skillNameInput" placeholder="例如：美团运营分析"></label>
+            <label><span>技能简介与规则</span><textarea id="skillBodyInput" rows="3" placeholder="写入技能规则、流程和常用判断方式"></textarea></label>
+            <div><button id="cancelCustomSkillBtn" type="button">取消</button><button id="addSkillBtn" type="button">添加技能</button></div>
+          </div>
+        </section>
+
+        <section class="tool-center-section skill-learning-section">
+          <div class="tool-section-heading"><div><strong>技能学习</strong><span>从资料中研究、生成、安装并验证新能力</span></div><small>AI 能力扩展</small></div>
+          <div class="skill-learning-workspace">
+            <div class="skill-learning-form">
+              <header class="skill-learning-panel-heading"><strong>技能配置</strong><span>设置技能名称与学习资料</span></header>
+              <label><span>技能名称</span><input id="learnSkillNameInput" placeholder="例如：外卖运营诊断"></label>
+              <div class="skill-source-field">
+                <span>学习资料来源</span>
+                <div id="skillSourceType" class="skill-source-types" role="group" aria-label="学习资料来源">
+                  <button class="active" type="button" data-skill-source="text" aria-pressed="true">文本</button>
+                  <button type="button" data-skill-source="web" aria-pressed="false">网页</button>
+                  <button type="button" data-skill-source="file" aria-pressed="false">文件</button>
+                </div>
+              </div>
+              <label class="skill-source-input"><span id="learnSkillSourceLabel">资料或专业主题</span><textarea id="learnSkillSourceInput" rows="3" placeholder="输入专业资料、规则或需要学习的主题"></textarea></label>
+              <input id="learnSkillSourceFile" type="file" hidden accept=".txt,.md,.json,.csv,.html,.htm,text/*">
+              <div id="learnSkillFileName" class="skill-source-file-name" hidden></div>
+              <button id="learnSkillBtn" class="skill-learning-primary" type="button">开始学习</button>
+            </div>
+            <div class="skill-learning-feedback">
+              <header class="skill-learning-panel-heading"><strong>学习状态</strong><span>实时查看学习进度与运行记录</span></header>
+              <div id="learnSkillProgress" class="skill-learning-progress" data-stage="IDLE" aria-label="技能学习进度">
+                <i data-stage="RESEARCHING"></i><i data-stage="GENERATING"></i><i data-stage="INSTALLING"></i><i data-stage="REGISTERING"></i><i data-stage="TESTING"></i><i data-stage="VERIFYING"></i><i data-stage="READY"></i>
+              </div>
+              <div id="learnSkillStatus" class="skill-learn-status">IDLE · 准备学习</div>
+              <div><strong>学习日志</strong><button id="clearSkillLearnLogBtn" type="button">清空</button></div>
+              <div id="learnSkillLog" class="skill-learning-log" aria-live="polite"><div><time>--:--</time><span>等待学习任务</span></div></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tool-center-section memory-center-section">
+          <div class="tool-section-heading"><div><strong>长期记忆</strong><span>只显示已写入 Hermes 的用户习惯和工作约定</span></div><div class="tool-section-actions"><small id="memoryProofStatus">未验证召回</small><button id="verifyMemoryBtn" type="button">验证召回</button><button id="manageMemoriesBtn" type="button">管理记忆</button></div></div>
+          <div class="memory-management-layout">
+            <div class="memory-create-panel"><label><span>新增记忆</span><textarea id="memoryInput" rows="3" aria-label="记忆内容" placeholder="例如：表格默认保存在桌面"></textarea></label><button id="addMemoryBtn" type="button">保存记忆</button></div>
+            <div id="memoryList" class="memory-management-list" hidden>后台记忆已开启。</div>
+          </div>
+        </section>
+      </section>
+
+      <section id="developerLogsPage" class="settings-page" data-settings-page="developerLogs" hidden>
+        <div class="settings-card">
+          <strong>开发者日志</strong>
+          <label>
+            <span>日志类型</span>
+            <select id="developerLogTypeSelect">
+              <option value="system">系统日志</option>
+              <option value="agent">Agent Loop</option>
+              <option value="update">更新系统</option>
+              <option value="error">错误日志</option>
+            </select>
+          </label>
+          <div class="admin-code-tools">
+            <button id="refreshDeveloperLogsBtn" type="button">刷新日志</button>
+            <button id="exportDeveloperLogsBtn" type="button">导出日志</button>
+          </div>
+          <textarea id="developerLogOutput" rows="16" readonly placeholder="仅开发者版本可见"></textarea>
+        </div>
+      </section>
+
+      <menu id="settingsSaveMenu" hidden>
+        <button id="saveSettingsBtn" value="default">保存修改</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <section id="blackCoreLayer" class="black-core-layer" hidden data-phase="idle" aria-labelledby="blackCoreTitle">
+    <canvas id="blackCoreCanvas" aria-hidden="true"></canvas>
+    <div class="black-core-noise" aria-hidden="true"></div>
+    <header class="black-core-header">
+      <div class="black-core-identity">
+        <span>BLACK CORE SYSTEM</span>
+        <strong id="blackCoreTitle">LIFE POTENTIAL ANALYSIS</strong>
+      </div>
+      <div class="black-core-subject">
+        <span>SUBJECT</span>
+        <strong id="blackCoreSubject">HUMAN-001</strong>
+      </div>
+      <button id="blackCoreCloseBtn" type="button" aria-label="关闭生命潜能解析" hidden>×</button>
+    </header>
+
+    <section class="black-core-center-toolbar" data-black-core-center-only hidden aria-label="意识档案控制">
+      <div class="black-core-center-brand"><span>CONSCIOUS ARCHIVE</span><strong id="consciousCenterTitle">意识档案</strong></div>
+      <div class="black-core-center-actions">
+        <div class="black-core-motion-switch" role="group" aria-label="BLACK CORE 模式">
+          <button type="button" data-black-core-motion="static" aria-pressed="true">静态</button>
+          <button type="button" data-black-core-motion="dynamic" aria-pressed="false">动态</button>
+        </div>
+        <button id="blackCoreCenterExtractBtn" type="button">提取当前意识</button>
+      </div>
+    </section>
+
+    <main class="black-core-space" role="dialog" aria-modal="true">
+      <section class="black-core-scan" aria-label="生命扫描数据">
+        <header><span>POTENTIAL SCAN</span><b id="blackCoreConfidence">SIGNAL ACQUIRING</b></header>
+        <div class="black-core-metric-list">
+          <div data-core-metric="cognition"><span>Cognition</span><i><b></b></i><strong>--</strong></div>
+          <div data-core-metric="learning"><span>Learning</span><i><b></b></i><strong>--</strong></div>
+          <div data-core-metric="adaptation"><span>Adaptation</span><i><b></b></i><strong>--</strong></div>
+          <div data-core-metric="creation"><span>Creation</span><i><b></b></i><strong>--</strong></div>
+        </div>
+        <footer><span>BEHAVIOR SAMPLES</span><strong id="blackCoreEvidence">0000</strong></footer>
+      </section>
+
+      <aside class="black-core-center-archive" data-black-core-center-only hidden aria-label="意识档案列表">
+        <label class="black-core-archive-search">
+          <span aria-hidden="true">⌕</span>
+          <input id="consciousSearchInput" type="search" placeholder="搜索项目、CEO、Agent、任务" autocomplete="off">
+        </label>
+        <input id="consciousArchivedToggle" type="checkbox" checked hidden aria-hidden="true">
+        <div id="consciousSnapshotList" class="conscious-snapshot-list black-core-archive-list" aria-live="polite"></div>
+        <div id="consciousSnapshotDetail" class="conscious-snapshot-detail" hidden></div>
+      </aside>
+
+      <section class="black-core-orbit" aria-label="潜能星域">
+        <div class="black-core-potential potential-cognition" data-core-potential="cognition"><i></i><span>认知能力</span><b>--</b></div>
+        <div class="black-core-potential potential-learning" data-core-potential="learning"><i></i><span>学习能力</span><b>--</b></div>
+        <div class="black-core-potential potential-creation" data-core-potential="creation"><i></i><span>创造能力</span><b>--</b></div>
+        <div class="black-core-potential potential-judgment" data-core-potential="judgment"><i></i><span>判断能力</span><b>--</b></div>
+        <div class="black-core-potential potential-adaptation" data-core-potential="adaptation"><i></i><span>适应能力</span><b>--</b></div>
+        <div class="black-core-potential potential-execution" data-core-potential="execution"><i></i><span>执行能力</span><b>--</b></div>
+        <div class="black-core-potential potential-insight" data-core-potential="insight"><i></i><span>洞察能力</span><b>--</b></div>
+        <div class="black-core-potential potential-leadership" data-core-potential="leadership"><i></i><span>领导能力</span><b>--</b></div>
+
+        <div class="black-core-gravity" aria-hidden="true"><i></i><i></i><i></i></div>
+        <div class="black-core-object" aria-hidden="true">
+          <div class="black-core-halo"></div>
+          <div class="black-core-sphere"><i></i><b></b></div>
+          <span id="blackCoreStageLabel" hidden aria-hidden="true">SYSTEM DORMANT</span>
+        </div>
+      </section>
+
+      <aside class="black-core-analysis" aria-label="黑球分析结果">
+        <header><span>BLACK CORE ANALYSIS</span><b id="blackCoreAnalysisState">SCANNING</b></header>
+        <dl>
+          <div><dt>当前阶段</dt><dd id="blackCoreGrowthStage">Growth Stage --</dd></div>
+          <div><dt>发现潜能</dt><dd id="blackCoreDiscovered">--</dd></div>
+          <div><dt>待觉醒</dt><dd id="blackCorePending">--</dd></div>
+          <div><dt>未知领域</dt><dd id="blackCoreUnknown">--</dd></div>
+        </dl>
+        <section class="black-core-awakening">
+          <span>ABILITY AWAKENING</span>
+          <strong id="blackCoreAwakening">ANALYZING...</strong>
+          <small id="blackCoreRecommendation">正在分析生命行为轨迹</small>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="black-core-footer">
+      <div class="black-core-progress"><i id="blackCoreProgressBar"></i></div>
+      <div><span id="blackCorePhaseCode">INITIAL STATE</span><strong id="blackCorePhaseText">等待生命信号</strong><b id="blackCoreProgressValue">0%</b></div>
+    </footer>
+  </section>
+  <!-- Compatibility anchor retained for integrations; the visible center is BLACK CORE. -->
+  <section id="consciousCenterLayer" hidden aria-hidden="true"><button id="consciousCenterCloseBtn" type="button" hidden></button><button id="consciousExtractBtn" type="button" hidden></button></section>
+
+  <dialog id="growthCenterDialog" class="growth-center-dialog">
+    <form method="dialog" class="growth-center-shell" data-motion="static">
+      <header class="gantz-command-bar">
+        <div class="gantz-brand">
+          <i aria-hidden="true"></i>
+          <span><small>BLACK CORE SYSTEM</small><strong>知识星球</strong></span>
+        </div>
+        <div class="gantz-command-status">
+          <span id="knowledgeCenterSummary">正在连接本地知识核心</span>
+          <b>LOCAL CORE</b>
+        </div>
+        <div class="gantz-command-actions">
+          <label class="gantz-search-field">
+            <span>搜索知识</span>
+            <input id="knowledgeSearchInput" type="search" placeholder="标题 / 标签 / 摘要" autocomplete="off">
+          </label>
+          <div class="gantz-motion-switch" role="group" aria-label="宇宙渲染模式">
+            <button type="button" data-knowledge-motion="static" aria-pressed="true">静态</button>
+            <button type="button" data-knowledge-motion="dynamic" aria-pressed="false">动态</button>
+          </div>
+          <button id="exportKnowledgeBtn" type="button">导出</button>
+          <button id="newKnowledgeNoteBtn" type="button">新建</button>
+          <button id="refreshKnowledgeBtn" type="button">刷新</button>
+          <button id="openKnowledgeVaultBtn" type="button">目录</button>
+          <button id="growthCenterCloseBtn" class="gantz-close" type="button" aria-label="关闭知识星球">×</button>
+        </div>
+      </header>
+      <section class="knowledge-center-page active">
+        <section id="knowledgeUniverse" class="gantz-universe" data-motion="static" data-phase="idle">
+          <div class="gantz-starfield" aria-hidden="true"></div>
+          <div class="gantz-grid" aria-hidden="true"></div>
+
+          <aside class="gantz-vitals" aria-label="知识核心状态">
+            <header><span>GANTZ CORE</span><b id="gantzUniverseStatus">SCANNING</b></header>
+            <div id="knowledgeStats" class="knowledge-stats" aria-live="polite"></div>
+            <small id="knowledgeRootPath">知识库目录读取中</small>
+          </aside>
+
+          <aside class="knowledge-category-panel">
+            <header><strong>能力星域</strong><span id="knowledgeCategoryTotal">0</span></header>
+            <div id="knowledgeCategoryList" class="knowledge-category-list" role="listbox" aria-label="知识星域分类"></div>
+          </aside>
+
+          <div id="knowledgeUniverseViewport" class="gantz-universe-viewport" tabindex="0" aria-label="知识星球宇宙，使用鼠标滚轮缩放">
+            <div id="knowledgeUniverseScene" class="gantz-universe-scene">
+              <i class="gantz-orbit orbit-one" aria-hidden="true"></i>
+              <i class="gantz-orbit orbit-two" aria-hidden="true"></i>
+              <i class="gantz-orbit orbit-three" aria-hidden="true"></i>
+              <div id="knowledgeOrbitLayer" class="gantz-orbit-layer"></div>
+              <div id="knowledgePlanetLayer" class="gantz-planet-layer" aria-live="polite"></div>
+              <div id="gantzCore" class="knowledge-black-core" role="img" aria-label="BLACK CORE 知识核心">
+                <div class="knowledge-core-gravity" aria-hidden="true"><i></i><i></i><i></i></div>
+                <div class="knowledge-core-object" aria-hidden="true">
+                  <div class="knowledge-core-halo"></div>
+                  <div class="knowledge-core-sphere"><i></i><b></b></div>
+                </div>
+              </div>
+            </div>
+            <div class="gantz-zoom-readout"><span>ZOOM</span><b id="gantzZoomValue">100%</b></div>
+          </div>
+
+          <section class="knowledge-note-panel">
+            <header>
+              <div><span>KNOWLEDGE OBJECTS</span><strong>知识记录</strong></div>
+              <b id="knowledgeNoteCount">0 条</b>
+            </header>
+            <div id="knowledgeNoteList" class="knowledge-note-list" aria-live="polite"></div>
+          </section>
+
+          <aside id="gantzSkillAudit" class="gantz-skill-audit" data-state="idle" aria-label="黑球检测">
+            <header>
+              <div><span>SKILL INTEGRITY</span><strong>黑球检测</strong></div>
+              <b id="gantzSkillAuditStatus">未检测</b>
+            </header>
+            <div class="gantz-skill-audit-metrics" aria-live="polite">
+              <div><span>扫描</span><strong id="gantzSkillScanned">--</strong></div>
+              <div><span>去重</span><strong id="gantzSkillRemoved">--</strong></div>
+              <div><span>冲突保留</span><strong id="gantzSkillConflicts">--</strong></div>
+            </div>
+            <small id="gantzSkillAuditRecord">尚无检测记录</small>
+            <button id="gantzSkillAuditBtn" type="button">检测并去重</button>
+          </aside>
+
+          <aside class="gantz-fusion-readout" aria-label="系统评估">
+            <div><span>可融合能力</span><strong id="gantzFusionCount">0</strong></div>
+            <div><span>当前风险</span><strong id="gantzRiskLevel">LOW</strong></div>
+            <small>融合候选由共享标签的真实关联计算，不自动修改知识。</small>
+          </aside>
+
+          <section class="knowledge-editor-panel" data-open="false">
+            <header>
+              <div><span>KNOWLEDGE INSPECTOR</span><strong>知识体编辑舱</strong><small id="knowledgeEditorStatus">选择一颗知识星体</small></div>
+              <div>
+                <button id="showKnowledgeNoteBtn" type="button" disabled>定位</button>
+                <button id="deleteKnowledgeNoteBtn" type="button" disabled>删除</button>
+                <button id="saveKnowledgeNoteBtn" type="button" disabled>保存</button>
+                <button id="closeKnowledgeEditorBtn" type="button" aria-label="关闭知识体编辑舱">×</button>
+              </div>
+            </header>
+            <div id="knowledgeEditorForm" class="knowledge-editor-form">
+              <label><span>名称</span><input id="knowledgeTitleInput" maxlength="120" placeholder="输入知识名称"></label>
+              <div class="knowledge-editor-meta">
+                <label><span>所属星域</span><select id="knowledgeCategorySelect"></select></label>
+                <label><span>关联标签</span><input id="knowledgeTagsInput" placeholder="用逗号分隔"></label>
+              </div>
+              <label class="knowledge-body-field"><span>知识记忆体</span><textarea id="knowledgeBodyInput" rows="16" placeholder="写下这条知识"></textarea></label>
+              <small id="knowledgeFilePath">未选择文件</small>
+            </div>
+          </section>
+
+          <div class="gantz-axis-label axis-north" aria-hidden="true">ABILITY DOMAIN / 00</div>
+          <div class="gantz-axis-label axis-south" aria-hidden="true">LOCAL EVOLUTION NETWORK</div>
+          <div class="gantz-axis-label axis-east" aria-hidden="true">DATA LINK ACTIVE</div>
+          <div class="gantz-axis-label axis-west" aria-hidden="true">HUMAN KNOWLEDGE</div>
+          <div class="knowledge-loading" hidden><i></i><span>正在扫描本地 Markdown</span></div>
+        </section>
+      </section>
+    </form>
+  </dialog>
+
+  <dialog id="blackBallLogDialog" class="black-ball-log-dialog" aria-labelledby="blackBallLogTitle">
+    <form method="dialog">
+      <header>
+        <div><span>黑球状态检测</span><strong id="blackBallLogTitle">问题日志</strong></div>
+        <button type="submit" aria-label="关闭问题日志">×</button>
+      </header>
+      <div id="blackBallLogContent" class="black-ball-log-content"></div>
+      <footer><button type="submit">关闭</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="renameDialog" class="rename-dialog">
+    <form method="dialog">
+      <header>
+        <strong>修改会话名称</strong>
+        <button value="cancel">×</button>
+      </header>
+      <input id="renameInput" maxlength="80" autocomplete="off">
+      <menu>
+        <button id="renameCancelBtn" value="cancel">取消</button>
+        <button id="renameSaveBtn" value="default">保存</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="personaDialog" class="settings-dialog persona-dialog">
+    <form method="dialog">
+      <header>
+        <strong>初始定制</strong>
+      </header>
+      <div class="settings-card">
+        <strong>给你的助手设定身份</strong>
+        <label>
+          <span>名字</span>
+          <input id="personaNameInput" placeholder="例如：Gantz、运营助手、店铺参谋">
+        </label>
+        <label class="skill-editor-row">
+          <span>性格</span>
+          <textarea id="personaPersonalityInput" rows="4" placeholder="例如：稳重、直接、少废话、执行力强。"></textarea>
+        </label>
+        <label class="skill-editor-row">
+          <span>能力</span>
+          <textarea id="personaAbilitiesInput" rows="4" placeholder="例如：分析表格、处理图片、写方案、协助店铺运营。"></textarea>
+        </label>
+      </div>
+      <menu>
+        <button id="savePersonaBtn" value="default">保存并开始</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="../node_modules/marked/lib/marked.umd.js"></script>
+  <script src="../services/membership-utils.js"></script>
+      <script src="../services/assistant-code-utils.js"></script>
+      <script src="./session-task-queue.js"></script>
+      <script src="./task-board-edge-position.js"></script>
+      <script src="./draggable-panel-position.js"></script>
+      <script src="./context-menu-position.js"></script>
+      <script src="./app.js"></script>
+</body>
+</html>
