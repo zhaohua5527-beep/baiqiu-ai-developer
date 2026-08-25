@@ -49,3 +49,31 @@ Desktop.ini
 
 # Update staging
 .update-stage-*/
+
+# Existing remote repository rules
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+.worktrees/
+
+# Build/release outputs
+resources/app/server/releases/
+resources/app/server/license-db.json
+resources/app/dist/
+resources/app/node_modules/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+

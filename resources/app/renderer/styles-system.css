@@ -1,0 +1,1461 @@
+/* =========================================================
+   Baiqiu AI · Orbital Operator Design System
+   Full-surface visual language (shell / chat / settings / license)
+   ========================================================= */
+
+:root {
+  --bq-void: #070B10;
+  --bq-ink: #0E141C;
+  --bq-panel: #151C26;
+  --bq-panel-soft: #1B2430;
+  --bq-line: #2A3544;
+  --bq-pearl: #E7EEF8;
+  --bq-mist: #93A0B4;
+  --bq-ice: #79C4FF;
+  --bq-signal: #4AD6B8;
+  --bq-amber: #E8B15A;
+  --bq-danger: #FF6B7A;
+  --bq-user: #1A2A3A;
+
+  --bg: var(--bq-void);
+  --panel: var(--bq-panel);
+  --panel2: var(--bq-panel-soft);
+  --line: color-mix(in srgb, var(--bq-line) 88%, var(--bq-ice) 12%);
+  --text: var(--bq-pearl);
+  --muted: var(--bq-mist);
+  --accent: var(--bq-ice);
+  --danger: var(--bq-danger);
+  --user: color-mix(in srgb, var(--bq-user) 88%, var(--bq-ice) 12%);
+  --assistant: color-mix(in srgb, var(--bq-panel) 92%, #000 8%);
+  --surface: var(--bq-panel);
+  --surface-soft: var(--bq-panel-soft);
+  --text-main: var(--bq-pearl);
+  --text-muted: var(--bq-mist);
+  --brand: var(--bq-ice);
+
+  --terminal-font: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  --mono-font: "Cascadia Mono", "Consolas", "Microsoft YaHei UI", monospace;
+
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 18px;
+  --r-xl: 24px;
+  --r-pill: 999px;
+
+  --shadow-1: 0 8px 24px rgba(0, 0, 0, .28);
+  --shadow-2: 0 16px 48px rgba(0, 0, 0, .36);
+  --orbit-glow: 0 0 0 1px color-mix(in srgb, var(--bq-ice) 28%, transparent), 0 0 24px color-mix(in srgb, var(--bq-ice) 14%, transparent);
+}
+
+/* ---------- Base ---------- */
+html, body {
+  background: var(--bq-void) !important;
+  color: var(--bq-pearl) !important;
+  font-family: var(--terminal-font) !important;
+}
+
+body.bq-orbital {
+  background:
+    radial-gradient(1200px 600px at 18% -10%, color-mix(in srgb, var(--bq-ice) 14%, transparent), transparent 55%),
+    radial-gradient(900px 500px at 92% 8%, color-mix(in srgb, var(--bq-signal) 8%, transparent), transparent 48%),
+    linear-gradient(180deg, #0A1018 0%, var(--bq-void) 42%, #06090E 100%) !important;
+  background-attachment: fixed !important;
+}
+
+body.bq-orbital::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: .35;
+  background-image:
+    linear-gradient(rgba(121, 196, 255, .035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(121, 196, 255, .03) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(circle at center, #000 35%, transparent 85%);
+}
+
+.app {
+  position: relative;
+  z-index: 1;
+  grid-template-rows: 68px 1fr !important;
+}
+
+/* ---------- Titlebar ---------- */
+.titlebar {
+  padding: 10px 16px !important;
+  border-bottom: 1px solid color-mix(in srgb, var(--bq-line) 80%, transparent) !important;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bq-panel-soft) 92%, #000 8%), color-mix(in srgb, var(--bq-ink) 94%, #000 6%)) !important;
+  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset !important;
+}
+
+.brand-copy {
+  display: grid;
+  gap: 7px;
+}
+
+.terminal-brand strong,
+.brand strong {
+  font-size: 22px !important;
+  font-weight: 780 !important;
+  letter-spacing: .01em !important;
+  color: var(--bq-pearl) !important;
+}
+
+.orbit-status,
+#gatewayStatus {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  width: fit-content !important;
+  margin-top: 0 !important;
+  padding: 5px 11px !important;
+  border-radius: var(--r-pill) !important;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 28%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ice) 10%, transparent) !important;
+  color: color-mix(in srgb, var(--bq-ice) 88%, #fff 12%) !important;
+  font-size: 12px !important;
+  line-height: 1.2 !important;
+  font-family: var(--mono-font) !important;
+}
+
+.orbit-status::before,
+#gatewayStatus::before {
+  content: "" !important;
+  width: 7px !important;
+  height: 7px !important;
+  border-radius: 50% !important;
+  background: var(--bq-signal) !important;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--bq-signal) 18%, transparent) !important;
+}
+
+.title-actions {
+  gap: 8px !important;
+  align-items: center !important;
+}
+
+.title-actions .btn-chip,
+.title-actions button.btn-chip,
+.title-actions #modelBtn,
+.title-actions #skinBtn,
+.title-actions #inviteBtn,
+.title-actions #settingsBtn,
+.title-actions #trialStatus {
+  min-width: auto !important;
+  height: 34px !important;
+  padding: 0 13px !important;
+  border-radius: var(--r-pill) !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 88%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel-soft) 90%, transparent) !important;
+  color: var(--bq-pearl) !important;
+  font-size: 13px !important;
+  font-weight: 650 !important;
+  clip-path: none !important;
+  box-shadow: none !important;
+}
+
+.title-actions .btn-chip:hover,
+.title-actions #modelBtn:hover,
+.title-actions #skinBtn:hover,
+.title-actions #inviteBtn:hover,
+.title-actions #settingsBtn:hover {
+  border-color: color-mix(in srgb, var(--bq-ice) 48%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ice) 12%, var(--bq-panel-soft)) !important;
+}
+
+.trial-status {
+  color: var(--bq-amber) !important;
+  border-color: color-mix(in srgb, var(--bq-amber) 36%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-amber) 10%, transparent) !important;
+}
+
+.title-actions .btn-win,
+.title-actions button[data-window] {
+  width: 34px !important;
+  min-width: 34px !important;
+  height: 34px !important;
+  padding: 0 !important;
+  border-radius: 10px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 80%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel) 88%, transparent) !important;
+  color: var(--bq-mist) !important;
+  font-size: 14px !important;
+  clip-path: none !important;
+}
+
+.title-actions .btn-win-close:hover,
+.title-actions button[data-window="close"]:hover {
+  border-color: color-mix(in srgb, var(--bq-danger) 50%, transparent) !important;
+  color: var(--bq-danger) !important;
+  background: color-mix(in srgb, var(--bq-danger) 12%, transparent) !important;
+}
+
+/* ---------- Sessions ---------- */
+.sessions {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bq-ink) 96%, #000 4%), color-mix(in srgb, var(--bq-void) 94%, #000 6%)) !important;
+  border-right: 1px solid color-mix(in srgb, var(--bq-line) 80%, transparent) !important;
+}
+
+.sessions-head {
+  padding: 14px 12px 8px !important;
+  border-bottom: 0 !important;
+}
+
+#newSessionBtn,
+.sessions-head button {
+  height: 42px !important;
+  border-radius: var(--r-md) !important;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 34%, transparent) !important;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bq-ice) 18%, var(--bq-panel-soft)),
+      color-mix(in srgb, var(--bq-panel) 92%, #000 8%)) !important;
+  color: var(--bq-pearl) !important;
+  font-weight: 740 !important;
+  letter-spacing: .02em !important;
+  box-shadow: var(--orbit-glow) !important;
+  clip-path: none !important;
+}
+
+.session-list {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  padding: 8px 10px 16px !important;
+}
+
+.session-item {
+  border-radius: var(--r-md) !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel) 86%, transparent) !important;
+  padding: 12px !important;
+  color: var(--bq-pearl) !important;
+  transition: border-color .16s ease, box-shadow .16s ease, background .16s ease !important;
+  clip-path: none !important;
+}
+
+.session-item small {
+  color: var(--bq-mist) !important;
+}
+
+.session-item:hover {
+  border-color: color-mix(in srgb, var(--bq-ice) 40%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ice) 8%, var(--bq-panel)) !important;
+}
+
+.session-item.active {
+  border-color: color-mix(in srgb, var(--bq-ice) 55%, transparent) !important;
+  background:
+    linear-gradient(135deg,
+      color-mix(in srgb, var(--bq-ice) 14%, var(--bq-panel-soft)),
+      color-mix(in srgb, var(--bq-panel) 92%, #000 8%)) !important;
+  box-shadow: var(--orbit-glow) !important;
+}
+
+/* ---------- Chat stage ---------- */
+.chat {
+  background:
+    radial-gradient(900px 420px at 50% -8%, color-mix(in srgb, var(--bq-ice) 10%, transparent), transparent 55%),
+    linear-gradient(180deg, color-mix(in srgb, var(--bq-ink) 96%, #000 4%), color-mix(in srgb, var(--bq-void) 94%, #000 6%)) !important;
+}
+
+.message-list {
+  padding: 28px clamp(20px, 4vw, 56px) 18px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 0 !important;
+}
+
+.message {
+  margin: 0 0 14px !important;
+}
+
+.message .bubble {
+  border-radius: var(--r-lg) !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 86%, transparent) !important;
+  box-shadow: var(--shadow-1) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+.message.assistant .bubble {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bq-panel-soft) 92%, transparent),
+      color-mix(in srgb, var(--bq-panel) 94%, transparent)) !important;
+  color: var(--bq-pearl) !important;
+}
+
+.message.user .bubble {
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bq-ice) 16%, var(--bq-user)),
+      color-mix(in srgb, var(--bq-user) 92%, #000 8%)) !important;
+  border-color: color-mix(in srgb, var(--bq-ice) 28%, transparent) !important;
+  color: var(--bq-pearl) !important;
+}
+
+.message .copy {
+  border-radius: 8px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 80%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel) 90%, transparent) !important;
+  color: var(--bq-mist) !important;
+}
+
+/* Empty state */
+.chat-empty-state {
+  flex: 1;
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 18px 8px 36px;
+}
+
+.chat-empty-card {
+  width: min(580px, 100%);
+  padding: 30px 30px 24px;
+  border-radius: 26px;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 24%, transparent);
+  background:
+    radial-gradient(circle at 88% 0%, color-mix(in srgb, var(--bq-ice) 18%, transparent), transparent 42%),
+    radial-gradient(circle at 8% 100%, color-mix(in srgb, var(--bq-signal) 10%, transparent), transparent 40%),
+    linear-gradient(165deg, color-mix(in srgb, var(--bq-panel-soft) 94%, transparent), color-mix(in srgb, var(--bq-ink) 96%, #000 4%));
+  box-shadow: var(--shadow-2), var(--orbit-glow);
+  position: relative;
+  overflow: hidden;
+}
+
+.chat-empty-card::before {
+  content: "";
+  position: absolute;
+  width: 180px;
+  height: 180px;
+  right: -48px;
+  top: -56px;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 24%, transparent);
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 14px color-mix(in srgb, var(--bq-ice) 5%, transparent),
+    0 0 0 34px color-mix(in srgb, var(--bq-ice) 3%, transparent);
+  pointer-events: none;
+}
+
+.chat-empty-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: var(--r-pill);
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 30%, transparent);
+  background: color-mix(in srgb, var(--bq-ice) 12%, transparent);
+  color: var(--bq-ice);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: .04em;
+  margin-bottom: 14px;
+  position: relative;
+}
+
+.chat-empty-card h2 {
+  margin: 0 0 10px;
+  font-size: clamp(26px, 3vw, 34px);
+  line-height: 1.12;
+  letter-spacing: -.01em;
+  color: var(--bq-pearl);
+  position: relative;
+}
+
+.chat-empty-card p {
+  margin: 0 0 18px;
+  color: var(--bq-mist);
+  font-size: 14px;
+  line-height: 1.7;
+  max-width: 42ch;
+  position: relative;
+}
+
+.chat-empty-tips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  position: relative;
+}
+
+.chat-empty-tip {
+  border: 1px solid color-mix(in srgb, var(--bq-line) 88%, transparent) !important;
+  border-radius: var(--r-pill) !important;
+  background: color-mix(in srgb, var(--bq-panel) 90%, transparent) !important;
+  color: var(--bq-pearl) !important;
+  padding: 9px 14px !important;
+  font-size: 12px !important;
+  font-weight: 650 !important;
+  clip-path: none !important;
+  box-shadow: none !important;
+}
+
+.chat-empty-tip:hover {
+  border-color: color-mix(in srgb, var(--bq-ice) 48%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ice) 12%, var(--bq-panel)) !important;
+}
+
+/* ---------- Composer ---------- */
+.composer,
+.orbit-composer {
+  position: relative !important;
+  margin: 0 18px 16px !important;
+  padding: 14px 58px 14px 14px !important;
+  gap: 10px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 86%, transparent) !important;
+  border-radius: 22px !important;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bq-panel-soft) 94%, transparent),
+      color-mix(in srgb, var(--bq-panel) 96%, #000 4%)) !important;
+  box-shadow: var(--shadow-2), var(--orbit-glow) !important;
+  grid-template-columns: 36px auto minmax(0, 1fr) minmax(150px, 220px) !important;
+  align-items: end !important;
+  overflow: visible !important;
+}
+
+.composer textarea,
+#chatInput {
+  min-height: 44px !important;
+  max-height: 160px !important;
+  border: 0 !important;
+  border-radius: 12px !important;
+  background: transparent !important;
+  color: var(--bq-pearl) !important;
+  padding: 10px 8px !important;
+  font-size: 14px !important;
+  line-height: 1.55 !important;
+  box-shadow: none !important;
+  font-family: var(--terminal-font) !important;
+}
+
+.composer textarea::placeholder,
+#chatInput::placeholder {
+  color: color-mix(in srgb, var(--bq-mist) 86%, transparent) !important;
+}
+
+#attachBtn,
+.composer #attachBtn,
+.access-mode-btn,
+.composer .access-mode-btn {
+  height: 36px !important;
+  border-radius: 12px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 86%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ink) 90%, transparent) !important;
+  color: var(--bq-pearl) !important;
+  clip-path: none !important;
+  box-shadow: none !important;
+}
+
+#attachBtn {
+  width: 36px !important;
+  min-width: 36px !important;
+  font-size: 20px !important;
+}
+
+.reasoning-water-control {
+  height: 36px !important;
+  align-self: center !important;
+  padding: 0 !important;
+}
+
+.reasoning-water-shell {
+  height: 22px !important;
+  border-radius: var(--r-pill) !important;
+  border-color: color-mix(in srgb, var(--bq-ice) 34%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ink) 90%, transparent) !important;
+}
+
+.reasoning-water-flow {
+  background: linear-gradient(90deg, #2F7FD4, var(--bq-ice) 58%, #B7E7FF) !important;
+}
+
+.reasoning-water-copy span {
+  color: var(--bq-mist) !important;
+}
+
+.reasoning-water-copy b {
+  color: var(--bq-pearl) !important;
+}
+
+#sendBtn,
+body[data-skin] #sendBtn,
+.orbit-send {
+  position: absolute !important;
+  right: 12px !important;
+  bottom: 12px !important;
+  width: 38px !important;
+  min-width: 38px !important;
+  height: 38px !important;
+  border-radius: 50% !important;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 42%, transparent) !important;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255,255,255,.28), transparent 28%),
+    linear-gradient(180deg, color-mix(in srgb, var(--bq-ice) 92%, #fff 8%), color-mix(in srgb, var(--bq-ice) 70%, #123 30%)) !important;
+  box-shadow: 0 10px 22px color-mix(in srgb, var(--bq-ice) 28%, transparent), var(--orbit-glow) !important;
+  clip-path: none !important;
+}
+
+#sendBtn:hover,
+.orbit-send:hover {
+  transform: translateY(-1px) scale(1.03) !important;
+}
+
+/* ---------- Right ops rail ---------- */
+.terminal {
+  padding: 14px !important;
+  gap: 12px !important;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bq-ink) 96%, #000 4%), color-mix(in srgb, var(--bq-void) 94%, #000 6%)) !important;
+  border-left: 1px solid color-mix(in srgb, var(--bq-line) 80%, transparent) !important;
+}
+
+.terminal-panel,
+.compact-terminal-panel,
+.mini-monitor-screen,
+.neural-dashboard,
+.context-compress-card {
+  border-radius: var(--r-lg) !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bq-panel-soft) 92%, transparent),
+      color-mix(in srgb, var(--bq-panel) 94%, transparent)) !important;
+  box-shadow: var(--shadow-1) !important;
+  color: var(--bq-pearl) !important;
+}
+
+.compact-terminal-panel {
+  padding: 14px !important;
+}
+
+.terminal-title,
+.compact-terminal-panel .terminal-title,
+.mini-monitor::before {
+  color: var(--bq-mist) !important;
+  font-size: 12px !important;
+  letter-spacing: .12em !important;
+  text-transform: uppercase !important;
+  font-weight: 750 !important;
+  text-shadow: none !important;
+}
+
+.stat {
+  padding: 9px 0 !important;
+  border-bottom: 1px solid color-mix(in srgb, var(--bq-line) 55%, transparent) !important;
+  color: var(--bq-mist) !important;
+}
+
+.stat b {
+  color: var(--bq-pearl) !important;
+  font-family: var(--mono-font) !important;
+  font-weight: 650 !important;
+}
+
+.stat:last-of-type {
+  border-bottom: 0 !important;
+}
+
+.progress,
+.compact-progress,
+.context-compress-bar {
+  height: 8px !important;
+  border-radius: var(--r-pill) !important;
+  overflow: hidden !important;
+  background: color-mix(in srgb, var(--bq-ink) 90%, #000 10%) !important;
+}
+
+#progressFill,
+#contextCompressFill {
+  background: linear-gradient(90deg, #2F7FD4, var(--bq-ice), #B7E7FF) !important;
+}
+
+.developer-admin-grid {
+  gap: 8px !important;
+}
+
+.developer-admin-grid button {
+  border-radius: 12px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ink) 90%, transparent) !important;
+  color: var(--bq-pearl) !important;
+  clip-path: none !important;
+  box-shadow: none !important;
+}
+
+.developer-admin-grid button:hover {
+  border-color: color-mix(in srgb, var(--bq-ice) 42%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ice) 10%, var(--bq-ink)) !important;
+}
+
+.task-board-edge-toggle {
+  border-radius: 10px 0 0 10px !important;
+  background: color-mix(in srgb, var(--bq-panel-soft) 92%, transparent) !important;
+  color: var(--bq-ice) !important;
+  box-shadow: -8px 0 18px rgba(0,0,0,.22) !important;
+}
+
+/* ---------- Settings hub ---------- */
+.settings-dialog,
+.settings-hub {
+  width: min(920px, calc(100vw - 40px)) !important;
+  max-width: 920px !important;
+  height: min(86vh, 820px) !important;
+  max-height: min(86vh, 820px) !important;
+  min-height: 0 !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 86%, transparent) !important;
+  border-radius: 24px !important;
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--bq-ice) 12%, transparent), transparent 36%),
+    linear-gradient(180deg, color-mix(in srgb, var(--bq-panel-soft) 96%, transparent), color-mix(in srgb, var(--bq-ink) 96%, #000 4%)) !important;
+  color: var(--bq-pearl) !important;
+  box-shadow: var(--shadow-2), var(--orbit-glow) !important;
+  overflow: hidden !important;
+}
+
+.settings-dialog > form,
+.settings-hub > form {
+  height: 100% !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+}
+
+.settings-dialog::backdrop {
+  background: rgba(4, 8, 12, .62) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+.settings-dialog header,
+.settings-header,
+.settings-tabs,
+.settings-footer,
+.settings-dialog menu,
+.settings-hub menu {
+  flex: 0 0 auto !important;
+}
+
+.settings-dialog header,
+.settings-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  padding: 16px 20px 12px !important;
+  border-bottom: 1px solid color-mix(in srgb, var(--bq-line) 70%, transparent) !important;
+  background: transparent !important;
+}
+
+.settings-kicker,
+.settings-section-kicker {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--bq-ice);
+  font-size: 11px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  font-weight: 750;
+}
+
+.settings-dialog header strong,
+.settings-header strong {
+  color: var(--bq-pearl) !important;
+  font-size: 20px !important;
+  font-weight: 780 !important;
+}
+
+#settingsCloseBtn {
+  width: 34px !important;
+  height: 34px !important;
+  border-radius: 10px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel) 90%, transparent) !important;
+  color: var(--bq-mist) !important;
+  clip-path: none !important;
+}
+
+.settings-tabs {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  padding: 12px 20px 10px !important;
+  border-bottom: 1px solid color-mix(in srgb, var(--bq-line) 48%, transparent) !important;
+  background: transparent !important;
+}
+
+.settings-tab,
+.settings-tabs .settings-tab {
+  height: 34px !important;
+  padding: 0 14px !important;
+  border-radius: var(--r-pill) !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel) 88%, transparent) !important;
+  color: var(--bq-mist) !important;
+  font-size: 13px !important;
+  font-weight: 650 !important;
+  clip-path: none !important;
+}
+
+.settings-tab.active,
+.settings-tabs .settings-tab.active {
+  color: var(--bq-pearl) !important;
+  border-color: color-mix(in srgb, var(--bq-ice) 46%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ice) 14%, var(--bq-panel)) !important;
+  box-shadow: var(--orbit-glow) !important;
+}
+
+.settings-page {
+  display: none !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  height: auto !important;
+  padding: 14px 20px 18px !important;
+  overflow: hidden !important;
+}
+
+.settings-page.active {
+  display: block !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  height: auto !important;
+  padding: 14px 18px 20px 20px !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  scrollbar-gutter: stable !important;
+  -webkit-overflow-scrolling: touch !important;
+  overscroll-behavior: contain !important;
+}
+
+.settings-page.active::-webkit-scrollbar {
+  width: 10px;
+}
+
+.settings-page.active::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bq-ice) 28%, var(--bq-line));
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.settings-page.active::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-section-head {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 2px 0 10px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bq-panel-soft) 96%, transparent), color-mix(in srgb, var(--bq-panel-soft) 88%, transparent) 70%, transparent);
+}
+
+.settings-section-head h3 {
+  margin: 0;
+  color: var(--bq-pearl);
+  font-size: 18px;
+  font-weight: 760;
+  letter-spacing: .01em;
+}
+
+.settings-section-head p {
+  margin: 0;
+  color: var(--bq-mist);
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 62ch;
+}
+
+.settings-stack {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 4px;
+}
+
+.settings-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.settings-card-head strong {
+  margin: 0 !important;
+  color: var(--bq-pearl) !important;
+  font-size: 15px !important;
+  font-weight: 760 !important;
+}
+
+.settings-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 28%, transparent);
+  background: color-mix(in srgb, var(--bq-ice) 12%, transparent);
+  color: var(--bq-ice);
+  font-size: 11px;
+  font-weight: 740;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+.settings-chip.subtle {
+  border-color: color-mix(in srgb, var(--bq-line) 80%, transparent);
+  background: color-mix(in srgb, var(--bq-panel-soft) 88%, transparent);
+  color: var(--bq-mist);
+}
+
+.settings-inline-actions,
+.settings-form-grid,
+.settings-color-grid,
+.settings-meta-row {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.settings-inline-actions {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.settings-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-color-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-meta-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-check-row {
+  margin: 8px 0 12px !important;
+  color: var(--bq-pearl) !important;
+}
+
+.model-simple {
+  gap: 12px !important;
+}
+
+.model-simple label {
+  grid-template-columns: 96px 1fr !important;
+  color: var(--bq-mist) !important;
+}
+
+.model-simple select,
+.providers input,
+.providers select,
+.appearance-settings input,
+.appearance-settings select,
+.settings-card input,
+.settings-card select,
+.settings-card textarea {
+  border-radius: 12px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 86%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ink) 92%, transparent) !important;
+  color: var(--bq-pearl) !important;
+  min-height: 38px !important;
+  box-shadow: none !important;
+}
+
+.runtime-note,
+.provider-note,
+.settings-card,
+.update-content,
+.appearance-settings {
+  border-radius: 16px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 82%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel) 88%, transparent) !important;
+  color: var(--bq-mist) !important;
+  padding: 14px 15px !important;
+}
+
+.settings-page .settings-card,
+.settings-page .appearance-settings,
+.settings-page .provider-note,
+.settings-page .runtime-note,
+.settings-page .update-content {
+  overflow: visible !important;
+}
+
+.settings-page .settings-card + .settings-card,
+.settings-stack > * + * {
+  margin-top: 0 !important;
+}
+
+.settings-page .skill-list,
+.settings-page .memory-list {
+  max-height: min(28vh, 240px) !important;
+  overflow: auto !important;
+  padding-right: 4px !important;
+}
+
+#generatedInviteOutput,
+#developerLogOutput,
+#adminCodeListOutput {
+  max-height: min(32vh, 280px) !important;
+  min-height: 120px !important;
+  overflow: auto !important;
+  resize: vertical !important;
+}
+
+.settings-card-primary {
+  border-color: color-mix(in srgb, var(--bq-ice) 28%, transparent) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bq-ice) 8%, transparent) !important;
+}
+
+.providers {
+  display: grid !important;
+  gap: 10px !important;
+}
+
+.providers label,
+.appearance-settings label,
+.settings-card label {
+  display: grid !important;
+  gap: 6px !important;
+  color: var(--bq-mist) !important;
+}
+
+.providers label span,
+.appearance-settings span,
+.settings-card span,
+.settings-card label > span {
+  color: var(--bq-mist) !important;
+  font-size: 12px !important;
+  font-weight: 650 !important;
+}
+
+.settings-card button,
+.appearance-settings button,
+.providers button,
+.settings-inline-actions button {
+  min-height: 38px !important;
+  border-radius: 12px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ink) 90%, transparent) !important;
+  color: var(--bq-pearl) !important;
+  clip-path: none !important;
+  box-shadow: none !important;
+  font-weight: 680 !important;
+}
+
+.settings-card button:hover,
+.appearance-settings button:hover,
+.settings-inline-actions button:hover {
+  border-color: color-mix(in srgb, var(--bq-ice) 42%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ice) 10%, var(--bq-ink)) !important;
+}
+
+.settings-footer,
+.settings-dialog menu.settings-footer,
+.settings-dialog menu {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  margin: 0 !important;
+  padding: 12px 20px 14px !important;
+  border-top: 1px solid color-mix(in srgb, var(--bq-line) 70%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ink) 84%, transparent) !important;
+  backdrop-filter: blur(8px) !important;
+  position: sticky !important;
+  bottom: 0 !important;
+  z-index: 3 !important;
+}
+
+.settings-footer-copy {
+  color: var(--bq-mist);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+#saveSettingsBtn,
+.settings-dialog button[value="default"] {
+  min-width: 132px !important;
+  height: 40px !important;
+  border-radius: 12px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 40%, transparent) !important;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--bq-ice) 24%, var(--bq-panel-soft)),
+      color-mix(in srgb, var(--bq-panel) 92%, #000 8%)) !important;
+  color: var(--bq-pearl) !important;
+  font-weight: 760 !important;
+  clip-path: none !important;
+  box-shadow: var(--orbit-glow) !important;
+}
+
+/* ---------- License / membership ---------- */
+.license-overlay {
+  inset: 0 !important;
+  display: grid !important;
+  place-items: center !important;
+  padding: 18px !important;
+  background: rgba(4, 8, 12, .68) !important;
+  backdrop-filter: blur(10px) !important;
+  overflow: auto !important;
+  overscroll-behavior: contain !important;
+}
+
+.license-overlay[hidden] {
+  display: none !important;
+}
+
+.license-panel {
+  width: min(860px, calc(100vw - 28px)) !important;
+  max-height: min(88vh, 860px) !important;
+  min-height: 0 !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain !important;
+  scrollbar-gutter: stable !important;
+  border-radius: 26px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 24%, transparent) !important;
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--bq-ice) 16%, transparent), transparent 40%),
+    linear-gradient(165deg, color-mix(in srgb, var(--bq-panel-soft) 96%, transparent), color-mix(in srgb, var(--bq-ink) 96%, #000 4%)) !important;
+  box-shadow: var(--shadow-2), var(--orbit-glow) !important;
+  color: var(--bq-pearl) !important;
+  padding: 22px 22px 18px !important;
+  display: grid !important;
+  gap: 14px !important;
+  align-content: start !important;
+}
+
+.license-panel::-webkit-scrollbar {
+  width: 10px;
+}
+
+.license-panel::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bq-ice) 28%, var(--bq-line));
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.license-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.member-pay-title {
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 2 !important;
+  text-align: left !important;
+  gap: 6px !important;
+  margin: 0 0 2px !important;
+  padding: 0 0 10px !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bq-panel-soft) 98%, transparent), color-mix(in srgb, var(--bq-panel-soft) 86%, transparent) 78%, transparent) !important;
+}
+
+.member-pay-title span {
+  color: var(--bq-amber) !important;
+  letter-spacing: .12em !important;
+  text-transform: uppercase !important;
+  font-size: 12px !important;
+  font-weight: 760 !important;
+}
+
+.member-pay-title strong {
+  display: block !important;
+  margin: 2px 0 2px !important;
+  font-size: clamp(26px, 2.8vw, 34px) !important;
+  line-height: 1.15 !important;
+  color: var(--bq-pearl) !important;
+  font-weight: 820 !important;
+}
+
+.member-pay-title p,
+.member-redeem-card p,
+.license-privacy,
+.member-plan-head span {
+  color: var(--bq-mist) !important;
+  line-height: 1.55 !important;
+  margin: 0 !important;
+}
+
+.member-redeem-card {
+  display: grid !important;
+  grid-template-columns: minmax(160px, .4fr) minmax(0, 1fr) !important;
+  gap: 14px !important;
+  align-items: center !important;
+  padding: 14px 15px !important;
+  border-radius: 16px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-signal) 28%, transparent) !important;
+  background:
+    linear-gradient(120deg, color-mix(in srgb, var(--bq-signal) 10%, transparent), transparent 48%),
+    color-mix(in srgb, var(--bq-panel) 92%, transparent) !important;
+  box-shadow: none !important;
+}
+
+.member-redeem-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.member-redeem-card strong {
+  color: var(--bq-pearl) !important;
+  font-size: 16px !important;
+}
+
+.member-redeem-row {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) 132px !important;
+  gap: 10px !important;
+}
+
+.member-redeem-row input,
+.license-customer-fields input {
+  height: 44px !important;
+  border-radius: 12px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 86%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ink) 92%, transparent) !important;
+  color: var(--bq-pearl) !important;
+  font-size: 14px !important;
+  letter-spacing: .04em !important;
+}
+
+#licenseActivateBtn,
+#licenseBuyBtn {
+  height: 44px !important;
+  border-radius: 12px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 40%, transparent) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bq-ice) 24%, var(--bq-panel-soft)), var(--bq-panel)) !important;
+  color: var(--bq-pearl) !important;
+  clip-path: none !important;
+  box-shadow: var(--orbit-glow) !important;
+  font-weight: 760 !important;
+}
+
+.member-plan-section {
+  display: grid;
+  gap: 10px;
+}
+
+.member-plan-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.member-plan-head strong {
+  color: var(--bq-pearl);
+  font-size: 14px;
+  font-weight: 760;
+}
+
+.member-plan-grid,
+.license-plan-grid.member-plan-grid {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 10px !important;
+}
+
+.plan-card,
+.member-plan-card,
+button.member-plan-card {
+  min-height: 188px !important;
+  padding: 14px !important;
+  display: grid !important;
+  align-content: start !important;
+  justify-items: start !important;
+  gap: 8px !important;
+  border-radius: 16px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--bq-ice) 12%, transparent), transparent 40%),
+    color-mix(in srgb, var(--bq-panel) 92%, transparent) !important;
+  color: var(--bq-pearl) !important;
+  text-align: left !important;
+  clip-path: none !important;
+  box-shadow: none !important;
+  transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease !important;
+}
+
+.plan-card:hover,
+.member-plan-card:hover {
+  transform: translateY(-2px) !important;
+  border-color: color-mix(in srgb, var(--bq-ice) 46%, transparent) !important;
+  box-shadow: var(--orbit-glow) !important;
+}
+
+.member-plan-card.is-featured {
+  border-color: color-mix(in srgb, var(--bq-ice) 48%, transparent) !important;
+  box-shadow: var(--orbit-glow) !important;
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--bq-ice) 18%, transparent), transparent 42%),
+    linear-gradient(180deg, color-mix(in srgb, var(--bq-panel-soft) 94%, transparent), color-mix(in srgb, var(--bq-panel) 96%, transparent)) !important;
+}
+
+.member-plan-card em {
+  padding: 4px 10px !important;
+  border-radius: var(--r-pill) !important;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 30%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-ice) 12%, transparent) !important;
+  color: var(--bq-ice) !important;
+  font-style: normal !important;
+  font-size: 11px !important;
+  font-weight: 750 !important;
+}
+
+.member-plan-card span {
+  margin-top: 4px !important;
+  font-size: 20px !important;
+  font-weight: 820 !important;
+  color: var(--bq-pearl) !important;
+}
+
+.member-plan-card small {
+  color: var(--bq-mist) !important;
+  font-size: 12px !important;
+  text-decoration: line-through !important;
+}
+
+.member-plan-card b {
+  color: var(--bq-signal) !important;
+  font-size: 22px !important;
+  font-weight: 860 !important;
+}
+
+.member-plan-card i {
+  margin-top: auto !important;
+  color: var(--bq-mist) !important;
+  font-style: normal !important;
+  font-size: 12px !important;
+  line-height: 1.45 !important;
+}
+
+.license-customer-fields {
+  display: grid !important;
+  gap: 8px !important;
+  padding-top: 2px !important;
+}
+
+.license-panel > .license-actions {
+  display: none !important;
+}
+
+.license-status {
+  position: sticky !important;
+  bottom: 0 !important;
+  z-index: 2 !important;
+  min-height: 18px !important;
+  margin-top: 2px !important;
+  padding: 10px 0 2px !important;
+  color: var(--bq-mist) !important;
+  font-size: 13px !important;
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--bq-panel-soft) 92%, transparent) 35%, color-mix(in srgb, var(--bq-panel-soft) 96%, transparent)) !important;
+}
+
+@media (max-width: 860px) {
+  .settings-dialog,
+  .settings-hub {
+    width: min(100vw - 16px, 920px) !important;
+    height: min(92vh, 820px) !important;
+    max-height: min(92vh, 820px) !important;
+    border-radius: 18px !important;
+  }
+
+  .settings-page,
+  .settings-page.active {
+    padding: 12px 14px 18px !important;
+  }
+
+  .settings-dialog header,
+  .settings-header,
+  .settings-tabs,
+  .settings-footer,
+  .settings-dialog menu.settings-footer,
+  .settings-dialog menu {
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+  }
+
+  .member-redeem-card,
+  .member-plan-grid,
+  .license-plan-grid.member-plan-grid,
+  .settings-form-grid,
+  .settings-meta-row,
+  .settings-color-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .member-redeem-row {
+    grid-template-columns: 1fr !important;
+  }
+
+  .license-overlay {
+    padding: 10px !important;
+    align-items: start !important;
+  }
+
+  .license-panel {
+    width: min(100vw - 16px, 860px) !important;
+    max-height: min(94vh, 900px) !important;
+    border-radius: 18px !important;
+    padding: 16px 14px 12px !important;
+    gap: 12px !important;
+  }
+
+  .member-plan-card,
+  button.member-plan-card {
+    min-height: 0 !important;
+  }
+
+  .settings-footer,
+  .settings-dialog menu.settings-footer,
+  .settings-dialog menu {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  #saveSettingsBtn {
+    width: 100% !important;
+  }
+}
+
+/* ---------- Modals / toast / confirm ---------- */
+.app-modal-layer {
+  background: rgba(4, 8, 12, .58) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+.app-modal-panel,
+.close-confirm-panel {
+  border-radius: 18px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background: linear-gradient(180deg, var(--bq-panel-soft), var(--bq-panel)) !important;
+  color: var(--bq-pearl) !important;
+  box-shadow: var(--shadow-2) !important;
+}
+
+.app-modal-actions button {
+  border-radius: 12px !important;
+  clip-path: none !important;
+}
+
+.copy-toast,
+#copyToast {
+  border-radius: var(--r-pill) !important;
+  border: 1px solid color-mix(in srgb, var(--bq-ice) 30%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel-soft) 94%, transparent) !important;
+  color: var(--bq-pearl) !important;
+  box-shadow: var(--shadow-1) !important;
+}
+
+.context-menu {
+  border-radius: 12px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel-soft) 96%, transparent) !important;
+  box-shadow: var(--shadow-2) !important;
+  overflow: hidden !important;
+}
+
+.context-menu button {
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--bq-pearl) !important;
+  clip-path: none !important;
+}
+
+.context-menu button:hover {
+  background: color-mix(in srgb, var(--bq-ice) 12%, transparent) !important;
+}
+
+/* ---------- Attachment chips / queue ---------- */
+.attachment-preview {
+  padding: 8px 18px !important;
+  gap: 8px !important;
+  border-top: 0 !important;
+}
+
+.chip {
+  border-radius: 12px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 84%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel) 90%, transparent) !important;
+  color: var(--bq-mist) !important;
+}
+
+.queue-panel {
+  margin: 0 18px 8px !important;
+  border-radius: 14px !important;
+  border: 1px solid color-mix(in srgb, var(--bq-line) 82%, transparent) !important;
+  background: color-mix(in srgb, var(--bq-panel) 90%, transparent) !important;
+}
+
+/* ---------- Splitters ---------- */
+.splitter {
+  opacity: .45 !important;
+  background:
+    linear-gradient(180deg, transparent, color-mix(in srgb, var(--bq-ice) 28%, transparent), transparent) !important;
+  border: 0 !important;
+}
+
+/* ---------- Skin coexistence: keep orbital system as default dark premium ---------- */
+body.bq-orbital[data-skin="custom"],
+body.bq-orbital:not([data-skin]),
+body.bq-orbital[data-skin="black"] {
+  color: var(--bq-pearl) !important;
+}
+
+/* Reduce old neon green bleed */
+body.bq-orbital button,
+body.bq-orbital .message,
+body.bq-orbital .terminal-panel,
+body.bq-orbital .composer {
+  clip-path: none !important;
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 1100px) {
+  .composer,
+  .orbit-composer {
+    grid-template-columns: 36px auto minmax(0, 1fr) !important;
+    padding-bottom: 58px !important;
+  }
+
+  .reasoning-water-control {
+    display: none !important;
+  }
+
+  .chat-empty-card {
+    padding: 22px !important;
+  }
+
+  .chat-empty-card h2 {
+    font-size: 24px !important;
+  }
+}
+
+@media (max-width: 980px) {
+  .title-actions .btn-chip,
+  .title-actions #modelBtn,
+  .title-actions #skinBtn,
+  .title-actions #inviteBtn {
+    display: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
