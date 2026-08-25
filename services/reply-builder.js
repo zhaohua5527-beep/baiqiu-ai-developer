@@ -5,7 +5,8 @@ function wantsTechnicalLog(context = {}) {
 function cleanError(error) {
   const raw = typeof error === "object" && error ? (error.message || JSON.stringify(error)) : String(error || "");
   const first = raw.replace(/\r/g, "\n").split("\n").filter(Boolean)[0] || "未知原因";
-  if (/permission|access\s*denied|eacces|eperm|权限/i.test(first)) return "权限不足，请检查权限设置后重试。";
+  const code = typeof error === "object" && error ? String(error.code || error.errorCode || "").toUpperCase() : "";
+  if (["PERMISSION_DENIED", "ACCESS_DENIED", "EACCES", "EPERM"].includes(code) || /\b(?:EACCES|EPERM)\b|\baccess\s+denied\b|权限(?:被)?拒绝|拒绝访问/i.test(first)) return "权限不足，请检查权限设置后重试。";
   if (/timeout|timed?\s*out|超时/i.test(first)) return "任务响应超时，请稍后重试。";
   if (/not\s*found|enoent|不存在|找不到/i.test(first)) return "文件或目标不存在。";
   if (/network|fetch|econn|dns|socket|联网/i.test(first)) return "网络连接失败，请检查网络后重试。";

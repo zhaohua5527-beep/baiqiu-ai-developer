@@ -727,7 +727,19 @@ class LicenseManager {
     fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
     const tmp = `${this.dbPath}.license-tmp-${process.pid}-${Date.now()}`;
     fs.writeFileSync(tmp, JSON.stringify(db, null, 2), "utf8");
-    fs.renameSync(tmp, this.dbPath);
+    let lastError = null;
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      try {
+        fs.renameSync(tmp, this.dbPath);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!["EPERM", "EACCES", "EBUSY"].includes(String(error?.code || ""))) throw error;
+        if (attempt === 6) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8 * (2 ** (attempt - 1)));
+      }
+    }
+    throw lastError;
   }
 
   _readKeys() {

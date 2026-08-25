@@ -1,0 +1,3 @@
+# The publisher validates every argument and only promotes files uploaded by
+# baiqiu-deploy from /opt/baiqiu-update/incoming.
+baiqiu-deploy ALL=(root) NOPASSWD: /usr/local/sbin/baiqiu-publish

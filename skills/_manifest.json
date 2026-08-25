@@ -68,7 +68,7 @@
         },
         "required": []
       },
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "cpu_query",
@@ -124,7 +124,7 @@
         },
         "required": []
       },
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "professional_skill_073e31ba8abb",
@@ -152,7 +152,7 @@
         },
         "required": []
       },
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "professional_skill_f5db6db3301b",
@@ -180,7 +180,7 @@
         },
         "required": []
       },
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "skill",
@@ -208,7 +208,7 @@
         },
         "required": []
       },
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "professional_skill_c692c95924e5",
@@ -236,7 +236,7 @@
         },
         "required": []
       },
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "professional_skill_a5f21f69fb9f",
@@ -264,7 +264,7 @@
         },
         "required": []
       },
-      "enabled": true
+      "enabled": false
     }
   ]
 }

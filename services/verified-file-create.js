@@ -19,7 +19,9 @@ function extractRequestedFileNames(message) {
   const text = String(message || "");
   const found = [];
   const seen = new Set();
-  const re = /([A-Za-z0-9_\-\u4e00-\u9fa5]+)\.(txt|md|json|csv|html|js|py)\b/gi;
+  // \u652f\u6301\u5e38\u89c1\u6587\u4ef6 + \u8868\u683c/\u6587\u6863\u6269\u5c55\u540d\uff1a.xlsx/.xls/.docx/.pptx/.pdf \u7b49\u3002
+  // \u4e4b\u524d\u7f3a xlsx \u5bfc\u81f4"\u751f\u6210\u4f1a\u5458\u6570\u636e.xlsx"\u8fd9\u7c7b\u8bf7\u6c42\u8bc6\u522b\u4e0d\u5230\u6587\u4ef6\u540d\u3002
+  const re = /([A-Za-z0-9_\-\u4e00-\u9fa5]+)\.(txt|md|json|csv|html|js|py|xlsx|xls|docx|doc|pptx|ppt|pdf)\b/gi;
   let match;
   while ((match = re.exec(text))) {
     const name = sanitizeRequestedFileName(`${match[1]}.${match[2].toLowerCase()}`);

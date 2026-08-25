@@ -1,10 +1,11 @@
 const { buildExecutionMetadata, buildExecutionBinding } = require("./execution-metadata");
 
 class ToolExecutionService {
-  constructor({ registry, selector, verifier = null, withTimeout, ensureRunActive, formatText, logger = null, tracer = null } = {}) {
+  constructor({ registry, selector, verifier = null, authorizer = null, withTimeout, ensureRunActive, formatText, logger = null, tracer = null } = {}) {
     this.registry = registry;
     this.selector = selector;
     this.verifier = verifier;
+    this.authorizer = typeof authorizer === "function" ? authorizer : null;
     this.withTimeout = withTimeout || ((promise) => Promise.resolve(promise));
     this.ensureRunActive = ensureRunActive || (() => {});
     this.formatText = formatText || ((response) => String(response?.result ?? response?.error ?? ""));
@@ -20,6 +21,28 @@ class ToolExecutionService {
     let executionMetadata = null;
     try {
       this.ensureRunActive(signal);
+      if (this.authorizer) {
+        const authorization = await this.authorizer({ toolId: id, args, context });
+        if (authorization?.allowed === false) {
+          return this.standardize({
+            toolId: id,
+            response: {
+              success: false,
+              result: null,
+              error: {
+                code: authorization.code || "MEMBERSHIP_REQUIRED",
+                message: authorization.message || "此功能需要有效会员。"
+              },
+              evidence: [{ type: "membership", allowed: false, tool: id, reason: authorization.code || "MEMBERSHIP_REQUIRED" }],
+              duration: Date.now() - startedAt
+            },
+            startedAt,
+            approval: { approved: false, reason: authorization.code || "MEMBERSHIP_REQUIRED", selectedTools: [] },
+            traceId: context.traceId || "",
+            context
+          });
+        }
+      }
       executionMetadata = buildExecutionMetadata(context);
       approval = this.selector.approveToolCall({
         toolId: id,
@@ -70,13 +93,7 @@ class ToolExecutionService {
       args: this.safeArgs(args)
     });
     try {
-      const response = await this.registry.execute(id, args, {
-        ...context,
-        executionMetadata,
-        decisionId: executionMetadata.decisionId,
-        permissions: executionMetadata.permissions,
-        toolSelection: approval
-      });
+      const response = await this.executeWithSignal(id, args, context, executionMetadata, approval);
       return this.standardize({ toolId: id, response, startedAt, approval, traceId: context.traceId || "", context: { ...context, executionMetadata } });
     } catch (error) {
       return this.standardize({
@@ -90,12 +107,51 @@ class ToolExecutionService {
     }
   }
 
+  // 执行工具并让 abort signal 贯穿：工具发起后若 signal 被中断（用户取消/超时），
+  // 用 Promise.race 中断等待并抛 TASK_CANCELLED。否则 web_search/browser 等耗时工具
+  // 在任务被中断后仍会继续跑，结果迟到写回会话（task-030 迟到污染根因）。
+  async executeWithSignal(id, args, context, executionMetadata, approval) {
+    const signal = context.signal || null;
+    const runTool = () => this.registry.execute(id, args, {
+      ...context,
+      executionMetadata,
+      decisionId: executionMetadata.decisionId,
+      permissions: executionMetadata.permissions,
+      toolSelection: approval
+    });
+    if (!signal) return runTool();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        const error = new Error("任务已被用户终止，工具执行已中断。");
+        error.code = "TASK_CANCELLED";
+        reject(error);
+      };
+      if (signal.aborted) return onAbort();
+      signal.addEventListener("abort", onAbort, { once: true });
+      runTool().then((value) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      }, (error) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      });
+    });
+  }
+
   async executeActions(actions = [], context = {}) {
     const results = [];
     for (const action of actions) {
       this.ensureRunActive(context.signal || null);
       const type = String(action?.type || action?.name || "").trim();
-      const item = await this.execute({ toolId: type, args: action, context });
+      const { type: _type, name: _name, toolId: _toolId, ...args } = action || {};
+      const item = await this.execute({ toolId: type, args, context });
       results.push({
         type,
         action,
@@ -187,8 +243,10 @@ class ToolExecutionService {
     }
     normalized.verification = verification;
     if (normalized.success && verification && verification.verified === false) {
-      normalized.success = false;
-      normalized.error = verification.reason || "工具结果未通过验证";
+      // The tool already returned its real result. A generic verifier may
+      // record missing supplemental evidence, but cannot turn a completed
+      // operation into a user-visible failure.
+      normalized.meta.verificationDiagnostic = verification.reason || "工具结果缺少附加验证证据";
     }
     normalized.meta = {
       ...normalized.meta,
@@ -248,13 +306,19 @@ class ToolExecutionService {
     let code = "NC3001";
     try { code = require("./neural-core/agent-event-bus").ERROR_CODES.TOOL_FAILURE; } catch {}
     const message = error?.message || String(error || "Tool execution failed");
+    // 保留原始错误码（如 TASK_HARD_TIMEOUT / PERMISSION_DENIED / EACCES），
+    // 供 userFacingError 精确分类；NC3001 只是工具失败的兜底前缀，不能吞掉真实原因。
+    const originalCode = String(error?.code || error?.errorCode || "").trim();
+    const wrappedCode = originalCode && !/^NC\d{3,5}$/i.test(originalCode)
+      ? `${originalCode} (${code})`
+      : code;
     return {
       success: false,
       result: null,
       error: `${code} Tool Failure: ${message}`,
       evidence: [{ type: "tool-execution", tool: toolId, errorCode: code, message }],
       duration: Date.now() - startedAt,
-      meta: { errorCode: code, recoverable: true }
+      meta: { errorCode: wrappedCode, originalErrorCode: originalCode, recoverable: true }
     };
   }
 

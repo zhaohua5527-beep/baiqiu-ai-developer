@@ -1,23 +1,10 @@
 "use strict";
 
-const GLYPHS = Object.freeze({
-  "0": ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
-  "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
-  "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
-  "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
-  "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
-  "5": ["11111", "10000", "10000", "11110", "00001", "00001", "11110"],
-  "6": ["01110", "10000", "10000", "11110", "10001", "10001", "01110"],
-  "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
-  "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
-  "9": ["01110", "10001", "10001", "01111", "00001", "00001", "01110"],
-  "+": ["00000", "00100", "00100", "11111", "00100", "00100", "00000"]
-});
+const DOT_BLUE = Object.freeze({ red: 37, green: 99, blue: 235, alpha: 255 });
+const DOT_BORDER = Object.freeze({ red: 255, green: 255, blue: 255, alpha: 255 });
 
 function trayBadgeText(count) {
-  const normalized = Math.max(0, Math.floor(Number(count) || 0));
-  if (!normalized) return "";
-  return normalized > 99 ? "99+" : String(normalized);
+  return Math.max(0, Math.floor(Number(count) || 0)) > 0 ? "unread" : "";
 }
 
 function taskStatus(value) {
@@ -30,94 +17,44 @@ function isTaskCompletionTransition(previousStatus, nextStatus) {
   return active.has(taskStatus(previousStatus)) && completed.has(taskStatus(nextStatus));
 }
 
-function setPixel(bitmap, width, height, x, y, red, green, blue, alpha = 255) {
+function setPixel(bitmap, width, height, x, y, color) {
   if (x < 0 || y < 0 || x >= width || y >= height) return;
   const offset = (y * width + x) * 4;
-  bitmap[offset] = blue;
-  bitmap[offset + 1] = green;
-  bitmap[offset + 2] = red;
-  bitmap[offset + 3] = alpha;
+  bitmap[offset] = color.blue;
+  bitmap[offset + 1] = color.green;
+  bitmap[offset + 2] = color.red;
+  bitmap[offset + 3] = color.alpha;
 }
 
-function fillRect(bitmap, width, height, x, y, rectWidth, rectHeight, color) {
-  for (let row = y; row < y + rectHeight; row += 1) {
-    for (let column = x; column < x + rectWidth; column += 1) {
-      setPixel(bitmap, width, height, column, row, color.red, color.green, color.blue, color.alpha);
+function paintDot(bitmap, width, height, originX, originY, size = 6) {
+  const center = (size - 1) / 2;
+  const outerRadius = size / 2;
+  const innerRadius = Math.max(1, outerRadius - 1);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const distance = Math.hypot(x - center, y - center);
+      if (distance > outerRadius) continue;
+      setPixel(bitmap, width, height, originX + x, originY + y, distance <= innerRadius ? DOT_BLUE : DOT_BORDER);
     }
-  }
-}
-
-function badgeLayout(count) {
-  const text = trayBadgeText(count);
-  if (!text) return null;
-  const scale = 1;
-  const glyphWidth = 5 * scale;
-  const glyphHeight = 7 * scale;
-  const gap = scale;
-  const textWidth = text.length * glyphWidth + (text.length - 1) * gap;
-  return {
-    text,
-    scale,
-    glyphWidth,
-    glyphHeight,
-    gap,
-    textWidth,
-    width: textWidth + 4,
-    height: glyphHeight + 4
-  };
-}
-
-function drawBadge(bitmap, width, height, layout, badgeX, badgeY) {
-  const ink = { red: 0, green: 0, blue: 0, alpha: 255 };
-  const paper = { red: 255, green: 255, blue: 255, alpha: 255 };
-
-  // Pure black background and one-pixel white strokes keep the badge quiet and crisp.
-  fillRect(bitmap, width, height, badgeX + 1, badgeY, Math.max(0, layout.width - 2), layout.height, ink);
-  fillRect(bitmap, width, height, badgeX, badgeY + 1, layout.width, Math.max(0, layout.height - 2), ink);
-
-  let cursorX = badgeX + Math.floor((layout.width - layout.textWidth) / 2);
-  const cursorY = badgeY + 2;
-  for (const character of layout.text) {
-    const glyph = GLYPHS[character] || GLYPHS["0"];
-    glyph.forEach((row, rowIndex) => {
-      [...row].forEach((cell, columnIndex) => {
-        if (cell !== "1") return;
-        fillRect(
-          bitmap,
-          width,
-          height,
-          cursorX + columnIndex * layout.scale,
-          cursorY + rowIndex * layout.scale,
-          layout.scale,
-          layout.scale,
-          paper
-        );
-      });
-    });
-    cursorX += layout.glyphWidth + layout.gap;
   }
 }
 
 function drawTaskCountBadge(sourceBitmap, width, height, count) {
   if (!Buffer.isBuffer(sourceBitmap) || sourceBitmap.length < width * height * 4) return sourceBitmap;
-  const layout = badgeLayout(count);
-  if (!layout) return Buffer.from(sourceBitmap);
-
   const bitmap = Buffer.from(sourceBitmap);
-  const badgeWidth = Math.min(width, layout.width);
-  const badgeHeight = Math.min(height, layout.height);
-  const badgeX = Math.max(0, width - layout.width);
-  const badgeY = 0;
-  drawBadge(bitmap, width, height, { ...layout, width: badgeWidth, height: badgeHeight }, badgeX, badgeY);
+  if (!trayBadgeText(count)) return bitmap;
+  const size = Math.max(4, Math.min(5, width, height));
+  paintDot(bitmap, width, height, Math.max(0, width - size - 2), 2, size);
   return bitmap;
 }
 
 function createStandaloneTaskCountBadge(count) {
-  const layout = badgeLayout(count);
-  if (!layout) return null;
-  const bitmap = Buffer.alloc(layout.width * layout.height * 4, 0);
-  drawBadge(bitmap, layout.width, layout.height, layout, 0, 0);
-  return { bitmap, width: layout.width, height: layout.height };
+  if (!trayBadgeText(count)) return null;
+  const width = 7;
+  const height = 7;
+  const bitmap = Buffer.alloc(width * height * 4, 0);
+  paintDot(bitmap, width, height, 1, 1, 5);
+  return { bitmap, width, height };
 }
 
 function pngBufferToIco(png, width, height) {

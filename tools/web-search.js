@@ -24,7 +24,7 @@ function normalizeDuckUrl(value) {
   }
 }
 
-function requestHtml(url, redirectCount = 0) {
+function requestHtml(url, redirectCount = 0, signal = null) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
       headers: {
@@ -34,7 +34,7 @@ function requestHtml(url, redirectCount = 0) {
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectCount < 3) {
         res.resume();
-        requestHtml(new URL(res.headers.location, url).toString(), redirectCount + 1).then(resolve, reject);
+        requestHtml(new URL(res.headers.location, url).toString(), redirectCount + 1, signal).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -47,6 +47,14 @@ function requestHtml(url, redirectCount = 0) {
       res.on("data", (chunk) => { html += chunk; });
       res.on("end", () => resolve(html));
     });
+    // 任务中断/取消时真正销毁底层 HTTP 请求——否则 web_search 在中断后仍会
+    // 跑完整个网络请求（task-030 在途 web_search 未取消根因）。
+    const onAbort = () => req.destroy(new Error("搜索已中断"));
+    if (signal) {
+      if (signal.aborted) { req.destroy(new Error("搜索已中断")); return; }
+      signal.addEventListener("abort", onAbort, { once: true });
+      req.on("close", () => signal.removeEventListener("abort", onAbort));
+    }
     req.setTimeout(12000, () => {
       req.destroy(new Error("搜索超时"));
     });
@@ -54,12 +62,12 @@ function requestHtml(url, redirectCount = 0) {
   });
 }
 
-function requestDuckDuckGo(query) {
-  return requestHtml(`https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
+function requestDuckDuckGo(query, signal = null) {
+  return requestHtml(`https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, 0, signal);
 }
 
-function requestBing(query) {
-  return requestHtml(`https://www.bing.com/search?q=${encodeURIComponent(query)}`);
+function requestBing(query, signal = null) {
+  return requestHtml(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, 0, signal);
 }
 
 function parseDuckResults(html, maxResults) {
@@ -111,19 +119,21 @@ function createTool() {
       }
     },
     permission: { level: "network.read", scope: "web" },
-    async execute(params) {
+    async execute(params, context = {}) {
       const query = String(params.query || "").trim();
       const maxResults = Math.max(1, Math.min(10, Number(params.maxResults || 5)));
       if (!query) throw new Error("web_search 需要 query");
+      const signal = context.signal || null;
       let provider = "duckduckgo";
       let html = "";
       let result = [];
       try {
-        html = await requestDuckDuckGo(query);
+        html = await requestDuckDuckGo(query, signal);
         result = parseDuckResults(html, maxResults);
       } catch (error) {
+        if (signal?.aborted) throw error; // 中断时不再尝试备用搜索源
         provider = "bing";
-        html = await requestBing(query);
+        html = await requestBing(query, signal);
         result = parseBingResults(html, maxResults);
       }
       return {

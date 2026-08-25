@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "updatedAt": "2026-08-03",
+  "queue": [
+    {
+      "id": "task-001",
+      "title": "修复计算器超时",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "verified-task-service.js + main.js openPath 注入",
+      "testResult": "67/67 通过"
+    },
+    {
+      "id": "task-002",
+      "title": "修复 NC3001 误报",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "tool-execution-service.js + user-facing-error-adapter.js",
+      "testResult": "67/67 通过"
+    },
+    {
+      "id": "task-003",
+      "title": "阶段B融合：降级假授权墙/验证诊断/清占位/删死代码",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "permission-manager/system-verifier/verified-task-service/skills manifest/agent-registry/product-execution-services",
+      "testResult": "67/67 通过"
+    },
+    {
+      "id": "task-004",
+      "title": "打包验证阶段A+B修复",
+      "owner": "codex",
+      "status": "in_progress",
+      "evidence": "正在搜索 WPS 安装路径（真实环境验证）",
+      "testResult": "待定"
+    },
+    {
+      "id": "task-005",
+      "title": "真实环境验收（WPS/表格/路径/会话切换/附件）",
+      "owner": "codex",
+      "status": "pending",
+      "evidence": "",
+      "testResult": ""
+    },
+    {
+      "id": "task-006",
+      "title": "F3 文件夹相对路径 ../ 逃逸修复",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "tools/folder-tools.js resolveFolder 相对路径 path.resolve + pathInside 校验，desktop 前缀也防逃逸",
+      "testResult": "folder-tools-security.test.js 6/6 通过"
+    },
+    {
+      "id": "task-007",
+      "title": "F7 知识库回收站 confirmed 保护 + 无 lastUsedAt 不误判",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "knowledge-vault.js cleanupInactive 回收站永久删除前检查 protectedFromCleanup（originalStatus），无 lastUsedAt/updatedAt 不按创建时间回收",
+      "testResult": "knowledge-vault-lifecycle.test.js 9/9 通过"
+    },
+    {
+      "id": "task-008",
+      "title": "F2 大数字精度丢失修复",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "spreadsheetCellValue 提取为 services/spreadsheet-cell-value.js，超 MAX_SAFE_INTEGER 保持字符串",
+      "testResult": "spreadsheet-bignumber.test.js 6/6 通过"
+    },
+    {
+      "id": "task-009",
+      "title": "F6 意识快照恢复复活 in-flight 任务",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "task-brain.js normalizeRestoredStatus，restoreSnapshot/replaceSessionTasks 对执行中任务归一为 interrupted",
+      "testResult": "task-brain-restore.test.js 4/4 通过"
+    },
+    {
+      "id": "task-010",
+      "title": "F5 澄清模式任务误标 completed",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "response-router.js conversationResultStatus + main.js 降级路径澄清返回 awaiting_input",
+      "testResult": "clarification-task-state.test.js 4/4 通过"
+    },
+    {
+      "id": "task-011",
+      "title": "F4 CSV 写回编码不对称 + 读侧 UTF-8 BOM bug",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "services/csv-encoding.js encodeCsvBuffer（iconv-lite）+ main.js spreadsheetWriteOptions；readSpreadsheetWorkbook 剥 UTF-8 BOM",
+      "testResult": "spreadsheet-encoding.test.js 4/4 通过"
+    },
+    {
+      "id": "task-012",
+      "title": "F1 表格保存整表重建丢结构",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "services/spreadsheet-save.js applyEditorRowsToWorksheet 增量写回保留公式/合并/样式/其它列",
+      "testResult": "spreadsheet-save-preserve.test.js 5/5 通过"
+    },
+    {
+      "id": "task-013",
+      "title": "HMS 首次初始化失败可重试",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "runHermesSessionPrompt 失败重试 + 销毁旧 client 重建",
+      "testResult": "99/99 通过"
+    },
+    {
+      "id": "task-015",
+      "title": "TaskBrain 上下文污染联网搜索",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "userMessage 恒用 originalText",
+      "testResult": "99/99 通过"
+    },
+    {
+      "id": "task-016",
+      "title": "create_folder 路径权限冲突",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "execute 优先用 runtime.safeActionPath",
+      "testResult": "99/99 通过"
+    },
+    {
+      "id": "task-031",
+      "title": "表格绝对路径/列/行被固定示例替换",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "parseSpreadsheetSkillUse 提取绝对路径/文件名/列名/数据",
+      "testResult": "spreadsheet-shortcut-params.test.js 6项, 全量142/142"
+    },
+    {
+      "id": "task-030",
+      "title": "预置任务中断复用 aborted controller",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "product:submit-task 检查 signal.aborted 才复用",
+      "testResult": "preset-interrupt-controller.test.js 2项, 全量142/142"
+    },
+    {
+      "id": "task-032",
+      "title": "联网搜索被模型策略提前拦截",
+      "owner": "claude",
+      "status": "done",
+      "evidence": "对话路径先尝试 tryHandleRealtimeWebQuestion",
+      "testResult": "realtime-web-conversation-route.test.js 2项, 全量142/142"
+    },
+    {
+      "id": "task-027",
+      "title": "计算器产物未被 TaskBrain 收敛（架构）",
+      "owner": "claude+codex",
+      "status": "done",
+      "evidence": "TaskBrain complete() 支持 absorbAfterTimeout + main.js 外层迟到成功吸收",
+      "testResult": "task-timeout-absorb.test.js 4项, 全量146/146"
+    },
+    {
+      "id": "task-029",
+      "title": "HMS 首装进度卡 5%",
+      "owner": "codex",
+      "status": "pending",
+      "evidence": "",
+      "testResult": ""
+    }
+  ]
+}

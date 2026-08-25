@@ -29,6 +29,10 @@ function readJson(file) {
 async function main() {
   const [zipArg, rootArg, targetVersion = "3.0.4", updaterArg = ""] = process.argv.slice(2);
   if (!zipArg || !rootArg) {
+    if (process.env.NODE_TEST_CONTEXT) {
+      process.stdout.write("online-update-package-smoke requires an explicit update package; skipped during node --test discovery\n");
+      return;
+    }
     throw new Error("Usage: node test/online-update-package-smoke.js <package.zip> <empty-test-root> [target-version] [updater-module]");
   }
   const zip = path.resolve(zipArg);

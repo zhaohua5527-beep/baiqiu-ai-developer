@@ -6,13 +6,14 @@
   <title>白球 AI</title>
   <link rel="icon" href="./assets/baiqiu-tray.png">
   <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./knowledge-universe-3d.css">
 </head>
 <body>
   <div class="app" id="app">
     <header class="titlebar">
       <div class="drag-region" aria-hidden="true"></div>
       <div class="title-actions">
-        <span id="trialStatus" class="trial-status">试用检测中</span>
+        <span id="trialStatus" class="trial-status" hidden></span>
         <button data-window="minimize" title="最小化">_</button>
         <button data-window="maximize" title="最大化">□</button>
         <button data-window="close" title="关闭到托盘">×</button>
@@ -25,9 +26,14 @@
         <strong>白球 AI</strong>
       </div>
       <div class="sessions-head">
-        <button id="newProjectBtn" title="新建项目"><span aria-hidden="true">＋</span>项目</button>
-        <button id="newSessionBtn" title="新建普通聊天"><span aria-hidden="true">＋</span>会话</button>
-        <button id="batchManageBtn" title="批量管理聊天会话" aria-pressed="false" data-active="0"><span class="batch-manage-label">批量</span></button>
+        <button id="newSessionBtn" class="sidebar-primary-action" title="新建普通聊天">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+          <span class="sidebar-action-label">新建会话</span>
+        </button>
+        <button id="batchManageBtn" class="sidebar-icon-action" title="批量管理聊天会话" aria-label="开始批量管理" aria-pressed="false" data-active="0">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"></path><path d="m3.5 6 1 1 2-2M3.5 12l1 1 2-2M3.5 18l1 1 2-2"></path></svg>
+          <span class="batch-manage-label">批量</span>
+        </button>
       </div>
       <label class="session-search">
         <span aria-hidden="true">⌕</span>
@@ -35,16 +41,21 @@
       </label>
       <div id="sessionList" class="session-list project-tree"></div>
       <div class="sidebar-footer">
-        <button id="consciousBtn" title="意识中心"><span class="quick-action-icon quick-action-conscious-icon" aria-hidden="true">
+        <button id="profileOnboardingBtn" class="profile-onboarding-entry" type="button" title="完善资料" hidden>
+          <span class="quick-action-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="presentation" focusable="false"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 20c.8-4 3.3-6 7.5-6s6.7 2 7.5 6"></path></svg>
+          </span>
+          <span>完善资料</span>
+          <b id="profileOnboardingProgress">1/5</b>
+        </button>
+        <button id="wechatBtn" title="微信"><span class="quick-action-icon quick-action-wechat-icon" aria-hidden="true">
           <svg viewBox="0 0 32 32" focusable="false">
-            <circle cx="16" cy="16" r="10.5" fill="var(--panel)" stroke="currentColor" stroke-width="1.6"/>
-            <ellipse cx="16" cy="16" rx="5.2" ry="8.2" fill="none" stroke="currentColor" stroke-width="1.35" opacity=".82"/>
-            <ellipse cx="16" cy="16" rx="8.2" ry="5.2" fill="none" stroke="currentColor" stroke-width="1.35" opacity=".82"/>
-            <circle cx="16" cy="16" r="2.3" fill="currentColor"/>
-            <path d="M16 2.7v3.2M16 26.1v3.2M2.7 16h3.2M26.1 16h3.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55"/>
-            <circle cx="16" cy="2.7" r="1.15" fill="currentColor"/><circle cx="29.3" cy="16" r="1.15" fill="currentColor"/>
+            <path d="M12.8 8.4c-5 0-9 3.1-9 7 0 2.2 1.3 4.2 3.4 5.5l-.7 2.4 2.8-1.4c1.1.3 2.2.5 3.5.5 5 0 9-3.1 9-7s-4-7-9-7Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+            <path d="M18.8 13.4c4.6.4 8 3.2 8 6.7 0 1.9-1 3.6-2.7 4.8l.6 2.1-2.5-1.2c-1 .3-2 .4-3.2.4-2.6 0-4.9-.9-6.4-2.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+            <circle cx="10" cy="15.2" r="1.05" fill="currentColor"/>
+            <circle cx="15.4" cy="15.2" r="1.05" fill="currentColor"/>
           </svg>
-        </span><span>意识中心</span></button>
+        </span><span>微信</span></button>
         <button id="growthCenterBtn" title="知识星球">
           <span aria-hidden="true" class="growth-center-icon">
             <svg viewBox="0 0 24 24" role="presentation" focusable="false">
@@ -73,17 +84,19 @@
           <div id="contextHeaderBar" class="system-state-rail" role="progressbar" aria-label="上下文压缩剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
             <span id="contextHeaderFill"></span>
           </div>
+          <button id="firstUseGuideBtn" class="first-use-guide-button" type="button" title="新手手册" aria-label="打开新手手册">?</button>
         </div>
       </header>
       <nav id="taskProgressRail" class="task-progress-rail" aria-label="当前任务执行阶段"></nav>
       <div id="taskStagePopover" class="task-stage-popover" hidden></div>
       <div id="conversationStage" class="conversation-stage">
         <section id="messageList" class="message-list"></section>
-        <aside id="composerClarification" class="intent-predict-panel" aria-label="意图预测选项" hidden>
+        <aside id="composerClarification" class="intent-predict-panel" aria-label="建议选项" hidden>
           <div class="intent-predict-head">
             <strong>意图预测</strong>
             <button id="composerClarificationAbort" class="intent-predict-abort" type="button" title="终止当前任务" aria-label="终止当前任务">×</button>
           </div>
+          <div id="composerClarificationQuestion" class="intent-predict-question" hidden></div>
           <div id="composerClarificationOptions" class="intent-predict-options"></div>
         </aside>
       </div>
@@ -95,9 +108,6 @@
           <button id="queueClearBtn" type="button">清空</button>
         </div>
         <div id="queueList" class="queue-list"></div>
-      </section>
-      <section id="readingControls" class="reading-controls" hidden>
-        <button id="newOutputBtn" type="button" hidden>↓ 新内容已生成</button>
       </section>
       <form id="chatForm" class="composer">
         <section id="slashCommandMenu" class="slash-command-menu" role="listbox" aria-label="白球斜杠命令" hidden>
@@ -127,19 +137,19 @@
         </div>
         <div class="composer-tools">
         <button id="attachBtn" type="button" title="上传文件">＋</button>
-        <button id="accessModeBtn" class="access-mode-btn" type="button" aria-haspopup="menu" aria-expanded="false" title="访问模式">权限信任</button>
-        <button id="reasoningWaterControl" class="reasoning-mode-btn" type="button" data-level="minimal" aria-haspopup="menu" aria-expanded="false" title="推理等级">
-          <span class="reasoning-mode-label">推理</span>
-          <strong id="reasoningWaterLabel">低</strong>
+        <div id="reasoningWaterControl" class="reasoning-mode-btn" role="button" tabindex="0" data-level="maximum" data-maximum="1" aria-haspopup="menu" aria-expanded="false" title="当前模型与推理等级">
+          <span id="reasoningModelLabel" class="reasoning-model-label">模型</span>
           <span id="reasoningModeMenu" class="reasoning-mode-menu" role="menu"></span>
-        </button>
-        <button id="intentPredictBtn" class="intent-predict-btn" type="button" data-enabled="0" data-open="0" aria-haspopup="menu" aria-expanded="false" title="意图预测">
-          <span class="intent-predict-label">意图预测</span>
-          <strong id="intentPredictLabel">关</strong>
-          <span id="intentPredictModeMenu" class="intent-predict-menu" role="menu">
-            <span class="intent-predict-option" data-value="1" role="menuitemradio">开<i aria-hidden="true">✓</i></span>
-            <span class="intent-predict-option active" data-value="0" role="menuitemradio">关<i aria-hidden="true">✓</i></span>
-          </span>
+        </div>
+        <div id="voiceModeControl" class="voice-mode-control" role="group" aria-label="语音模式">
+          <button type="button" data-voice-mode="input" aria-pressed="true">输入</button>
+          <button type="button" data-voice-mode="conversation" aria-pressed="false">对话</button>
+        </div>
+        <button id="voiceBtn" type="button" title="语音输入" aria-label="语音输入" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+            <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"></path>
+          </svg>
         </button>
         <button id="sendBtn" type="submit" title="发送"><span class="send-state-ring" aria-hidden="true"><i></i></span></button>
         </div>
@@ -195,7 +205,7 @@
       <form id="customerProfileForm" class="customer-profile-panel" novalidate>
         <span class="profile-kicker">欢迎使用白球 AI</span>
         <strong>完善客户资料</strong>
-        <p>首次使用需要登记姓名和手机号，用于会员、售后和设备激活核验。填写完成后将不再提示。</p>
+        <p>首次使用需要登记姓名和手机号，用于客户资料和售后服务核对。填写完成后将不再提示。</p>
         <label>
           <span>姓名</span>
           <input id="customerProfileName" maxlength="30" autocomplete="name" placeholder="请输入姓名" required>
@@ -211,7 +221,7 @@
 
     <div class="splitter splitter-right" aria-hidden="true"></div>
 
-    <button id="taskBoardToggleBtn" class="task-board-edge-toggle" data-edge="right" type="button" title="展开任务看板" aria-label="展开任务看板">‹</button>
+    <button id="taskBoardToggleBtn" class="task-board-edge-toggle" data-edge="right" type="button" title="展开任务看板" aria-label="展开任务看板">‹<i class="task-board-browser-dot" aria-hidden="true"></i></button>
 
     <aside class="terminal">
       <div class="mini-monitor" aria-hidden="true">
@@ -280,7 +290,7 @@
         <div class="terminal-title">开发者驾驶舱</div>
         <div class="stat"><span>Task ID</span><b id="productTaskId">-</b></div>
         <div class="stat"><span>任务状态</span><b id="productTaskStatus">待命</b></div>
-        <div class="stat"><span>Agent 状态</span><b id="productAgentStatus">IDLE</b></div>
+        <div class="stat"><span>黑球执行状态</span><b id="productAgentStatus">IDLE</b></div>
         <div class="phase-rail" aria-label="Neural Core 阶段">
           <span data-product-phase="UNDERSTANDING">UNDERSTANDING</span>
           <span data-product-phase="PLANNING">PLANNING</span>
@@ -300,6 +310,7 @@
   <div id="contextMenu" class="context-menu" hidden></div>
   <div id="messageContextMenu" class="message-context-menu" role="menu" aria-label="消息操作" hidden>
     <button id="messageQuoteBtn" type="button" role="menuitem"><span aria-hidden="true">↳</span><strong>引用</strong></button>
+    <button id="messageKnowledgeBtn" type="button" role="menuitem"><span aria-hidden="true">+</span><strong>沉淀</strong></button>
   </div>
   <div id="presetTaskContextMenu" class="preset-task-context-menu" role="menu" aria-label="预置任务操作" hidden>
     <button id="presetTaskEditBtn" type="button" role="menuitem"><span aria-hidden="true">✎</span><strong>编辑</strong></button>
@@ -317,6 +328,127 @@
     </div>
   </div>
 
+  <dialog id="firstUseGuideDialog" class="first-use-guide-dialog" aria-labelledby="firstUseGuideTitle">
+    <section class="first-use-guide-shell">
+      <header class="first-use-guide-head">
+        <div class="first-use-guide-identity">
+          <span aria-hidden="true">?</span>
+          <div><strong id="firstUseGuideTitle">白球新手手册</strong><small>点击章节查看，按钮可直接前往功能</small></div>
+        </div>
+        <label class="first-use-guide-search">
+          <span aria-hidden="true">⌕</span>
+          <input id="firstUseGuideSearch" type="search" placeholder="输入：知识星球、意识提取、模型、语音……" autocomplete="off">
+          <kbd>Enter</kbd>
+        </label>
+        <button id="firstUseGuideClose" class="first-use-guide-close" type="button" title="关闭新手手册" aria-label="关闭新手手册">×</button>
+        <div id="firstUseGuideResults" class="first-use-guide-results" role="listbox" aria-label="功能搜索结果" hidden></div>
+      </header>
+
+      <nav class="first-use-guide-nav" aria-label="新手手册章节">
+        <button type="button" data-guide-section="tour" class="active"><span>00</span><strong>点击向导</strong><small>跟着步骤熟悉白球</small></button>
+        <button type="button" data-guide-section="start" class="active"><span>01</span><strong>开始使用</strong><small>第一次使用先做什么</small></button>
+        <button type="button" data-guide-section="capabilities"><span>02</span><strong>能力与设置</strong><small>每项能力在哪里配置</small></button>
+        <button type="button" data-guide-section="knowledge"><span>03</span><strong>知识星球</strong><small>长期可复用的知识</small></button>
+        <button type="button" data-guide-section="conscious"><span>04</span><strong>意识提取</strong><small>保存与恢复执行现场</small></button>
+        <button type="button" data-guide-section="workflow"><span>05</span><strong>任务与交付</strong><small>对话、文件和执行过程</small></button>
+      </nav>
+
+      <main id="firstUseGuideContent" class="first-use-guide-content">
+        <section data-guide-page="tour" class="active">
+          <span class="first-use-guide-kicker">CLICK TOUR</span>
+          <h1 id="firstUseGuideTourTitle">先认识白球的工作入口</h1>
+          <p id="firstUseGuideTourBody" class="first-use-guide-lead">跟着下面的步骤点击“下一步”，熟悉白球最常用的几个位置。</p>
+          <div class="first-use-guide-tour-progress" aria-live="polite">
+            <span id="firstUseGuideTourStep">1 / 5</span>
+            <div><i id="firstUseGuideTourBar"></i></div>
+            <strong id="firstUseGuideTourTarget">新建会话</strong>
+          </div>
+          <div class="first-use-guide-tour-target">
+            <span id="firstUseGuideTourTargetIcon">+</span>
+            <div><strong id="firstUseGuideTourTargetName">新建会话</strong><p id="firstUseGuideTourTargetHint">从这里开始一段新的工作。</p></div>
+          </div>
+          <div class="first-use-guide-tour-actions">
+            <button id="firstUseGuideTourBack" type="button">上一步</button>
+            <button id="firstUseGuideTourNext" class="first-use-guide-primary" type="button">下一步 <b>→</b></button>
+          </div>
+        </section>
+        <section data-guide-page="start" class="active">
+          <span class="first-use-guide-kicker">QUICK START</span>
+          <h1>三步开始使用白球</h1>
+          <p class="first-use-guide-lead">白球负责会话、进度和桌面交互，黑球负责理解、思考与生成结果。先连接模型，再直接说出你要完成的事情。</p>
+          <ol class="first-use-guide-steps">
+            <li><span>1</span><div><strong>连接并验证模型</strong><p>模型决定回答质量、速度、推理深度和看图能力。</p></div><button type="button" data-guide-target="model">打开模型管理 <b>→</b></button></li>
+            <li><span>2</span><div><strong>直接描述结果</strong><p>例如“分析这份表格并把结果放在对话框”或“生成 Excel 保存到桌面”。</p></div></li>
+            <li><span>3</span><div><strong>看进度，收结果</strong><p>执行中显示黑球公开进度；正文、表格或生成文件就是最终交付。</p></div><button type="button" data-guide-target="tasks">打开任务看板 <b>→</b></button></li>
+          </ol>
+          <div class="first-use-guide-note"><strong>快速查找</strong><span>在上方输入“微信”“知识星球”“意识恢复”等文字，选择结果即可直达。</span></div>
+        </section>
+
+        <section data-guide-page="capabilities">
+          <span class="first-use-guide-kicker">CAPABILITIES</span>
+          <h1>能力与对应设置</h1>
+          <p class="first-use-guide-lead">没有设置项的能力可以直接在对话框使用；依赖模型或外部服务的能力会带你进入对应配置位置。</p>
+          <div class="first-use-guide-map">
+            <article><div><strong>提问、写作与资料分析</strong><p>直接发送文字或上传附件。回答正文由黑球原样交付。</p></div><span>无需设置</span></article>
+            <article><div><strong>图片理解</strong><p>上传图片后提问，需要当前模型支持视觉能力。</p></div><button type="button" data-guide-target="model">模型管理</button></article>
+            <article><div><strong>文件与表格处理</strong><p>说明文件格式和保存位置；默认目录在通用设置中管理。</p></div><button type="button" data-guide-target="general">通用设置</button></article>
+            <article><div><strong>浏览器与桌面任务</strong><p>执行网页访问、桌面操作并在任务看板查看真实过程。</p></div><button type="button" data-guide-target="browser">打开浏览器</button></article>
+            <article><div><strong>语音输入与语音对话</strong><p>麦克风与 STT 服务在语音设置中配置。</p></div><button type="button" data-guide-target="voice">语音设置</button></article>
+            <article><div><strong>微信连接</strong><p>扫码连接、同步消息并进入微信专属会话。</p></div><button type="button" data-guide-target="wechat">微信设置</button></article>
+            <article><div><strong>工具与技能</strong><p>查看黑球可调用的本地能力、技能状态和接入情况。</p></div><button type="button" data-guide-target="skills">工具中心</button></article>
+            <article><div><strong>主题、更新与运行状态</strong><p>分别位于主题设置、系统更新和黑球状态。</p></div><button type="button" data-guide-target="skin">主题设置</button></article>
+          </div>
+        </section>
+
+        <section data-guide-page="knowledge">
+          <span class="first-use-guide-kicker knowledge">KNOWLEDGE PLANET</span>
+          <h1>知识星球：长期可复用的知识</h1>
+          <p class="first-use-guide-lead">知识星球是保存在本机的长期知识库。它适合沉淀规则、资料、方案、经验和已确认的决定，让之后的相关任务能够再次引用。</p>
+          <div class="first-use-guide-definition">
+            <div><strong>如何进入</strong><p>点击左下角“知识星球”，或在本手册搜索框输入“知识”。</p></div>
+            <div><strong>如何沉淀</strong><p>在对话消息上打开操作菜单，可保存选中文字或当前问答；也可以在知识星球中新建、编辑或导入 Markdown。</p></div>
+            <div><strong>如何使用</strong><p>黑球处理相关任务时，会检索匹配的本地知识作为参考。你也可以按标题、标签和摘要主动搜索。</p></div>
+            <div><strong>如何管理</strong><p>知识支持分类、标签、状态、导入、导出、定位文件、移入回收站和恢复。</p></div>
+          </div>
+          <div class="first-use-guide-boundary"><strong>它不是什么</strong><p>知识星球不是当前任务进度，也不是完整聊天记录。需要保存“任务做到哪里”的时候，应使用意识提取。</p></div>
+          <button class="first-use-guide-primary" type="button" data-guide-target="knowledge">打开知识星球 <b>→</b></button>
+        </section>
+
+        <section data-guide-page="conscious">
+          <span class="first-use-guide-kicker conscious">CONSCIOUS ARCHIVE</span>
+          <h1>意识提取：保存可恢复的执行现场</h1>
+          <p class="first-use-guide-lead">意识提取会把当前项目或会话的真实工作状态保存成快照。长任务暂停、切换项目或以后继续工作时，可以从意识中心恢复。</p>
+          <div class="first-use-guide-definition conscious-grid">
+            <div><strong>会保存什么</strong><p>项目目标、当前目标、执行阶段、已完成事项、待办事项、重要文件、任务状态和黑球执行状态。</p></div>
+            <div><strong>项目与会话范围</strong><p>项目意识可以关联项目内的工作；普通会话意识只对应当前会话。</p></div>
+            <div><strong>恢复后发生什么</strong><p>黑球重新挂接目标、任务进度、文件线索与项目状态，并回到对应工作现场继续执行。</p></div>
+            <div><strong>原始内容是否安全</strong><p>执行压缩或恢复前会备份原始消息，避免覆盖操作造成不可逆丢失。</p></div>
+          </div>
+          <div class="first-use-guide-boundary"><strong>重要边界</strong><p>意识提取保存的是执行状态，不是黑球的内部推理，也不代替知识星球。长期资料放入知识星球；工作做到哪里交给意识提取。</p></div>
+          <div class="first-use-guide-actions"><button class="first-use-guide-primary" type="button" data-guide-target="conscious">打开意识中心 <b>→</b></button><button type="button" data-guide-target="extract-conscious">提取当前意识</button></div>
+        </section>
+
+        <section data-guide-page="workflow">
+          <span class="first-use-guide-kicker">DELIVERY</span>
+          <h1>怎样描述任务，结果最稳定</h1>
+          <p class="first-use-guide-lead">把目标、输入材料、结果形式和保存位置说清楚即可。白球不会重新审核或改写黑球正文。</p>
+          <div class="first-use-guide-examples">
+            <div><strong>纯文字</strong><p>“写一篇约 1000 字的 AI 小说，完整正文直接放在对话框。”</p></div>
+            <div><strong>表格</strong><p>“读取附件，按 UPC、名称、折扣价、原价整理，在对话框显示表格。”</p></div>
+            <div><strong>生成文件</strong><p>“生成 Excel 文件保存到桌面，完成后给出可以打开的文件。”</p></div>
+            <div><strong>继续项目</strong><p>先从意识中心恢复对应快照，再告诉黑球从下一项待办继续。</p></div>
+          </div>
+          <div class="first-use-guide-actions"><button type="button" data-guide-target="tasks">查看任务看板</button><button type="button" data-guide-target="update">系统更新</button><button type="button" data-guide-target="health">黑球状态</button></div>
+        </section>
+      </main>
+
+      <footer class="first-use-guide-foot">
+        <span id="firstUseGuideFootnote">首次说明完成后不会自动重复弹出</span>
+        <button id="firstUseGuideDone" type="button">知道了，开始使用</button>
+      </footer>
+    </section>
+  </dialog>
+
   <dialog id="settingsDialog" class="settings-dialog settings-hub">
     <form method="dialog">
       <header>
@@ -327,9 +459,13 @@
         <button type="button" class="settings-tab internal-tab" data-settings-tab="health"><span>黑球状态</span><small class="settings-tab-summary">运行状态</small></button>
         <button type="button" class="settings-tab internal-tab" data-settings-tab="skin"><span>主题设置</span><small class="settings-tab-summary">当前主题</small></button>
         <button type="button" class="settings-tab internal-tab" data-settings-tab="debug"><span>自检中心</span><small class="settings-tab-summary">尚未自检</small></button>
-        <button type="button" class="settings-tab internal-tab" data-settings-tab="invite"><span>会员中心</span><small class="settings-tab-summary">会员状态</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="invite" hidden><span>会员中心</span><small class="settings-tab-summary">会员状态</small></button>
         <button type="button" class="settings-tab internal-tab" data-settings-tab="model"><span>模型管理</span><small class="settings-tab-summary">当前模型</small></button>
         <button type="button" class="settings-tab internal-tab" data-settings-tab="general"><span>通用设置</span><small class="settings-tab-summary">启动与文件</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="voice"><span>语音设置</span><small class="settings-tab-summary">STT 未配置</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="profile"><span>我的资料</span><small class="settings-tab-summary">查看与修改资料</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="conscious"><span>意识中心</span><small class="settings-tab-summary">意识档案</small></button>
+        <button type="button" class="settings-tab internal-tab" data-settings-tab="wechat"><span>微信链接</span><small class="settings-tab-summary">未连接</small></button>
         <button type="button" class="settings-tab internal-tab" data-settings-tab="skills"><span>工具中心</span><small class="settings-tab-summary">技能状态</small></button>
         <button id="updateTabBtn" type="button" class="settings-tab internal-tab" data-settings-tab="update"><span>系统更新</span><small class="settings-tab-summary">当前版本</small></button>
         <button id="developerLogsTab" type="button" class="settings-tab internal-tab" data-settings-tab="developerLogs" hidden>开发日志</button>
@@ -353,12 +489,12 @@
           </div>
           <div class="current-model-capabilities">
             <span>核心能力</span>
-            <div><b>通用对话</b><b>任务规划</b><b>文件分析</b></div>
+            <div id="modelCenterCurrentCapabilities"><b>正在识别</b></div>
           </div>
         </section>
 
         <section class="model-center-section configured-models-section">
-          <div class="model-center-section-heading"><div><strong>已配置模型</strong><span>可用模型与连接状态</span></div><b id="configuredModelCount">0</b></div>
+          <div class="model-center-section-heading model-inventory-heading"><div><strong>已配置模型</strong><span>实际型号、能力与连接状态</span></div><div class="model-inventory-tools"><button id="configureOtherModelBtn" type="button" class="configure-other-model-btn">＋ 配置其他模型</button><label><span class="sr-only">模型排序</span><select id="modelSortSelect" aria-label="模型排序"><option value="recommended">综合推荐</option><option value="capability">能力优先</option><option value="common">常用优先</option><option value="manual">手动排序</option></select></label><b id="configuredModelCount">0</b></div></div>
           <div id="configuredModelList" class="configured-model-list"></div>
         </section>
 
@@ -475,8 +611,15 @@
         </section>
 
         <label class="theme-setting-row theme-font-row">
-          <span><strong>文字大小</strong><small>调整界面基础字号</small></span>
+          <span><strong>文字大小</strong><small>调整对话正文基础字号</small></span>
           <input id="fontSizeInput" type="range" min="12" max="22" step="1" value="16">
+        </label>
+        <label class="theme-setting-row theme-font-row">
+          <span><strong>文字粗细</strong><small>调整对话正文与执行过程的笔画粗细</small></span>
+          <span class="theme-font-control">
+            <input id="fontWeightInput" type="range" min="400" max="600" step="100" value="400" aria-label="文字粗细" aria-valuetext="常规">
+            <span class="theme-font-scale" aria-hidden="true"><span>常规</span><span>清晰</span><span>加粗</span></span>
+          </span>
         </label>
         <div id="skinImageStatus" class="theme-inline-status" role="status" hidden></div>
         <div class="theme-page-actions"><button id="saveThemeSettingsBtn" type="button" hidden>保存修改</button></div>
@@ -516,10 +659,133 @@
         </div>
       </section>
 
+      <section class="settings-page general-settings-page voice-settings-page" data-settings-page="voice">
+        <header class="general-settings-header">
+          <strong>语音设置</strong>
+          <span>配置语音识别服务，并选择语音交互方式</span>
+        </header>
+        <div class="general-settings-list">
+          <section class="general-settings-section">
+            <strong>输入框入口</strong>
+            <div class="general-setting-row general-setting-toggle-row">
+              <div class="general-setting-copy"><span>在输入框显示语音功能</span><small>开启后在对话输入框显示语音输入和直接语音对话入口</small></div>
+              <label class="general-switch" title="在输入框显示语音功能"><input id="voiceShowInComposerInput" type="checkbox"><i aria-hidden="true"></i></label>
+            </div>
+          </section>
+          <section class="general-settings-section">
+            <strong>语音识别 STT</strong>
+            <div class="voice-settings-grid">
+              <label class="voice-setting-field"><span>服务</span><select id="voiceSttProviderInput">
+                <option value="local">本地 faster-whisper</option>
+                <option value="local_command">本地命令行</option>
+                <option value="openai">OpenAI Whisper</option>
+                <option value="groq">Groq Whisper</option>
+                <option value="mistral">Mistral Voxtral</option>
+                <option value="xai">xAI Grok STT</option>
+                <option value="elevenlabs">ElevenLabs Scribe</option>
+                <option value="deepinfra">DeepInfra</option>
+                <option value="none">关闭识别</option>
+              </select></label>
+              <label class="voice-setting-field"><span>模型</span><input id="voiceSttModelInput" autocomplete="off" placeholder="例如 whisper-1 或 base"></label>
+              <label class="voice-setting-field"><span>Base URL</span><input id="voiceSttBaseUrlInput" autocomplete="off" placeholder="云服务默认地址可留空"></label>
+              <label class="voice-setting-field"><span>语言提示</span><input id="voiceSttLanguageInput" maxlength="16" placeholder="zh"></label>
+              <label class="voice-setting-field voice-setting-wide"><span>STT API Key</span><input id="voiceSttApiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="仅保存在本机运行时环境"></label>
+            </div>
+            <div id="voiceSttStatus" class="model-config-status" aria-live="polite">尚未检测</div>
+            <div class="general-save-actions voice-settings-actions">
+              <button id="voiceSttTestBtn" type="button">检测 STT 配置</button>
+              <button id="voiceSttDefaultsBtn" type="button">恢复推荐值</button>
+            </div>
+          </section>
+          <section class="general-settings-section">
+            <strong>直接语音对话</strong>
+            <div class="general-setting-row general-setting-toggle-row">
+              <div class="general-setting-copy"><span>自动朗读白球回复</span><small>连续对话模式使用系统语音播报回复，播报结束后继续监听</small></div>
+              <label class="general-switch" title="自动朗读白球回复"><input id="voiceTtsEnabledInput" type="checkbox"><i aria-hidden="true"></i></label>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="settings-page profile-settings-page" data-settings-page="profile">
+        <header class="general-settings-header">
+          <strong>我的资料</strong>
+          <span>完善并修改助手对你的称呼、用途、身份与风格</span>
+        </header>
+        <div class="settings-card">
+          <label class="skill-editor-row">
+            <span>怎么称呼你</span>
+            <input id="profileUserNameInput" type="text" maxlength="30" placeholder="输入你的称呼">
+          </label>
+          <label class="skill-editor-row">
+            <span>你主要用它做什么</span>
+            <input id="profilePrimaryUseInput" type="text" maxlength="160" placeholder="例如：工作提效与自动化、经营与数据分析、内容创作与整理">
+          </label>
+          <label class="skill-editor-row">
+            <span>你的身份或使用场景</span>
+            <input id="profileRoleInput" type="text" maxlength="160" placeholder="例如：企业管理者、运营或销售、专业工作者">
+          </label>
+          <label class="skill-editor-row">
+            <span>希望助手叫什么</span>
+            <input id="profileAssistantNameInput" type="text" maxlength="30" placeholder="输入助手名字">
+          </label>
+          <label class="skill-editor-row">
+            <span>你希望助手是什么风格</span>
+            <input id="profileStyleInput" type="text" maxlength="160" placeholder="例如：直接简洁、专业严谨、温和耐心">
+          </label>
+          <p class="provider-note">修改后立即生效。白球会按这里的称呼与风格与你对话，并按用途与身份调整推荐方向。</p>
+          <button id="saveProfileSettingsBtn" type="button">保存资料</button>
+          <span id="profileSettingsStatus" class="profile-settings-status" role="status" aria-live="polite"></span>
+        </div>
+      </section>
+
+      <section class="settings-page conscious-settings-page" data-settings-page="conscious">
+        <header class="general-settings-header">
+          <strong>意识中心</strong>
+          <span>查看和恢复白球保存的项目、会话工作状态</span>
+        </header>
+        <div class="settings-card conscious-settings-card">
+          <div class="wechat-link-status conscious-link-status">
+            <span>意识档案</span>
+            <b id="consciousSettingsStatus">可从这里打开完整中心</b>
+          </div>
+          <div class="wechat-link-actions">
+            <button id="openConsciousSettingsBtn" type="button">打开意识中心</button>
+            <button id="extractConsciousSettingsBtn" type="button">提取当前意识</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-page wechat-link-page" data-settings-page="wechat">
+        <header class="general-settings-header">
+          <strong>微信链接</strong>
+          <span>黑球微信网关绑定状态与扫码入口</span>
+        </header>
+        <div class="settings-card wechat-link-card" data-wechat-state="unknown">
+          <div class="wechat-link-status">
+            <span>连接状态</span>
+            <b id="wechatStatusPill">读取中</b>
+          </div>
+          <div id="wechatQrBox" class="wechat-qr-box" aria-live="polite">
+            <img id="wechatQrImage" alt="微信绑定二维码" hidden>
+            <div id="wechatQrPlaceholder" class="wechat-qr-placeholder"><i aria-hidden="true"></i><span id="wechatQrText">正在读取黑球微信网关状态</span></div>
+          </div>
+          <div class="wechat-link-meta">
+            <span>会话入口</span>
+            <b id="wechatLastSync">微信消息会进入左侧固定的“微信聊天”目录</b>
+          </div>
+          <div class="wechat-link-actions">
+            <button id="refreshWechatQrBtn" type="button">刷新二维码</button>
+            <button id="openWechatSessionBtn" type="button">打开微信聊天</button>
+            <button id="unbindWechatBtn" type="button">解绑</button>
+          </div>
+        </div>
+      </section>
+
       <section class="settings-page" data-settings-page="update">
         <div class="settings-card">
           <strong>版本更新</strong>
-          <div class="stat"><span>当前版本</span><b id="appVersion">2.1.0-beta.1</b></div>
+          <div class="stat"><span>当前版本</span><b id="appVersion">读取中</b></div>
           <div class="update-server-status"><span>更新服务器</span><b>白球官方线路</b><i>自动连接</i></div>
           <div class="update-actions">
             <button id="updateCheckBtn" type="button">检查更新</button>
@@ -580,6 +846,16 @@
           </div>
           <div id="blackBallRepairSummary" class="black-ball-repair-summary">点击“开始检测”扫描历史任务、意识快照和项目树结构。</div>
           </section>
+          <section class="black-ball-repair-policy" aria-label="黑球修复权限">
+            <header><strong>修复权限</strong><span>独立监督器按证据决定处理级别</span></header>
+            <div class="black-ball-repair-levels">
+              <div data-level="l0"><b>L0</b><span><strong>运行恢复</strong><small>重连黑球、重建会话、恢复运行状态</small></span><i>自动</i></div>
+              <div data-level="l1"><b>L1</b><span><strong>状态修复</strong><small>证据对账、状态归并、日志幂等去重</small></span><i>自动</i></div>
+              <div data-level="l2"><b>L2</b><span><strong>安全本地修复</strong><small>白名单 UI、缓存、索引；备份、验证、失败回滚</small></span><i>申请修复</i></div>
+              <div data-level="l3"><b>L3</b><span><strong>核心缺陷</strong><small>门禁、路由、TaskBrain、取消串轮只接受签名补丁</small></span><i>签名补丁</i></div>
+              <div data-level="forbidden"><b>禁区</b><span><strong>会员授权与安全根</strong><small>会员、授权、支付、试用、签名私钥和安全护栏</small></span><i>永不修改</i></div>
+            </div>
+          </section>
           <div id="agentHealthRun" class="agent-health-run" data-active="false" aria-live="polite">
           <div class="agent-health-run-head">
             <div><span>本地规则检测</span><strong id="agentHealthPhase">等待开始</strong></div>
@@ -605,20 +881,21 @@
           <div><span>BAIQIU AI DEBUG CENTER</span><strong>系统自检中心</strong><small>由独立 QA Agent 调用真实接口并保存检测证据</small></div>
           <button id="runDebugCenterBtn" class="debug-center-run" type="button">
             <span><i aria-hidden="true"></i><strong id="debugCenterRunLabel">运行全链路自检</strong></span>
-            <small id="debugCenterRunMeta">9 项真实系统探针</small>
+            <small id="debugCenterRunMeta">10 项真实系统探针</small>
           </button>
         </div>
         <div class="debug-center-summary">
           <div><span>检测状态</span><strong id="debugCenterStatus">未检测</strong></div>
           <div><span>当前阶段</span><strong id="debugCenterStage">等待开始</strong></div>
-          <div><span>通过项目</span><strong id="debugCenterPassed">0 / 9</strong></div>
+          <div><span>通过项目</span><strong id="debugCenterPassed">0 / 10</strong></div>
           <div><span>失败项目</span><strong id="debugCenterFailed">0</strong></div>
         </div>
         <div id="debugCenterChecks" class="debug-center-checks" aria-live="polite">
-          <article data-debug-check="licenseState"><i></i><div><strong>会员授权</strong><small>本地签名、会员状态与权限来源</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="requestRunContract"><i></i><div><strong>生产请求契约</strong><small>理解、路由、TaskBrain 门禁与 RequestRun</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="licenseState" hidden><i></i><div><strong>会员授权</strong><small>本地签名、会员状态与权限来源</small></div><b>未检测</b><p></p></article>
           <article data-debug-check="agentRuntime"><i></i><div><strong>黑球连接</strong><small>ACP 真实模型链路</small></div><b>未检测</b><p></p></article>
-          <article data-debug-check="ceoAgent"><i></i><div><strong>CEO Agent</strong><small>项目与 CEO 会话绑定</small></div><b>未检测</b><p></p></article>
-          <article data-debug-check="childCommunication"><i></i><div><strong>子 Agent 通信</strong><small>消息持久化与状态同步</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="ceoAgent"><i></i><div><strong>黑球项目链路</strong><small>项目上下文与黑球工作会话绑定</small></div><b>未检测</b><p></p></article>
+          <article data-debug-check="childCommunication"><i></i><div><strong>项目执行通信</strong><small>任务结果持久化与状态同步</small></div><b>未检测</b><p></p></article>
           <article data-debug-check="toolCall"><i></i><div><strong>工具调用</strong><small>真实工具执行结果</small></div><b>未检测</b><p></p></article>
           <article data-debug-check="modelCall"><i></i><div><strong>模型调用</strong><small>当前模型真实响应</small></div><b>未检测</b><p></p></article>
           <article data-debug-check="fileProcessing"><i></i><div><strong>文件处理</strong><small>创建、解析、关联与清理</small></div><b>未检测</b><p></p></article>
@@ -650,7 +927,7 @@
         </div>
       </section>
 
-      <section class="settings-page membership-center-page" data-settings-page="invite">
+      <section class="settings-page membership-center-page" data-settings-page="invite" hidden>
         <div class="membership-center-header">
           <div><span>BAIQIU MEMBERSHIP</span><strong>会员中心</strong></div>
           <small>管理会员状态、权益与续费</small>
@@ -824,7 +1101,7 @@
         </section>
 
         <section class="tool-center-section memory-center-section">
-          <div class="tool-section-heading"><div><strong>长期记忆</strong><span>只显示已写入 Hermes 的用户习惯和工作约定</span></div><div class="tool-section-actions"><small id="memoryProofStatus">未验证召回</small><button id="verifyMemoryBtn" type="button">验证召回</button><button id="manageMemoriesBtn" type="button">管理记忆</button></div></div>
+          <div class="tool-section-heading"><div><strong>长期记忆</strong><span>只显示已写入黑球的用户习惯和工作约定</span></div><div class="tool-section-actions"><small id="memoryProofStatus">未验证召回</small><button id="verifyMemoryBtn" type="button">验证召回</button><button id="manageMemoriesBtn" type="button">管理记忆</button></div></div>
           <div class="memory-management-layout">
             <div class="memory-create-panel"><label><span>新增记忆</span><textarea id="memoryInput" rows="3" aria-label="记忆内容" placeholder="例如：表格默认保存在桌面"></textarea></label><button id="addMemoryBtn" type="button">保存记忆</button></div>
             <div id="memoryList" class="memory-management-list" hidden>后台记忆已开启。</div>
@@ -899,7 +1176,7 @@
       <aside class="black-core-center-archive" data-black-core-center-only hidden aria-label="意识档案列表">
         <label class="black-core-archive-search">
           <span aria-hidden="true">⌕</span>
-          <input id="consciousSearchInput" type="search" placeholder="搜索项目、CEO、Agent、任务" autocomplete="off">
+          <input id="consciousSearchInput" type="search" placeholder="搜索项目、黑球工作状态、任务" autocomplete="off">
         </label>
         <input id="consciousArchivedToggle" type="checkbox" checked hidden aria-hidden="true">
         <div id="consciousSnapshotList" class="conscious-snapshot-list black-core-archive-list" aria-live="polite"></div>
@@ -964,19 +1241,20 @@
             <span>搜索知识</span>
             <input id="knowledgeSearchInput" type="search" placeholder="标题 / 标签 / 摘要" autocomplete="off">
           </label>
-          <div class="gantz-motion-switch" role="group" aria-label="宇宙渲染模式">
-            <button type="button" data-knowledge-motion="static" aria-pressed="true">静态</button>
-            <button type="button" data-knowledge-motion="dynamic" aria-pressed="false">动态</button>
+          <div class="gantz-motion-switch" role="group" aria-label="知识空间运动模式">
+            <button type="button" data-knowledge-motion="static" aria-pressed="true" title="粒子完全静止，点击只定位知识">静态</button>
+            <button type="button" data-knowledge-motion="dynamic" aria-pressed="false" title="粒子持续缓慢漂浮、呼吸和聚集">动态</button>
           </div>
           <button id="exportKnowledgeBtn" type="button">导出</button>
+          <button id="importKnowledgeBtn" type="button">导入</button>
           <button id="newKnowledgeNoteBtn" type="button">新建</button>
           <button id="refreshKnowledgeBtn" type="button">刷新</button>
           <button id="openKnowledgeVaultBtn" type="button">目录</button>
-          <button id="growthCenterCloseBtn" class="gantz-close" type="button" aria-label="关闭知识星球">×</button>
+          <button id="growthCenterCloseBtn" class="gantz-close" type="button" aria-label="返回并关闭知识星球" title="返回"><span aria-hidden="true">←</span></button>
         </div>
       </header>
       <section class="knowledge-center-page active">
-        <section id="knowledgeUniverse" class="gantz-universe" data-motion="static" data-phase="idle">
+        <section id="knowledgeUniverse" class="gantz-universe" data-renderer="webgl" data-motion="static" data-phase="idle">
           <div class="gantz-starfield" aria-hidden="true"></div>
           <div class="gantz-grid" aria-hidden="true"></div>
 
@@ -991,7 +1269,8 @@
             <div id="knowledgeCategoryList" class="knowledge-category-list" role="listbox" aria-label="知识星域分类"></div>
           </aside>
 
-          <div id="knowledgeUniverseViewport" class="gantz-universe-viewport" tabindex="0" aria-label="知识星球宇宙，使用鼠标滚轮缩放">
+          <div id="knowledgeUniverseViewport" class="gantz-universe-viewport" tabindex="0" aria-label="知识星球宇宙，可拖拽旋转并使用鼠标滚轮缩放">
+            <div id="knowledgeGraphCanvas" class="knowledge-graph-canvas" aria-label="三维知识关系图"></div>
             <div id="knowledgeUniverseScene" class="gantz-universe-scene">
               <i class="gantz-orbit orbit-one" aria-hidden="true"></i>
               <i class="gantz-orbit orbit-two" aria-hidden="true"></i>
@@ -1006,7 +1285,12 @@
                 </div>
               </div>
             </div>
-            <div class="gantz-zoom-readout"><span>ZOOM</span><b id="gantzZoomValue">100%</b></div>
+            <div class="gantz-zoom-readout" role="group" aria-label="知识星球缩放">
+              <span>ZOOM</span>
+              <button type="button" class="gantz-zoom-button" data-knowledge-zoom="out" aria-label="缩小" title="缩小">-</button>
+              <button type="button" class="gantz-zoom-value" data-knowledge-zoom="reset" aria-label="重置视角" title="重置视角"><b id="gantzZoomValue">100%</b></button>
+              <button type="button" class="gantz-zoom-button" data-knowledge-zoom="in" aria-label="放大" title="放大">+</button>
+            </div>
           </div>
 
           <section class="knowledge-note-panel">
@@ -1027,8 +1311,7 @@
               <div><span>去重</span><strong id="gantzSkillRemoved">--</strong></div>
               <div><span>冲突保留</span><strong id="gantzSkillConflicts">--</strong></div>
             </div>
-            <small id="gantzSkillAuditRecord">尚无检测记录</small>
-            <button id="gantzSkillAuditBtn" type="button">检测并去重</button>
+            <small id="gantzSkillAuditRecord">等待后台自动检测</small>
           </aside>
 
           <aside class="gantz-fusion-readout" aria-label="系统评估">
@@ -1042,7 +1325,9 @@
               <div><span>KNOWLEDGE INSPECTOR</span><strong>知识体编辑舱</strong><small id="knowledgeEditorStatus">选择一颗知识星体</small></div>
               <div>
                 <button id="showKnowledgeNoteBtn" type="button" disabled>定位</button>
+                <button id="restoreKnowledgeNoteBtn" type="button" hidden disabled>恢复</button>
                 <button id="deleteKnowledgeNoteBtn" type="button" disabled>删除</button>
+                <button id="editKnowledgeNoteBtn" type="button" hidden disabled>编辑</button>
                 <button id="saveKnowledgeNoteBtn" type="button" disabled>保存</button>
                 <button id="closeKnowledgeEditorBtn" type="button" aria-label="关闭知识体编辑舱">×</button>
               </div>
@@ -1051,9 +1336,19 @@
               <label><span>名称</span><input id="knowledgeTitleInput" maxlength="120" placeholder="输入知识名称"></label>
               <div class="knowledge-editor-meta">
                 <label><span>所属星域</span><select id="knowledgeCategorySelect"></select></label>
-                <label><span>关联标签</span><input id="knowledgeTagsInput" placeholder="用逗号分隔"></label>
+                <label><span>知识类型</span><select id="knowledgeTypeSelect"></select></label>
               </div>
-              <label class="knowledge-body-field"><span>知识记忆体</span><textarea id="knowledgeBodyInput" rows="16" placeholder="写下这条知识"></textarea></label>
+              <div class="knowledge-editor-meta">
+                <label><span>状态</span><select id="knowledgeStatusSelect"></select></label>
+                <label><span>所属项目</span><input id="knowledgeProjectInput" maxlength="120" placeholder="可留空"></label>
+              </div>
+              <label><span>来源</span><input id="knowledgeSourceInput" maxlength="500" placeholder="对话、文件路径或网页链接"></label>
+              <label><span>关联标签</span><input id="knowledgeTagsInput" placeholder="用逗号分隔"></label>
+              <label class="knowledge-body-field">
+                <span>知识记忆体</span>
+                <article id="knowledgeBodyPreview" class="knowledge-body-preview" aria-label="知识正文"></article>
+                <textarea id="knowledgeBodyInput" rows="16" placeholder="写下这条知识" hidden></textarea>
+              </label>
               <small id="knowledgeFilePath">未选择文件</small>
             </div>
           </section>
@@ -1062,7 +1357,7 @@
           <div class="gantz-axis-label axis-south" aria-hidden="true">LOCAL EVOLUTION NETWORK</div>
           <div class="gantz-axis-label axis-east" aria-hidden="true">DATA LINK ACTIVE</div>
           <div class="gantz-axis-label axis-west" aria-hidden="true">HUMAN KNOWLEDGE</div>
-          <div class="knowledge-loading" hidden><i></i><span>正在扫描本地 Markdown</span></div>
+          <div class="knowledge-loading" hidden><i></i><span>正在读取本地知识索引</span></div>
         </section>
       </section>
     </form>
@@ -1121,7 +1416,9 @@
 
   <script src="../node_modules/marked/lib/marked.umd.js"></script>
   <script src="../services/membership-utils.js"></script>
-      <script src="../services/assistant-code-utils.js"></script>
+      <script src="../services/knowledge/knowledge-keyline.js"></script>
+  <script src="../services/assistant-code-utils.js"></script>
+      <script src="./knowledge-universe-3d.bundle.js"></script>
       <script src="./session-task-queue.js"></script>
       <script src="./task-board-edge-position.js"></script>
       <script src="./draggable-panel-position.js"></script>

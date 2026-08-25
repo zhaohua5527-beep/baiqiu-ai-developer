@@ -68,17 +68,6 @@ function defaultAgents() {
       taskHistory: [],
       availability: "available",
       confidence: 0.9
-    },
-    {
-      agentId: "verifier-agent",
-      name: "VerifierAgent",
-      role: "verifier",
-      skills: ["verification", "quality_check"],
-      capabilities: ["verify_result", "detect_failure", "recommend_retry"],
-      successRate: 1,
-      taskHistory: [],
-      availability: "available",
-      confidence: 0.9
     }
   ];
 }

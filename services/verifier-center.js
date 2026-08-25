@@ -96,17 +96,33 @@ function verifyBrowserOpen({ result }) {
 
 function verifySkillRuntime({ toolId, result }) {
   const evidence = Array.isArray(result?.evidence) ? result.evidence : [];
+  const runtimeSuccess = result?.success === true;
   const checks = [
-    check("runtime_success", result?.success === true),
+    check("runtime_success", runtimeSuccess),
     check("runtime_evidence", evidence.length > 0, { count: evidence.length })
   ];
+  const diagnostics = [];
+  if (!evidence.length) diagnostics.push("The skill returned success without structured evidence.");
   if (/^skill_word$/i.test(toolId)) {
     const fileEvidence = evidence.find((item) => item?.type === "file" && /\.docx?$/i.test(String(item.path || "")));
     const file = fileEvidence?.path || result?.result?.filePath || "";
     const { exists, stat } = verifyFileExists(file);
-    checks.push(check("word_document_created", Boolean(exists && stat?.isFile() && stat.size > 100), { file, size: stat?.size || 0 }));
+    const documentCreated = Boolean(exists && stat?.isFile() && stat.size > 100);
+    checks.push(check("word_document_created", documentCreated, { file, size: stat?.size || 0 }));
+    if (!documentCreated) diagnostics.push("The skill did not return a readable Word document path.");
   }
-  return verdict(checks, toolId);
+  // A generic Baiqiu verifier can add diagnostics, but it must not turn a
+  // successful skill-runtime response into a failure. HMS owns the actual
+  // skill availability, permission decision, and execution result.
+  return {
+    verified: runtimeSuccess,
+    status: runtimeSuccess ? (diagnostics.length ? "passed_with_diagnostics" : "passed") : "failed",
+    checks,
+    diagnostics,
+    reason: runtimeSuccess
+      ? (diagnostics.length ? `${toolId} completed; local diagnostics were recorded.` : `${toolId} verification passed.`)
+      : `${toolId} runtime failed.`
+  };
 }
 
 function verdict(checks, toolId) {

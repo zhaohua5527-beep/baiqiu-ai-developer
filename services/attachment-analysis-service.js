@@ -123,12 +123,13 @@ async function enrichAttachmentContent(attachment = {}, handlers = {}) {
     }
   }
 
-  if (item.textContent) return item;
   try {
     if (kind === "spreadsheet") {
       const text = await handlers.spreadsheet?.(item);
-      return text ? { ...item, textContent: String(text).slice(0, MAX_TEXT_CHARS) } : item;
+      return text ? { ...item, textContent: String(text).slice(0, MAX_TEXT_CHARS), analysisError: "" } : item;
     }
+
+    if (item.textContent) return item;
 
     const loaded = attachmentBuffer(item, resolvePath);
     if (!loaded) return { ...item, analysisError: "附件文件路径不可用" };

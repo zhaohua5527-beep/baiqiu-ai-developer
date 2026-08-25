@@ -1,0 +1,108 @@
+#growthCenterDialog .knowledge-graph-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 320ms ease;
+  background: #030914;
+}
+
+#growthCenterDialog .knowledge-graph-canvas[data-state="ready"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#growthCenterDialog .knowledge-graph-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
+
+#growthCenterDialog .knowledge-graph-canvas .scene-tooltip {
+  max-width: 260px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--gantz-silver) 18%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--gantz-bg) 92%, transparent);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 34%);
+  color: var(--gantz-silver);
+  font: 500 11px/1.45 "Microsoft YaHei UI", sans-serif;
+  backdrop-filter: blur(10px);
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"] .gantz-universe-scene {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"] .gantz-starfield {
+  opacity: 0;
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"] .gantz-grid {
+  opacity: 0;
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"] :is(
+  .gantz-vitals,
+  .knowledge-category-panel,
+  .knowledge-note-panel,
+  .gantz-skill-audit,
+  .gantz-fusion-readout
+) {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+#growthCenterDialog .knowledge-graph-canvas .knowledge-light-particle-canvas {
+  cursor: crosshair;
+  background: transparent;
+}
+
+#growthCenterDialog .knowledge-graph-canvas .knowledge-light-particle-canvas:active {
+  cursor: grabbing;
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"] .gantz-zoom-readout {
+  z-index: 7;
+  pointer-events: auto;
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"] {
+  background:
+    radial-gradient(circle at 50% 48%, rgba(35, 104, 188, .13), transparent 39%),
+    linear-gradient(145deg, #030914 0%, #071321 52%, #020711 100%);
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"]::before,
+#growthCenterDialog .gantz-universe[data-renderer="webgl"]::after {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  content: "";
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"]::before {
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 36%, rgba(0, 0, 0, .34) 100%);
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"]::after {
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(120, 189, 255, .36), transparent);
+}
+
+#growthCenterDialog .gantz-universe[data-renderer="webgl"][data-motion="static"] .knowledge-graph-canvas {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #growthCenterDialog .knowledge-graph-canvas { transition: none; }
+}

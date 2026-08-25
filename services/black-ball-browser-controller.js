@@ -86,12 +86,13 @@ function targetScript(target = {}) {
 class BlackBallBrowserController {
   constructor(options = {}) {
     this.getWebContents = options.getWebContents;
+    this.getDocumentId = options.getDocumentId;
     this.screenshotRoot = options.screenshotRoot;
     this.now = options.now || (() => Date.now());
   }
 
-  contents() {
-    const contents = this.getWebContents?.();
+  contents(tabId = "") {
+    const contents = this.getWebContents?.(tabId);
     if (!contents || contents.isDestroyed?.()) throw new Error("黑球浏览器尚未就绪");
     return contents;
   }
@@ -110,11 +111,12 @@ class BlackBallBrowserController {
         text: ${includeText ? "String((document.querySelector('main,article,[role=main]') || document.body)?.innerText || '').replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, 20000)" : "''"}
       };
     })()`;
-    return this.contents().executeJavaScript(script, true);
+    const result = await this.contents(params.tabId).executeJavaScript(script, true);
+    return { ok: true, ...result };
   }
 
   async click(params = {}, options = {}) {
-    const contents = this.contents();
+    const contents = this.contents(params.tabId);
     const target = await contents.executeJavaScript(targetScript(params), true);
     if (!target) return { ok: false, error: "没有找到可点击元素", target: null };
     if (target.disabled) return { ok: false, error: "目标元素当前不可用", target };
@@ -136,7 +138,7 @@ class BlackBallBrowserController {
   }
 
   async type(params = {}) {
-    const contents = this.contents();
+    const contents = this.contents(params.tabId);
     const target = await contents.executeJavaScript(targetScript(params), true);
     if (!target) return { ok: false, error: "没有找到可输入元素", target: null };
     const risk = actionRisk(target);
@@ -178,7 +180,7 @@ class BlackBallBrowserController {
       else window.scrollBy({ left: ${x}, top: ${y}, behavior: "smooth" });
       return { ok: true, url: location.href, title: document.title || location.hostname, scrollX, scrollY, target: element ? describe(element) : null };
     })()`;
-    return this.contents().executeJavaScript(script, true);
+    return this.contents(params.tabId).executeJavaScript(script, true);
   }
 
   async wait(params = {}) {
@@ -189,7 +191,11 @@ class BlackBallBrowserController {
     const hidden = params.hidden === true;
     const startedAt = this.now();
     do {
-      const state = await this.contents().executeJavaScript(`(() => {
+      const currentDocumentId = String(this.getDocumentId?.(params.tabId) || "");
+      if (params.documentId && currentDocumentId && params.documentId !== currentDocumentId) {
+        return { ok: false, stale: true, error: "等待期间网页已经跳转，请重新检查页面", documentId: currentDocumentId, waitedMs: this.now() - startedAt };
+      }
+      const state = await this.contents(params.tabId).executeJavaScript(`(() => {
         let selectorMatch = true;
         if (${JSON.stringify(selector)}) {
           try { selectorMatch = Boolean(document.querySelector(${JSON.stringify(selector)})); } catch { selectorMatch = false; }
@@ -205,7 +211,7 @@ class BlackBallBrowserController {
   }
 
   async screenshot(params = {}) {
-    const contents = this.contents();
+    const contents = this.contents(params.tabId);
     const image = await contents.capturePage();
     if (!image || image.isEmpty?.()) return { ok: false, error: "浏览器截图为空" };
     const root = path.resolve(this.screenshotRoot());

@@ -12,6 +12,7 @@ const INTENT_TOOL_CATALOG = Object.freeze({
   "system.open": [{ id: "open_path", logicalTool: "system_launcher", category: "system" }],
   "system.shutdown": [{ id: "system_shutdown", logicalTool: "system_power", category: "system", riskLevel: "high", requirePermission: true }],
   "office.doc": [{ id: "write_xlsx", logicalTool: "office_doc", category: "office" }],
+  "content.spreadsheet": [{ id: "write_xlsx", logicalTool: "office_doc", category: "office" }],
   "skill.learn": [{ id: "skill_install", logicalTool: "skill_registry", category: "skill" }],
   "memory.persona": [{ id: "update_profile", logicalTool: "memory_persona", category: "memory", virtual: true }]
 });
@@ -40,7 +41,7 @@ const TOOL_INTENT_CATALOG = Object.freeze({
   html_app_creator: ["dev.code"],
   file_creator: ["file.create"],
   write_text_file: ["file.create"],
-  write_xlsx: ["office.doc", "file.create"],
+  write_xlsx: ["office.doc", "content.spreadsheet", "file.create"],
   find_desktop_files: ["file.search"],
   web_search: ["realtime.web", "info.search"],
   list_skills: ["skill.learn", "skill.list"],

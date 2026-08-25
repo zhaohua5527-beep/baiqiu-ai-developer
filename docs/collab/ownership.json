@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "updatedAt": "2026-08-01",
+  "files": {
+    "services/verified-task-service.js": "claude",
+    "services/tool-execution-service.js": "claude",
+    "services/user-facing-error-adapter.js": "claude",
+    "services/permission-manager.js": "claude",
+    "services/tool-verification/system-verifier.js": "claude",
+    "services/neural-core/agent-registry.js": "claude",
+    "services/product-execution-services.js": "claude",
+    "skills/_manifest.json": "claude",
+    "main.js": "claude",
+    "renderer-v2/**": "codex",
+    "test/**": "shared",
+    "build/**": "codex",
+    "docs/collab/**": "shared"
+  },
+  "rules": [
+    "改文件前先查本表——对方拥有的文件不要动",
+    "test/** 双方都可能加测试，但改别人的测试要留注释",
+    "main.js 是 Claude 的（架构核心），Codex 若要改先通过 queue.json 提出"
+  ]
+}

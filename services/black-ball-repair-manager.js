@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { createInterruptedCheckpoint, isInterruptedCheckpoint } = require("./interrupted-session-recovery");
+const { repairPolicy } = require("./self-healing/repair-policy");
 
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -283,7 +284,7 @@ class BlackBallRepairManager {
     if (documents.db.error || !isObject(documents.db.value)) {
       add(issue({ category: "unreadable-data", label: "主数据库", entityId: "heiqiu-db.json", detail: `主数据库无法读取：${documents.db.error || "JSON 根节点不是对象"}`, confirmationRequired: true }));
     } else {
-      this.progress(onProgress, { status: "detecting", progress: 40, stepIndex: 2, totalSteps: 5, step: "project-tree", stepLabel: "检查项目结构", detail: "核对项目、CEO、员工会话的扁平归属关系" });
+      this.progress(onProgress, { status: "detecting", progress: 40, stepIndex: 2, totalSteps: 5, step: "project-tree", stepLabel: "检查项目结构", detail: "核对项目、黑球和内部执行会话的归属关系" });
       const seen = new Set();
       const addTreeIssue = (item) => {
         const key = `${item.category}:${item.entityId}:${item.patches.map((entry) => `${entry.target}:${entry.path.join(".")}`).join("|")}`;
@@ -309,15 +310,15 @@ class BlackBallRepairManager {
             addTreeIssue(issue({ category: "project-tree", label: "项目树层级与归属", entityId: session.id, detail: belongsElsewhere ? `会话同时被项目 ${project.name} 引用，但自身归属为另一个项目，不能自动猜测归属。` : `会话已被项目 ${project.name} 引用，但缺少正确 projectId。`, fixable: !belongsElsewhere, confirmationRequired: belongsElsewhere, patches: belongsElsewhere ? [] : [patch("db", ["sessions", sessionIndex, "projectId"], project.id, "按项目 sessions 关联补齐 projectId")], proposed: belongsElsewhere ? "需要用户确认项目归属" : `projectId = ${project.id}` }));
           }
           if (session.type === "CEO" && session.parentSessionId) {
-            addTreeIssue(issue({ category: "project-tree", label: "项目树层级与归属", entityId: session.id, detail: `CEO 会话 ${session.id} 不应再挂在其他会话下。`, fixable: true, patches: [patch("db", ["sessions", sessionIndex, "parentSessionId"], "", "CEO 置于项目根层")], proposed: "parentSessionId = 空" }));
+            addTreeIssue(issue({ category: "project-tree", label: "项目树层级与归属", entityId: session.id, detail: `黑球会话 ${session.id} 不应再挂在其他会话下。`, fixable: true, patches: [patch("db", ["sessions", sessionIndex, "parentSessionId"], "", "黑球置于项目根层")], proposed: "parentSessionId = 空" }));
           }
           if (session.type === "Agent" && ceo && session.parentSessionId !== ceo.id) {
-            addTreeIssue(issue({ category: "project-tree", label: "项目树层级与归属", entityId: session.id, detail: `员工会话 ${session.id} 的父级不是本项目 CEO，当前项目应保持扁平层级。`, fixable: true, patches: [patch("db", ["sessions", sessionIndex, "parentSessionId"], ceo.id, "挂回本项目唯一 CEO")], proposed: `parentSessionId = ${ceo.id}` }));
+            addTreeIssue(issue({ category: "project-tree", label: "项目树层级与归属", entityId: session.id, detail: `内部执行会话 ${session.id} 的父级不是本项目黑球，当前项目应保持扁平层级。`, fixable: true, patches: [patch("db", ["sessions", sessionIndex, "parentSessionId"], ceo.id, "挂回本项目黑球")], proposed: `parentSessionId = ${ceo.id}` }));
           }
           if (session.type === "CEO" && ceo && session.id !== ceo.id) {
-            addTreeIssue(issue({ category: "project-tree", label: "项目树层级与归属", entityId: session.id, detail: `项目 ${project.name} 出现多个 CEO，非主 CEO 会话将按既有迁移规则转为 Agent。`, fixable: true, patches: [
-              patch("db", ["sessions", sessionIndex, "type"], "Agent", "保留项目唯一主 CEO"),
-              patch("db", ["sessions", sessionIndex, "parentSessionId"], ceo.id, "挂到主 CEO 下"),
+            addTreeIssue(issue({ category: "project-tree", label: "项目树层级与归属", entityId: session.id, detail: `项目 ${project.name} 出现多个黑球工作会话，非主会话将按既有迁移规则转为内部执行会话。`, fixable: true, patches: [
+              patch("db", ["sessions", sessionIndex, "type"], "Agent", "保留项目唯一主黑球会话"),
+              patch("db", ["sessions", sessionIndex, "parentSessionId"], ceo.id, "挂到主黑球会话下"),
               patch("db", ["sessions", sessionIndex, "role"], session.role || "执行人员", "保留现有角色或补齐执行角色")
             ], proposed: `type = Agent; parentSessionId = ${ceo.id}` }));
           }
@@ -335,7 +336,7 @@ class BlackBallRepairManager {
           const project = projectById.get(session.projectId);
           const ceo = project ? canonicalCeo(db, project) : null;
           const sessionIndex = sessions.indexOf(session);
-          addTreeIssue(issue({ category: "project-tree", label: "项目树层级与归属", entityId: session.id, detail: `会话 ${session.id} 指向了不属于本项目的父级，会造成员工挂到别人的 CEO 下。`, fixable: Boolean(ceo), confirmationRequired: !ceo, patches: ceo ? [patch("db", ["sessions", sessionIndex, "parentSessionId"], ceo.id, "按本项目重建父级 CEO")] : [], proposed: ceo ? `parentSessionId = ${ceo.id}` : "缺少可确认的本项目 CEO" }));
+          addTreeIssue(issue({ category: "project-tree", label: "项目树层级与归属", entityId: session.id, detail: `会话 ${session.id} 指向了不属于本项目的父级，会造成内部执行会话挂到其他项目下。`, fixable: Boolean(ceo), confirmationRequired: !ceo, patches: ceo ? [patch("db", ["sessions", sessionIndex, "parentSessionId"], ceo.id, "按本项目重建父级黑球会话")] : [], proposed: ceo ? `parentSessionId = ${ceo.id}` : "缺少可确认的本项目黑球会话" }));
         }
       }
     }
@@ -373,6 +374,7 @@ class BlackBallRepairManager {
       },
       hasRepairableChanges: allFindings.some((item) => item.fixable),
       hasConfirmationOnly: allFindings.some((item) => item.confirmationRequired && !item.fixable),
+      repairPolicy: repairPolicy(),
       status: allFindings.length ? "issues_found" : "clean"
     };
     this.pending.set(report.scanId, { report, findings: allFindings, fingerprint: this.filesFingerprint(documents) });
@@ -512,7 +514,7 @@ class BlackBallRepairManager {
       }
       const agentStates = Array.isArray(snapshot.agentStates) ? snapshot.agentStates : [];
       const keptAgentStates = agentStates.filter((state) => expectedIds.has(state?.sessionId));
-      if (agentStates.length !== keptAgentStates.length) patches.push(patch("snapshot", [...targetSnapshotPath, "agentStates"], keptAgentStates, "移除快照中属于其他会话或项目的 Agent 状态"));
+      if (agentStates.length !== keptAgentStates.length) patches.push(patch("snapshot", [...targetSnapshotPath, "agentStates"], keptAgentStates, "移除快照中属于其他会话或项目的内部执行状态"));
       if (patches.length || indexPatches.length) {
         add(issue({ category: "conscious-cross-scope", label: "意识快照跨会话/跨项目数据", entityId: item.id, detail: `快照 ${item.id} 的归属字段或工作区成员与当前 ${scope === "project" ? "项目" : "会话"} 不一致。`, fixable: true, patches: [...patches, ...indexPatches], proposed: `${patches.length + indexPatches.length} 个字段按当前实体关联修正` }));
       }

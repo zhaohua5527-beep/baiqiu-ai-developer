@@ -19,12 +19,19 @@ const DEFAULT_HERMES_RELATIVE_PATH = path.join(
   "hermes-acp.exe"
 );
 
-const WINDOWS_BASH_PREFLIGHT = `try:
+const WINDOWS_BASH_PREFLIGHT = `import sys
+
+try:
     from tools.environments.local import _find_bash
     _find_bash()
 except Exception as error:
-    import sys
     print(f"Hermes Git Bash preflight failed: {error}", file=sys.stderr)
+
+try:
+    from agent import prompt_builder
+    prompt_builder.DEVELOPER_ROLE_MODELS = ()
+except Exception as error:
+    print(f"Hermes message-role compatibility failed: {error}", file=sys.stderr)
 `;
 
 function firstExistingPath(candidates = []) {
@@ -184,17 +191,78 @@ function mergeToolUpdate(current = {}, update = {}) {
   };
 }
 
-function looksLikeHermesFailure(text = "") {
-  return /^(?:Internal error\b|Queued for the next turn\b|HTTP\s+[45]\d\d\s*:|API\s+(?:error\s*:|call failed\b)|authentication\s+(?:failed|required)\b|provider\s+error\s*:)/i
-    .test(String(text || "").trim());
+function toolCallSignature(update = {}) {
+  const tool = update.toolCall && typeof update.toolCall === "object" ? update.toolCall : {};
+  const name = String(update.title || update.name || tool.title || tool.name || "tool").trim().toLowerCase();
+  const input = update.rawInput || update.input || tool.rawInput || tool.input || {};
+  let serialized = "";
+  try {
+    serialized = typeof input === "string" ? input : JSON.stringify(input);
+  } catch {
+    serialized = String(input || "");
+  }
+  return `${name}|${serialized.replace(/\s+/g, " ").trim().slice(0, 1200)}`;
 }
 
-function collectFileEvidence(value, output, seen, depth = 0) {
+function looksLikeHermesFailure(text = "") {
+  const value = String(text || "").trim();
+  if (/^(?:Internal error\b|Queued for the next turn\b|HTTP\s+[45]\d\d\s*:|API\s+(?:error\s*:|call failed\b)|authentication\s+(?:failed|required)\b|provider\s+error\s*:)/i.test(value)) {
+    return true;
+  }
+  return /^(?:billing|credits?).{0,80}(?:exhausted|insufficient|balance)|\bHTTP\s*402\b|\binsufficient\s+(?:account\s+)?balance\b/i
+    .test(value.slice(0, 600));
+}
+
+const OUTPUT_FILE_PATH_PATTERN = /[A-Za-z]:[\\/][^\r\n|<>"?*]+?\.(?:xlsx|xls|csv|docx|doc|pdf|pptx|ppt|txt|md|json|zip|png|jpe?g|webp)/gi;
+
+function sensitiveEvidencePath(filePath = "") {
+  const value = path.resolve(String(filePath || "")).replace(/\\/g, "/").toLowerCase();
+  return /(?:^|\/)\.env(?:\.|\/|$)|(?:^|\/)(?:credentials?|secrets?|private[_ -]?keys?|api[_ -]?keys?|auth[_ -]?tokens?)(?:[\/._ -]|$)|\.(?:pem|pfx|p12|key)$|\/runtime\/(?:hermes-home|hms-[^/]+)\/(?:config\.ya?ml|\.env)$|(?:^|\/)(?:membership|license|activation|entitlement)(?:[\/._ -]|$)/i.test(value);
+}
+
+function insideAllowedRoots(filePath = "", roots = []) {
+  if (!Array.isArray(roots) || !roots.length) return true;
+  const resolved = path.resolve(filePath);
+  return roots.some((root) => {
+    const allowed = path.resolve(String(root || ""));
+    return resolved === allowed || resolved.startsWith(`${allowed}${path.sep}`);
+  });
+}
+
+function fileProducingTool(tool = {}) {
+  const descriptor = `${tool.kind || ""} ${tool.title || ""} ${tool.name || ""} ${tool.toolCall?.title || ""} ${tool.toolCall?.name || ""}`.toLowerCase();
+  if (/(?:write|create|save|export|generate|render|download|copy|move|edit|写入|创建|保存|导出|生成|下载|复制|移动|编辑)/i.test(descriptor)) return true;
+  const status = String(tool.status || tool.state || "").toLowerCase();
+  const outputText = JSON.stringify(tool.rawOutput || tool.output || tool.result || tool.response || "");
+  return /^(?:completed|complete|success|done)$/i.test(status)
+    && /(?:saved|created|written|exported|generated|downloaded|已保存|已创建|已写入|已导出|已生成)/i.test(outputText);
+}
+
+function collectFileEvidence(value, output, seen, depth = 0, options = {}) {
   if (depth > 7 || value == null) return;
   if (typeof value === "string") {
-    const candidate = value.replace(/^file:\/+/i, "");
-    if (path.isAbsolute(candidate) && fs.existsSync(candidate)) {
+    const candidates = [
+      value.replace(/^file:\/+/i, ""),
+      ...[...value.matchAll(OUTPUT_FILE_PATH_PATTERN)].map((match) => match[0])
+    ];
+    for (const candidate of candidates) {
+      if (!path.isAbsolute(candidate) || !fs.existsSync(candidate)) continue;
       const resolved = path.resolve(candidate);
+      // 过滤非产物路径：Hermes 技能定义（SKILL.md 目录）、Python 运行时、
+      // Hermes 内部目录等。白球只应把 HMS 真正生成的产物当附件展示，
+      // 不该把技能/运行时文件误收集成"交付文件"。
+      const lower = resolved.toLowerCase();
+      if (/[\\/](?:skills|plugins|hooks|lsp|bin|venv|site-packages|node_modules|__pycache__)[\\/]/.test(lower)) continue;
+      if (/[\\/]\.baiqiu-tmp[\\/]/.test(lower)) continue;
+      if (sensitiveEvidencePath(resolved)) continue;
+      if (!insideAllowedRoots(resolved, options.allowedRoots)) continue;
+      if (Number(options.runStartedAt) > 0) {
+        try {
+          if (fs.statSync(resolved).mtimeMs + 2000 < Number(options.runStartedAt)) continue;
+        } catch {
+          continue;
+        }
+      }
       const key = resolved.toLowerCase();
       if (!seen.has(key)) {
         seen.add(key);
@@ -204,17 +272,46 @@ function collectFileEvidence(value, output, seen, depth = 0) {
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) collectFileEvidence(item, output, seen, depth + 1);
+    for (const item of value) collectFileEvidence(item, output, seen, depth + 1, options);
     return;
   }
   if (typeof value !== "object") return;
   for (const [key, item] of Object.entries(value)) {
-    if (/^(path|file|filePath|outputPath|savedPath|uri)$/i.test(key)) {
-      collectFileEvidence(item, output, seen, depth + 1);
-    } else if (typeof item === "object") {
-      collectFileEvidence(item, output, seen, depth + 1);
+    if (/^(path|file|filePath|outputPath|savedPath|uri)$/i.test(key) && options.outputSide !== false) {
+      collectFileEvidence(item, output, seen, depth + 1, options);
+    } else if (/^(?:rawOutput|output|result|response|content)$/i.test(key)) {
+      // Only traverse output-side payloads. Input/arguments frequently contain
+      // source attachments and must not be presented as generated files.
+      collectFileEvidence(item, output, seen, depth + 1, { ...options, outputSide: true });
+    } else if (/^locations$/i.test(key) && options.fileProducing === true) {
+      collectFileEvidence(item, output, seen, depth + 1, { ...options, outputSide: true });
     }
   }
+}
+
+function collectToolFileEvidence(tools = [], options = {}) {
+  const files = [];
+  const seen = new Set();
+  for (const tool of Array.isArray(tools) ? tools : []) {
+    if (!fileProducingTool(tool)) continue;
+    collectFileEvidence(tool, files, seen, 0, {
+      ...options,
+      fileProducing: true,
+      outputSide: false
+    });
+  }
+  return files;
+}
+
+function emitPromptTiming(client, options, phase, startedAt, detail = {}) {
+  const event = {
+    phase,
+    at: Date.now(),
+    elapsedMs: Math.max(0, Date.now() - startedAt),
+    ...detail
+  };
+  try { options.onTiming?.(phase, event); } catch {}
+  try { client.options.onTiming?.(phase, event); } catch {}
 }
 
 class HermesAcpClient {
@@ -236,6 +333,7 @@ class HermesAcpClient {
     this.startPromise = null;
     this.stderrTail = "";
     this.sessions = new Map();
+    this.sessionBuilds = new Map();
     this.activePrompts = new Map();
     this.stopping = false;
   }
@@ -247,11 +345,27 @@ class HermesAcpClient {
   async start() {
     if (this.connection && this.child && this.child.exitCode == null) return this.initialization;
     if (this.startPromise) return this.startPromise;
-    this.startPromise = this._start().finally(() => { this.startPromise = null; });
+    this.startPromise = this._startWithRetry().finally(() => { this.startPromise = null; });
     return this.startPromise;
   }
 
-  async _start() {
+  async _startWithRetry() {
+    const retries = Math.max(0, Number(this.options.startRetries ?? 1));
+    let lastError;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        return await this._start(attempt + 1);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= retries) throw error;
+        this.status("retrying", { attempt: attempt + 1, error: error.message, diagnostic: error.diagnostic || "" });
+        await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      }
+    }
+    throw lastError;
+  }
+
+  async _start(attempt = 1) {
     this.launch = resolveHermesAcpLaunch(this.options);
     this.executablePath = this.launch.executablePath;
     if (!this.executablePath) {
@@ -261,7 +375,7 @@ class HermesAcpClient {
       throw error;
     }
 
-    this.status("starting", { executablePath: this.executablePath });
+    this.status("starting", { executablePath: this.executablePath, attempt });
     this.stopping = false;
     this.stderrTail = "";
     const pythonCompatPath = ensureHermesPythonCompat(this.options);
@@ -290,36 +404,46 @@ class HermesAcpClient {
     try {
       this.acp = await this.sdkLoader();
       const app = this.acp.client({ name: this.options.clientName || "baiqiu-ai" })
-        .onRequest(this.acp.methods.client.session.requestPermission, (context) => this.permissionHandler(context.params));
+        .onRequest(this.acp.methods.client.session.requestPermission, (context) => {
+          const hermesSessionId = String(context.params?.sessionId || "");
+          const activePrompt = [...this.activePrompts.values()]
+            .find((item) => item.hermesSessionId === hermesSessionId);
+          return this.permissionHandler(context.params, activePrompt?.permissionContext || {});
+        });
       const stream = this.acp.ndJsonStream(
         Writable.toWeb(child.stdin),
         Readable.toWeb(child.stdout)
       );
       this.connection = app.connect(stream);
+      let initializationTimer = null;
       const initializationTimeout = new Promise((_, reject) => {
-        const timer = setTimeout(() => {
+        initializationTimer = setTimeout(() => {
           const error = new Error("Hermes ACP initialize timed out after 15000ms.");
           error.code = "HERMES_ACP_INITIALIZE_TIMEOUT";
           reject(error);
         }, 15000);
-        timer.unref?.();
+        initializationTimer.unref?.();
       });
-      this.initialization = await Promise.race([
-        this.connection.agent.request(this.acp.methods.agent.initialize, {
-          protocolVersion: this.acp.PROTOCOL_VERSION,
-          clientCapabilities: {},
-          clientInfo: {
-            name: this.options.clientName || "baiqiu-ai",
-            version: this.options.clientVersion || "3.0.0"
-          }
-        }),
-        childError.then((error) => {
-          const wrapped = new Error(`Hermes ACP process failed to start: ${error.message}`);
-          wrapped.code = error.code || "HERMES_ACP_PROCESS_ERROR";
-          throw wrapped;
-        }),
-        initializationTimeout
-      ]);
+      try {
+        this.initialization = await Promise.race([
+          this.connection.agent.request(this.acp.methods.agent.initialize, {
+            protocolVersion: this.acp.PROTOCOL_VERSION,
+            clientCapabilities: {},
+            clientInfo: {
+              name: this.options.clientName || "baiqiu-ai",
+              version: this.options.clientVersion || "3.0.0"
+            }
+          }),
+          childError.then((error) => {
+            const wrapped = new Error(`Hermes ACP process failed to start: ${error.message}`);
+            wrapped.code = error.code || "HERMES_ACP_PROCESS_ERROR";
+            throw wrapped;
+          }),
+          initializationTimeout
+        ]);
+      } finally {
+        if (initializationTimer) clearTimeout(initializationTimer);
+      }
       this.status("ready", {
         protocolVersion: this.initialization.protocolVersion,
         agentInfo: this.initialization.agentInfo,
@@ -363,14 +487,47 @@ class HermesAcpClient {
 
   async ensureSession(localSessionId, options = {}) {
     if (!localSessionId) throw new Error("A local session id is required.");
+    const pending = this.sessionBuilds.get(localSessionId);
+    if (pending) {
+      const timingStartedAt = Number(options.timingStartedAt || Date.now());
+      emitPromptTiming(this, options, "sessionBuildWaitStart", timingStartedAt, { localSessionId });
+      const session = await pending;
+      emitPromptTiming(this, options, "sessionBuildWaitEnd", timingStartedAt, {
+        localSessionId,
+        hermesSessionId: session.hermesSessionId
+      });
+      return session;
+    }
+
+    const build = this._ensureSession(localSessionId, options);
+    this.sessionBuilds.set(localSessionId, build);
+    try {
+      return await build;
+    } finally {
+      if (this.sessionBuilds.get(localSessionId) === build) this.sessionBuilds.delete(localSessionId);
+    }
+  }
+
+  async _ensureSession(localSessionId, options = {}) {
+    const timingStartedAt = Number(options.timingStartedAt || Date.now());
     await this.start();
     const cached = this.sessions.get(localSessionId);
     if (cached?.active) return cached;
 
     const cwd = path.resolve(options.cwd || this.defaultCwd);
     let active;
-    let hermesSessionId = String(options.hermesSessionId || "").trim();
+    const persistedHermesSessionId = String(options.hermesSessionId || "").trim();
+    const resumePersistedSessions = options.resumePersistedSession !== false
+      && this.options.resumePersistedSession !== false;
+    let hermesSessionId = resumePersistedSessions ? persistedHermesSessionId : "";
+    if (persistedHermesSessionId && !resumePersistedSessions) {
+      emitPromptTiming(this, options, "sessionResumeSkipped", timingStartedAt, {
+        localSessionId,
+        hermesSessionId: persistedHermesSessionId
+      });
+    }
     if (hermesSessionId) {
+      emitPromptTiming(this, options, "sessionResumeStart", timingStartedAt, { localSessionId, hermesSessionId });
       try {
         await this.connection.agent.request(this.acp.methods.agent.session.resume, {
           sessionId: hermesSessionId,
@@ -378,15 +535,19 @@ class HermesAcpClient {
           mcpServers: []
         });
         active = this.connection.agent.attachSession({ sessionId: hermesSessionId });
+        emitPromptTiming(this, options, "sessionResumeEnd", timingStartedAt, { localSessionId, hermesSessionId, resumed: true });
       } catch (error) {
+        emitPromptTiming(this, options, "sessionResumeEnd", timingStartedAt, { localSessionId, hermesSessionId, resumed: false });
         this.logger.warn?.(`[HermesACP] Could not resume ${hermesSessionId}; creating a new session: ${error.message}`);
         hermesSessionId = "";
       }
     }
 
     if (!active) {
+      emitPromptTiming(this, options, "sessionBuildStart", timingStartedAt, { localSessionId });
       active = await this.connection.agent.buildSession(cwd).start();
       hermesSessionId = active.sessionId;
+      emitPromptTiming(this, options, "sessionBuildEnd", timingStartedAt, { localSessionId, hermesSessionId });
     }
 
     const session = { localSessionId, hermesSessionId, cwd, active };
@@ -401,7 +562,9 @@ class HermesAcpClient {
       throw error;
     }
 
-    const session = await this.ensureSession(localSessionId, options);
+    const timingStartedAt = Date.now();
+    emitPromptTiming(this, options, "clientStart", timingStartedAt, { localSessionId });
+    const session = await this.ensureSession(localSessionId, { ...options, timingStartedAt });
     const signal = options.signal || null;
     if (signal?.aborted) {
       const error = new Error("Hermes prompt was cancelled before it started.");
@@ -410,15 +573,31 @@ class HermesAcpClient {
     }
 
     const tools = new Map();
+    const toolSignatures = new Map();
+    const maxToolCalls = Math.max(0, Number(options.maxToolCalls ?? this.options.maxToolCalls ?? 0) || 0);
+    const maxToolCallsWithoutAnswer = Math.max(0, Number(
+      options.maxToolCallsWithoutAnswer ?? this.options.maxToolCallsWithoutAnswer ?? 0
+    ) || 0);
+    const maxRepeatedToolCalls = Math.max(0, Number(
+      options.maxRepeatedToolCalls ?? this.options.maxRepeatedToolCalls ?? 0
+    ) || 0);
+    let newToolCallCount = 0;
+    let toolCallsSinceAnswer = 0;
     const updates = [];
     let output = "";
     let rejectAbort;
     let timeoutTimer = null;
-    const timeoutMs = Math.max(1000, Number(options.timeoutMs || this.options.promptTimeoutMs || 90000));
+    const configuredTimeout = options.timeoutMs === undefined
+      ? Number(this.options.promptTimeoutMs || 0)
+      : Number(options.timeoutMs);
+    const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+      ? Math.max(1000, configuredTimeout)
+      : 0;
     const abortUpdate = new Promise((resolve, reject) => {
       rejectAbort = reject;
     });
     const timeoutUpdate = new Promise((resolve, reject) => {
+      if (!timeoutMs) return;
       timeoutTimer = setTimeout(() => {
         void this.cancel(localSessionId);
         const error = new Error(`Hermes prompt timed out after ${timeoutMs}ms.`);
@@ -434,10 +613,18 @@ class HermesAcpClient {
       rejectAbort(error);
     };
     signal?.addEventListener?.("abort", onAbort, { once: true });
-    this.activePrompts.set(localSessionId, { hermesSessionId: session.hermesSessionId });
+    this.activePrompts.set(localSessionId, {
+      hermesSessionId: session.hermesSessionId,
+      permissionContext: options.permissionContext || {}
+    });
 
     try {
       session.active.prompt(promptBlocks(text, options.attachments || []));
+      emitPromptTiming(this, options, "promptDispatched", timingStartedAt, {
+        localSessionId,
+        hermesSessionId: session.hermesSessionId
+      });
+      let firstUpdateSeen = false;
       for (;;) {
         let message;
         try {
@@ -461,12 +648,27 @@ class HermesAcpClient {
             updates
           };
         }
+        if (!firstUpdateSeen) {
+          firstUpdateSeen = true;
+          emitPromptTiming(this, options, "firstUpdate", timingStartedAt, {
+            localSessionId,
+            hermesSessionId: session.hermesSessionId
+          });
+        }
         if (message.kind === "stop") {
-          const files = [];
-          collectFileEvidence([...tools.values()], files, new Set());
+          const files = collectToolFileEvidence([...tools.values()], {
+            runStartedAt: timingStartedAt,
+            allowedRoots: options.deliveryRoots || []
+          });
           const status = message.stopReason === "cancelled"
             ? "cancelled"
             : (message.stopReason === "refusal" || looksLikeHermesFailure(output) ? "failed" : "done");
+          emitPromptTiming(this, options, "final", timingStartedAt, {
+            localSessionId,
+            hermesSessionId: session.hermesSessionId,
+            status,
+            stopReason: message.stopReason || ""
+          });
           return {
             status,
             text: output,
@@ -484,10 +686,35 @@ class HermesAcpClient {
         updates.push(update);
         if (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text") {
           output += update.content.text || "";
+          if (String(update.content.text || "").trim()) toolCallsSinceAnswer = 0;
         } else if (update.sessionUpdate === "tool_call") {
-          tools.set(update.toolCallId, mergeToolUpdate({}, update));
+          const toolCallId = String(update.toolCallId || update.tool_call_id || "").trim();
+          const signature = toolCallSignature(update);
+          newToolCallCount += 1;
+          toolCallsSinceAnswer += 1;
+          const repeated = (toolSignatures.get(signature) || 0) + 1;
+          toolSignatures.set(signature, repeated);
+          tools.set(toolCallId || `anonymous-${newToolCallCount}`, mergeToolUpdate({}, update));
+          if ((maxToolCalls > 0 && newToolCallCount > maxToolCalls)
+            || (maxToolCallsWithoutAnswer > 0 && toolCallsSinceAnswer > maxToolCallsWithoutAnswer)
+            || (maxRepeatedToolCalls > 0 && repeated >= maxRepeatedToolCalls)) {
+            const reason = maxRepeatedToolCalls > 0 && repeated >= maxRepeatedToolCalls
+              ? "模型重复调用了相同工具"
+              : maxToolCallsWithoutAnswer > 0 && toolCallsSinceAnswer > maxToolCallsWithoutAnswer
+                ? "模型连续调用工具但没有生成新的回答"
+                : "模型调用工具次数超过安全上限";
+            const error = new Error(`${reason}，本轮已自动停止。`);
+            error.code = "HERMES_TOOL_LOOP_LIMIT";
+            error.reason = reason;
+            error.toolCallCount = newToolCallCount;
+            error.toolCalls = [...tools.values()];
+            await this.cancel(localSessionId).catch(() => false);
+            throw error;
+          }
         } else if (update.sessionUpdate === "tool_call_update") {
-          tools.set(update.toolCallId, mergeToolUpdate(tools.get(update.toolCallId), update));
+          const toolCallId = String(update.toolCallId || update.tool_call_id || "").trim();
+          const current = tools.get(toolCallId) || {};
+          tools.set(toolCallId || `anonymous-${tools.size + 1}`, mergeToolUpdate(current, update));
         }
         options.onUpdate?.(update, {
           text: output,
@@ -516,6 +743,10 @@ class HermesAcpClient {
     return this.sessions.get(id)?.hermesSessionId
       || this.activePrompts.get(id)?.hermesSessionId
       || "";
+  }
+
+  hasSession(localSessionId) {
+    return Boolean(this.sessions.get(String(localSessionId || "").trim())?.active);
   }
 
   hasActivePrompt(localSessionId) {
@@ -551,6 +782,7 @@ class HermesAcpClient {
     for (const localSessionId of this.activePrompts.keys()) await this.cancel(localSessionId);
     for (const session of this.sessions.values()) session.active?.dispose?.();
     this.sessions.clear();
+    this.sessionBuilds.clear();
     this.activePrompts.clear();
     this._closeTransport();
     this.status("stopped");
@@ -577,9 +809,11 @@ class HermesAcpClient {
 module.exports = {
   HermesAcpClient,
   collectFileEvidence,
+  collectToolFileEvidence,
   createAcpSdkLoader,
   ensureHermesPythonCompat,
   looksLikeHermesFailure,
+  sensitiveEvidencePath,
   promptBlocks,
   redactDiagnostic,
   resolveAcpSdkEntry,

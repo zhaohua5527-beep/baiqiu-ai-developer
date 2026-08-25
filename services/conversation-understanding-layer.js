@@ -6,6 +6,7 @@ const { roleForIntent, selectedPathFor } = require("./agent-role-protocol");
 const { TaskDispatchRouter } = require("./task-dispatch-router");
 const { NegativeConstraintResolver } = require("./negative-constraint-resolver");
 const { assignmentCapabilityProfile } = require("./task-capability-mapper");
+const { declaredOutputPaths } = require("./project-delivery-contract");
 
 const LEGACY_INTENT_TYPES = Object.freeze([
   "conversation",
@@ -98,6 +99,22 @@ function isAgentCapabilityQuestion(text = "") {
     || /(?:\u4f60|\u767d\u7403|\u767d\u7403AI).{0,12}(?:\u57fa\u4e8e|\u4f7f\u7528|\u5185\u6838|\u5e95\u5c42).{0,16}(?:\u54ea\u4e2a|\u4ec0\u4e48|Hermes|OpenClaw|\u8f6f\u4ef6|\u6846\u67b6|Agent)(?:\u5f00\u53d1\u7684?|\u5b9e\u73b0\u7684?|\u505a\u7684)?(?:\uff1f|\?)?$/i.test(value);
 }
 
+function isProjectDirectionQuestion(text = "") {
+  const value = cleanText(text, 500);
+  const asksForAdvice = /(?:\u6709\u4ec0\u4e48|\u54ea\u4e9b|\u600e\u4e48\u9009|\u5982\u4f55\u9009|\u80fd\u505a\u4ec0\u4e48|\u9002\u5408\u505a\u4ec0\u4e48).{0,24}(?:\u65b9\u5411|\u601d\u8def|\u5efa\u8bae|\u9009\u9898|\u9898\u6750|\u4e3b\u9898)/i.test(value)
+    || /(?:\u65b9\u5411|\u601d\u8def|\u5efa\u8bae|\u9009\u9898|\u9898\u6750|\u4e3b\u9898).{0,8}(?:\u5417|\u5462|\uff1f|\?)/i.test(value);
+  const exploratoryIntent = /(?:\u6211(?:\u60f3|\u8981|\u6253\u7b97)|\u51c6\u5907|\u60f3\u8981|\u8003\u8651).{0,18}(?:\u505a|\u5199|\u5f00\u53d1|\u8bbe\u8ba1|\u642d\u5efa|\u505a\u4e00\u4e2a|\u5199\u4e00(?:\u7bc7|\u4e2a)?)/i.test(value);
+  if (exploratoryIntent && asksForAdvice) return true;
+  return /(?:\u600e\u4e48|\u5982\u4f55).{0,12}(?:\u505a|\u5f00\u53d1|\u8bbe\u8ba1).{0,18}(?:agent|Agent|\u667a\u80fd\u4f53|\u5458\u5de5).{0,8}(?:\u9879\u76ee|\u4ea7\u54c1|\u5e94\u7528)(?:\u5417|\u5462|\uff1f|\?)?$/i.test(value)
+    || /(?:\u6709\u4ec0\u4e48|\u54ea\u4e9b|\u600e\u4e48\u9009).{0,16}(?:agent|Agent|\u667a\u80fd\u4f53).{0,8}(?:\u9879\u76ee|\u4ea7\u54c1).{0,12}(?:\u65b9\u5411|\u601d\u8def|\u5efa\u8bae|\u9009\u9898)/i.test(value);
+}
+
+function isAgentProductObject(text = "") {
+  const value = cleanText(text, 1000);
+  if (!/(?:agent|Agent|\u667a\u80fd\u4f53).{0,4}(?:\u9879\u76ee|\u4ea7\u54c1|\u5e94\u7528|app|APP|\u7cfb\u7edf)/i.test(value)) return false;
+  return !/(?:\u8c03\u7528|\u59d4\u6d3e|\u5b89\u6392|\u5206\u914d|\u8ba9).{0,16}(?:agent|Agent|\u5458\u5de5).{0,16}(?:\u6267\u884c|\u5904\u7406|\u5206\u6790|\u751f\u6210|\u5b8c\u6210)|(?:agent|Agent|\u5458\u5de5).{0,16}(?:\u5206\u522b|\u5404\u81ea|\u5e76\u884c|\u6267\u884c\u4efb\u52a1)/i.test(value);
+}
+
 function isAmbiguousFitnessPlan(text = "") {
   return /(?:写|做|生成|给).{0,12}(?:健身房|健身).{0,8}(?:方案|计划)/i.test(cleanText(text))
     && !/(?:开店|运营|营销|选址|预算|训练|增肌|减脂|课程|会员体系)/i.test(text);
@@ -113,7 +130,7 @@ function isAmbiguousSoftwareRequest(text = "") {
 }
 
 function isContentGenerationRequest(text = "") {
-  return /(?:写|撰写|生成|创作|整理|制作|做|给我).{0,16}(?:方案|计划|论文|文章|短文|小说|故事|剧本|诗歌|长篇|短篇|连载|文案|报告|提纲|视频|短视频|图片|海报|音频|播客|PPT|演示文稿)|(?:方案|计划|论文|文章|短文|小说|故事|剧本|诗歌|长篇|短篇|连载|文案|报告|提纲|视频|短视频|图片|海报|音频|播客|PPT|演示文稿).{0,12}(?:写|撰写|生成|创作|整理|制作|做)/i.test(cleanText(text));
+  return /(?:写|撰写|生成|创作|整理|制作|做|给我).{0,16}(?:方案|计划|论文|文章|短文|小说|故事|剧本|诗歌|长篇|短篇|连载|文案|报告|提纲|手册|指南|教程|使用说明|视频|短视频|图片|海报|音频|播客|PPT|演示文稿)|(?:方案|计划|论文|文章|短文|小说|故事|剧本|诗歌|长篇|短篇|连载|文案|报告|提纲|手册|指南|教程|使用说明|视频|短视频|图片|海报|音频|播客|PPT|演示文稿).{0,12}(?:写|撰写|生成|创作|整理|制作|做)/i.test(cleanText(text));
 }
 
 function isCreativeGenerationRequest(text = "") {
@@ -178,6 +195,13 @@ function isContentArtifactRequest(text = "") {
   return contentCapabilityFor(text) !== "text_generation";
 }
 
+function isInlineTextDeliveryRequest(text = "") {
+  const value = cleanText(text, 2000);
+  return isContentGenerationRequest(value)
+    && !isContentArtifactRequest(value)
+    && /(?:\u5bf9\u8bdd\u6846|\u804a\u5929\u7a97\u53e3|\u76f4\u63a5\u663e\u793a|\u76f4\u63a5\u5199|\u653e\u5728\u8fd9\u91cc|\u5199\u5728\u8fd9\u91cc)/i.test(value);
+}
+
 function modelConstraintsFor(text = "", inherited = {}) {
   const value = cleanText(text);
   const explicitlyDisallowed = /(?:不要|禁止|不允许|别|不可).{0,12}(?:本地模型|本地\s*LLM|Ollama)|(?:本地模型|本地\s*LLM|Ollama).{0,12}(?:不要|禁止|不允许|别用|禁用)/i.test(value);
@@ -213,6 +237,8 @@ function domainFor(text = "", intentType = "conversation", agentCount = 0) {
 
 function requestedAgentCount(text = "", context = {}) {
   const value = cleanText(text, 2000);
+  if (isProjectDirectionQuestion(value)) return 0;
+  if (isAgentProductObject(value)) return 0;
   const explicitlyRequested = explicitlyRequestedProjectAgents(value, context);
   if (explicitlyRequested.length) return Math.min(20, explicitlyRequested.length);
   if (/(?:\u5168\u90e8|\u6240\u6709|\u5168\u4f53).{0,8}(?:\u5458\u5de5|agent)/i.test(value)) {
@@ -254,7 +280,24 @@ function isDelegationEvidenceQuery(text = "") {
   return /(?:你确定|是不是|到底|是否).{0,80}(?:员工|Agent|执行|委派).{0,80}(?:记录|结果|完成|对话框|证据|看到)|(?:没看到|看不到|没有).{0,50}(?:员工|Agent|执行|委派).{0,50}(?:记录|结果|对话框|证据)/i.test(value);
 }
 
+function isReferenceReport(text = "", context = {}) {
+  const value = cleanText(text, 8000);
+  if (!value) return false;
+  if (context.referenceMaterial === true || context.isReferenceMaterial === true) return true;
+
+  // Completion cards are evidence, not instructions to repeat their work.
+  const tail = value.slice(-240);
+  if (/(?:按(?:上面|此|这个)|开始|现在|请).{0,20}(?:执行|修改|上传|部署)/i.test(tail)) return false;
+  if (/(?:查看所有(?:产物|变更)|查看(?:全部|所有)(?:产物|变更))\s*[（(]\s*\d+\s*[）)]/i.test(value)) return true;
+
+  const reportHeadings = /(?:^|\n)\s*(?:真正的根因|修补内容|修复内容|部署状态|测试结果|变更摘要|执行结果)\s*(?:[:：]|$)/m;
+  const completedAction = /(?:已(?:备份|替换|打包|验证|安装|发布|完成)|修复完成|部署完成)/i;
+  return reportHeadings.test(value) && completedAction.test(value) && /(?:```|\|[^\n]+\|)/.test(value);
+}
+
 function classifyIntentType(text, context = {}) {
+  if (isReferenceReport(text, context)) return "conversation";
+  if (!context.hasAttachments && isProjectDirectionQuestion(text)) return "question";
   if (isSkillCapabilityQuestion(text) || isAgentCapabilityQuestion(text)) return "capability_query";
   if (/(?:不要|禁止|不允许|别|不可).{0,12}(?:本地模型|本地\s*LLM|Ollama)/i.test(text)) return "configuration";
   if (context.pendingConfirmation && /^(确认|同意|执行|继续|开始|取消|不执行|停止)[。!！?？]*$/i.test(text)) return "execution";
@@ -271,7 +314,9 @@ function classifyIntentType(text, context = {}) {
   if (isConversationalAnalysisRequest(text, context)) return "question";
   if (isDelegationEvidenceQuery(text)) return "status_query";
   if (requestedAgentCount(text, context) > 0 && /(写|论文|文章|任务|测试|执行|完成|分析|检查|安排)/i.test(text)) return "execution";
-  if (context.hasAttachments && /(分析|处理|读取|打开|总结|整理|识别|修改|导出)/i.test(text)) return "execution";
+  // Hermes owns the semantic decision. Whiteball creates a task envelope for
+  // every attachment-bearing turn so the files cannot disappear on follow-up.
+  if (context.hasAttachments) return "execution";
   if (/(学习|安装|创建|新增).{0,20}(技能|skill)|(技能|skill).{0,20}(学习|安装|创建|新增)/i.test(text)) return "execution";
   if (/(?:分析|检查|审计|排查).{0,16}(?:文件|代码|源码|日志|目录|项目|系统|数据|资料|配置)|(?:文件|代码|源码|日志|目录|项目|系统|数据|资料|配置).{0,16}(?:分析|检查|审计|排查)/i.test(text)) return "execution";
   if (/(创建|新建|生成|制作|开发|搭建|修改|编辑|修复|重构|删除|移动|整理|保存|下载|上传|部署|运行|执行|打开|关闭|自动化|批量|写一|写论文|做一|安排|让员工|让.{0,8}Agent|测试员工|测试.{0,8}Agent)/i.test(text)) return "execution";
@@ -315,6 +360,9 @@ function isAnalyzeOnlyRequest(text = "", negativeConstraints = null) {
 
 function classificationFor({ text = "", intent = "conversation", intentType = "conversation", taskSpec = null, agentCount = 0, hasAttachments = false, negativeConstraints = null, requirementCompleteness = null } = {}) {
   if (!cleanText(text)) return hasAttachments ? "development_task" : "ambiguous";
+  if (hasAttachments) return "development_task";
+  if (isProjectDirectionQuestion(text)) return "chat";
+  if (isInlineTextDeliveryRequest(text)) return "chat";
   const completeness = requirementCompleteness || requestCompletenessFor(text, { agentCount });
   if (isAmbiguousFitnessPlan(text) || isProgressiveClarificationRequest(text) || completeness.complete === false) return "ambiguous";
   if (isAnalyzeOnlyRequest(text, negativeConstraints)
@@ -478,6 +526,47 @@ function explicitAssignmentScopes(text = "", count = 0) {
   return [];
 }
 
+function assignmentClauses(text = "") {
+  return (String(text || "").match(/[^。！？!?；;\n]+[。！？!?；;\n]?/g) || [])
+    .map((item) => cleanText(item.replace(/[。！？!?；;\n]+$/, ""), 2000))
+    .filter(Boolean);
+}
+
+function assignmentRoleAliases(worker = {}) {
+  const safeWorker = worker && typeof worker === "object" ? worker : {};
+  const values = [safeWorker.agent_name, safeWorker.agentName, safeWorker.name, safeWorker.role]
+    .map((item) => cleanText(item, 200))
+    .filter(Boolean);
+  return unique(values.flatMap((value) => {
+    const withoutRunSuffix = value.replace(/[-_](?:p3|qa|test|测试)?[-_\d].*$/i, "");
+    const withoutRoleSuffix = withoutRunSuffix.replace(/(?:工程师|分析师|设计师|研究员|专员|顾问|经理|员工|agent|师)$/i, "");
+    return [value, withoutRunSuffix, withoutRoleSuffix];
+  }), 12)
+    .filter((item) => item.length >= 2)
+    .sort((left, right) => right.length - left.length);
+}
+
+function scopedAssignmentActions(text = "", workers = []) {
+  const clauses = assignmentClauses(text);
+  const used = new Set();
+  return workers.map((worker) => {
+    const aliases = assignmentRoleAliases(worker);
+    const candidates = clauses
+      .map((clause, index) => {
+        if (used.has(index) || /(?:\bCEO\b|项目负责人|负责人)/i.test(clause)) return null;
+        const alias = aliases.find((item) => clause.toLowerCase().includes(item.toLowerCase()));
+        if (!alias) return null;
+        const outputs = declaredOutputPaths(clause);
+        return { clause, index, score: alias.length + (outputs.length ? 1000 : 0) };
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score || left.index - right.index);
+    const selected = candidates[0] || null;
+    if (selected) used.add(selected.index);
+    return selected?.clause || "";
+  });
+}
+
 function requestedAgentAssignments(text = "", count = 0, context = {}) {
   const assignmentCount = count || requestedAgentCount(text, context);
   if (!assignmentCount) return [];
@@ -507,20 +596,24 @@ function requestedAgentAssignments(text = "", count = 0, context = {}) {
   const projectRoles = Array.isArray(context.capabilityContext?.projectRoles)
     ? context.capabilityContext.projectRoles
     : [];
+  const requestedWorkers = Array.from({ length: assignmentCount }, (_, index) => explicitlyRequested[index]
+    || (projectRoles.length === assignmentCount ? projectRoles[index] : null));
+  const scopedActions = scopedAssignmentActions(text, requestedWorkers);
   return Array.from({ length: assignmentCount }, (_, index) => {
-    const requestedWorker = explicitlyRequested[index]
-      || (projectRoles.length === assignmentCount ? projectRoles[index] : null);
+    const requestedWorker = requestedWorkers[index];
     const scope = scopes[index] || (paperTask ? topics[index % topics.length] : "");
     const mixedAction = index === 0
       ? `连续完成${repeatedTestCount}次文件输出测试，生成${repeatedTestCount}个内容不同且可打开的真实文本文件，并返回每个文件的真实路径`
       : `连续完成${repeatedTestCount}次对话文字输出测试，在本员工对话框直接返回${repeatedTestCount}段编号清楚、内容不同的完整文字，不创建文件`;
-    const action = mixedDeliveryTest
+    const baseAction = mixedDeliveryTest
       ? mixedAction
       : paperTask
       ? `独立撰写一篇${topics[index % topics.length]}主题的中文AI论文，正文约${requestedLength}字，只返回本Agent独立完成的论文正文`
       : delegatedTask && count === 1
         ? cleanText(delegatedTask, 1000)
-        : `${cleanText(commonAction, 800)}${scope ? `：${scope}` : ""}（第${index + 1}个Agent独立执行，不得模拟其他Agent）`;
+        : scopedActions[index] || `${cleanText(commonAction, 800)}${scope ? `：${scope}` : ""}`;
+    const action = `${baseAction}（第${index + 1}个Agent独立执行，不得模拟其他Agent）`;
+    const outputPaths = declaredOutputPaths(action);
     const profile = assignmentCapabilityProfile({
       taskType: paperTask ? "content_task" : developmentTask ? "development_task" : "",
       action,
@@ -540,10 +633,11 @@ function requestedAgentAssignments(text = "", count = 0, context = {}) {
       requiredCapabilities: [...profile.requiredCapabilities],
       capabilities: [...profile.requiredCapabilities],
       action,
-      ...(mixedDeliveryTest ? {
-        deliveryMode: index === 0 ? "file" : "chat",
-        expectedFileCount: index === 0 ? repeatedTestCount : 0
-      } : {}),
+      ...(mixedDeliveryTest
+        ? { deliveryMode: index === 0 ? "file" : "chat", expectedFileCount: index === 0 ? repeatedTestCount : 0 }
+        : outputPaths.length
+          ? { deliveryMode: "file", expectedFileCount: outputPaths.length }
+          : {}),
       scope,
       scopeSpecified: Boolean(scope)
     };
@@ -558,6 +652,7 @@ function taskSpecFor({ intentType, domainIntent, text, riskLevel, agentCount, co
     ? "mixed"
     : assignmentDeliveryModes[0]
       || (["software_development", "file_operation", "content_artifact"].includes(taskType)
+        || declaredOutputPaths(text).length > 0
         || /(?:生成|创建|制作|保存|导出|下载).{0,16}(?:文件|文档|表格|图片|Word|Excel|PDF|PPT|压缩包)/i.test(text)
         ? "file"
         : "chat");
@@ -591,7 +686,9 @@ function taskSpecFor({ intentType, domainIntent, text, riskLevel, agentCount, co
     agentAssignments,
     requiresAssignmentScopeConfirmation: false,
     agentCount,
-    requiresConfirmation: riskLevel === "high"
+    // A submitted user request is the authorization signal. Risk remains
+    // metadata for planning and verification, never a second chat gate.
+    requiresConfirmation: false
   };
 }
 

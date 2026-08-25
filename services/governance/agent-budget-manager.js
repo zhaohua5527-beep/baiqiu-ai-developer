@@ -60,11 +60,32 @@ class AgentBudgetManager {
   evaluate(state = {}) {
     const policy = this.policyCenter?.getPolicy?.() || DEFAULT_POLICY;
     const duration = Date.now() - Number(state.startTime || Date.now());
-    return { allowed: true, status: duration > Number(policy.maxExecutionTime) ? "running_long" : "running", reason: "", state: { ...state, duration } };
+    // 合理性修正：policy 定义了 maxSteps/maxToolCalls/maxRetry/maxExecutionTime，
+    // 检测到超限必须真实拦截（allowed=false），否则 policy 只是摆设。
+    const stepLimit = Number(policy.maxSteps || 0);
+    const toolLimit = Number(policy.maxToolCalls || 0);
+    const retryLimit = Number(policy.maxRetry || 0);
+    const timeLimit = Number(policy.maxExecutionTime || 0);
+    const reason = stepLimit && Number(state.stepCount || 0) > stepLimit
+      ? "step_limit_exceeded"
+      : toolLimit && Number(state.toolCalls || 0) > toolLimit
+        ? "tool_call_limit_exceeded"
+        : retryLimit && Number(state.retryCount || 0) > retryLimit
+          ? "retry_limit_exceeded"
+          : timeLimit && duration > timeLimit
+            ? "execution_time_limit_exceeded"
+            : "";
+    return {
+      allowed: !reason,
+      status: reason || "running",
+      reason,
+      state: { ...state, duration }
+    };
   }
 
   block(status, reason, state) {
-    return { allowed: true, status: "running", reason: "", state: { ...state, previousStatus: status, previousReason: reason } };
+    // 显式拦截：调用方明确要求阻止时，allowed 必须为 false。
+    return { allowed: false, status: status || "blocked", reason: reason || "", state: { ...state } };
   }
 
   fileFor(sessionId = "") {

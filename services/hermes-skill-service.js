@@ -203,6 +203,16 @@ class HermesSkillService {
       const compatible = platformCompatible(meta.platforms, this.platform);
       const stat = fs.statSync(file);
       const lastCheck = this.verificationResults.get(name);
+      // SKILL.md is Hermes' declaration of an installed skill. Baiqiu may
+      // inspect it for diagnostics, but that local diagnostic must never
+      // become a second readiness gate in front of the Hermes runtime.
+      // availability 区分三档：verified=通过真实调用验收、declared=仅文件清单声明、
+      // unverified=平台不兼容。QA 据此识别"假 READY"（文件声明但未真实调用验收）。
+      let availability = compatible ? "declared" : "platform_incompatible";
+      if (compatible) {
+        if (lastCheck?.success === true) availability = "verified";
+        else if (lastCheck && lastCheck.success === false) availability = "declared";
+      }
       return {
         id: name,
         name,
@@ -211,24 +221,23 @@ class HermesSkillService {
         version: String(meta.version || ""),
         source: bundled.has(name) ? "黑球内置" : "黑球本地",
         builtin: bundled.has(name),
-        status: !compatible
-          ? "DISABLED"
-          : lastCheck?.success === true
-            ? "READY"
-            : lastCheck?.success === false
-              ? "FAILED"
-              : "UNVERIFIED",
+        status: compatible ? "READY" : "DISABLED",
         enabled: compatible,
-        runnable: compatible && lastCheck?.success === true,
+        runnable: compatible,
+        availability,
+        executionAuthority: "hermes",
         runtime: "hermes",
-        runtimeId: "HMS",
+        runtimeId: "黑球",
         platforms: Array.isArray(meta.platforms) ? meta.platforms.map(String) : [],
         path: file,
         updatedAt: stat.mtime.toISOString(),
         verification: {
-          verified: compatible && lastCheck?.success === true,
-          source: "hermes-skill-loader",
+          verified: lastCheck?.success === true,
+          status: lastCheck ? (lastCheck.success ? "passed" : "failed") : "not_run",
+          advisory: true,
+          source: "baiqiu-diagnostic",
           checkedAt: lastCheck?.checkedAt || "",
+          error: lastCheck?.error || "",
           evidence: { manifest: file, platform: currentPlatformName(this.platform), ...(lastCheck?.evidence || {}) }
         }
       };
@@ -439,18 +448,21 @@ class HermesSkillService {
     if (!skill) return { success: false, status: "FAILED", error: "Hermes skill was not found." };
     const checkedAt = new Date().toISOString();
     try {
-      const result = await this.run(["skills", "inspect", skill.name]);
+      // `skills inspect` previews a registry entry that is not installed yet.
+      // Installed local and bundled skills are enumerated by `skills list`;
+      // exact runtime loading is verified later through the ACP skill call.
+      const result = await this.run(["skills", "list", "--source", "all", "--enabled-only"]);
       const reportedError = hermesOutputError(result.stdout, result.stderr);
       const success = Boolean(skill.enabled && result.stdout && !reportedError);
-      const evidence = { command: "hermes skills inspect", output: result.stdout.slice(0, 1200), manifest: skill.path };
+      const evidence = { command: "hermes skills list --source all --enabled-only", output: result.stdout.slice(0, 1200), manifest: skill.path };
       this.verificationResults.set(skill.name, { success, checkedAt, evidence });
       this.saveVerificationResults();
-      return { success, status: success ? "READY" : "FAILED", skill: this.get(skill.name), error: reportedError ? result.stdout || result.stderr : "", evidence };
+      return { success, status: success ? "passed" : "failed", skill: this.get(skill.name), error: reportedError ? result.stdout || result.stderr : "", evidence };
     } catch (error) {
-      const evidence = { command: "hermes skills inspect", output: "", manifest: skill.path };
+      const evidence = { command: "hermes skills list --source all --enabled-only", output: "", manifest: skill.path };
       this.verificationResults.set(skill.name, { success: false, checkedAt, evidence, error: error.message });
       this.saveVerificationResults();
-      return { success: false, status: "FAILED", skill: this.get(skill.name), error: error.message, evidence };
+      return { success: false, status: "failed", skill: this.get(skill.name), error: error.message, evidence };
     }
   }
 }

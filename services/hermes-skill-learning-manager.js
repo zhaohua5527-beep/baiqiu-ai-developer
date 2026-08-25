@@ -45,18 +45,38 @@ function skillTargetFromRequest(value = "") {
     .replace(/[，。！？,.!?；;：:]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return text || clean(value, 120);
+  return clean(text || value, 120);
+}
+
+function explicitSkillNameFromRequest(value = "") {
+  const text = clean(value, 1000);
+  const patterns = [
+    /(?:named?|name\s*(?:is|:)?)[\s"'`:=-]*([a-z0-9][a-z0-9._-]{1,119})/i,
+    /(?:\u540d\u4e3a|\u540d\u79f0(?:\u662f|\u4e3a)?|\u53eb\u505a?)[\s"'`:：=-]*([a-z0-9][a-z0-9._-]{1,119})/i
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const name = safeSkillName(match?.[1] || "");
+    if (name) return name;
+  }
+  return "";
+}
+
+function isExplicitLocalSkillCreation(value = "") {
+  const text = clean(value, 1000);
+  return /(?:create|build|author|write|generate).{0,80}(?:skill|SKILL\.md)|(?:skill|SKILL\.md).{0,80}(?:create|build|author|write|generate)/i.test(text)
+    || /(?:\u521b\u5efa|\u65b0\u589e|\u751f\u6210|\u7f16\u5199|\u5236\u4f5c).{0,80}(?:\u6280\u80fd|SKILL\.md)|(?:\u6280\u80fd|SKILL\.md).{0,80}(?:\u521b\u5efa|\u65b0\u589e|\u751f\u6210|\u7f16\u5199|\u5236\u4f5c)/i.test(text);
 }
 
 function skillCapabilityReply(skills = []) {
-  const ready = skills.filter((item) => item?.status === "READY").length;
-  const failed = skills.filter((item) => item?.status === "FAILED").length;
+  const available = skills.filter((item) => item?.runtime === "hermes" && item?.enabled).length;
+  const diagnostics = skills.filter((item) => item?.runtime === "hermes" && item?.verification?.status === "failed").length;
   return [
-    "可以，但真实学习必须经过验证，不能只保存一段说明就算学会。",
+    "\u53ef\u4ee5\u3002\u9ed1\u7403\u5df2\u53d1\u73b0\u7684\u6280\u80fd\u4f1a\u76f4\u63a5\u4ea4\u7ed9\u9ed1\u7403\u8c03\u7528\uff0c\u767d\u7403\u4e0d\u518d\u7528\u672c\u5730\u201c\u672a\u9a8c\u8bc1\u201d\u72b6\u6001\u62e6\u622a\u5b83\u4eec\u3002",
     "",
-    `当前 Hermes 已加载 ${ready} 个 READY 技能${failed ? `，另有 ${failed} 个未通过验证` : ""}。`,
-    "你给出具体技能后，我会依次执行：搜索可信技能、必要时生成本地 Hermes 技能、展示来源与权限、安装 SKILL.md、运行隔离测试、再次验证自动选中。",
-    "只有清单、加载、真实调用、自动选中和结果检查全部通过，状态才会变为 READY。缺少底层程序、API 或账号时，我会明确报告能力缺口，不会假装已经学会。",
+    `\u5f53\u524d\u9ed1\u7403\u5df2\u53d1\u73b0 ${available} \u4e2a\u517c\u5bb9\u6280\u80fd${diagnostics ? `\uff0c${diagnostics} \u4e2a\u5e26\u6709\u672c\u5730\u8bca\u65ad\u8bb0\u5f55` : ""}\u3002`,
+    "\u6267\u884c\u65f6\uff0c\u9ed1\u7403\u81ea\u8eab\u51b3\u5b9a\u6280\u80fd\u662f\u5426\u53ef\u7528\u3001\u662f\u5426\u9700\u8981\u6743\u9650\u548c\u5177\u4f53\u7684\u5931\u8d25\u539f\u56e0\u3002\u767d\u7403\u53ea\u663e\u793a\u5e76\u8f6c\u53d1\u8fd9\u4e9b\u771f\u5b9e\u7ed3\u679c\u3002",
+    "\u5b89\u88c5\u6216\u65b0\u5efa\u6280\u80fd\u4ecd\u9700\u8981\u6388\u6743\uff1b\u8fd9\u662f\u4e3a\u4e86\u9632\u6b62\u5199\u5165\u672a\u6388\u6743\u7684\u672c\u5730\u6280\u80fd\u6587\u4ef6\uff0c\u4e0d\u5f71\u54cd\u5df2\u53d1\u73b0\u9ed1\u7403\u6280\u80fd\u7684\u8c03\u7528\u3002",
     "",
     "可以直接说：学习 Excel 对账技能，输入是销售表和回款表，输出差异清单。"
   ].join("\n");
@@ -70,6 +90,13 @@ function parseJsonObject(value = "") {
   const parsed = JSON.parse(text.slice(start, end + 1));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Hermes 返回的技能结果格式无效");
   return parsed;
+}
+
+function isTransientAcpConnectionError(error) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || error || "");
+  return /^(?:HERMES_ACP_PROCESS_ERROR|HERMES_ACP_START_FAILED)$/i.test(code)
+    || /(?:ACP|transport|connection).*(?:closed|reset)|process exited unexpectedly/i.test(message);
 }
 
 function localSelection(request = "") {
@@ -113,16 +140,34 @@ class HermesSkillLearningManager {
     if (!source) throw new Error("请输入具体技能、技能库标识或 SKILL.md 网址");
     const decoded = decodeLocalSelection(source);
     const request = decoded || source;
+    const explicitName = explicitSkillNameFromRequest(request);
     let candidate;
     if (decoded) {
       candidate = { mode: "local", selectedSource: source, request, name: requestedName || skillTargetFromRequest(request) };
+    } else if (explicitName || isExplicitLocalSkillCreation(request)) {
+      candidate = {
+        mode: "local",
+        selectedSource: localSelection(request),
+        request,
+        name: requestedName || explicitName || skillTargetFromRequest(request),
+        description: "Hermes will generate a local workflow skill for the requested goal",
+        sourceLabel: "Hermes local generation"
+      };
     } else if (directIdentifier(source)) {
       candidate = { mode: "registry", selectedSource: source, request, name: requestedName || source.split("/").filter(Boolean).pop() || source };
     } else {
       emitProgress(onProgress, "RESEARCHING", "正在搜索黑球技能库", 10);
       let matches = [];
       try { matches = await this.skillService.search(skillTargetFromRequest(source), 8); } catch { matches = []; }
-      const match = matches[0];
+      let match = matches[0];
+      if (match?.identifier) {
+        try {
+          if (typeof this.skillService.inspect !== "function") throw new Error("Registry inspection is unavailable");
+          await this.skillService.inspect(match.identifier);
+        } catch {
+          match = null;
+        }
+      }
       candidate = match?.identifier
         ? { mode: "registry", selectedSource: String(match.identifier), request, name: requestedName || match.name || match.identifier, description: match.description || "", sourceLabel: match.source || "Hermes 技能库" }
         : { mode: "local", selectedSource: localSelection(request), request, name: requestedName || skillTargetFromRequest(request), description: "Hermes 将根据目标生成本地工作流技能", sourceLabel: "Hermes 本地生成" };
@@ -143,18 +188,43 @@ class HermesSkillLearningManager {
     };
   }
 
-  async hermesPrompt(prompt, label) {
-    const sessionId = `skill-${label}-${this.idFactory()}`;
-    try {
-      const result = await this.acpClient.prompt(sessionId, prompt, {
-        cwd: this.workspaceRoot,
-        signal: AbortSignal.timeout(120000)
-      });
-      if (result?.status !== "done") throw new Error(result?.text || `Hermes ${label} 未完成`);
-      return { result, json: parseJsonObject(result.text) };
-    } finally {
-      await this.acpClient.deleteSession(sessionId).catch(() => false);
+  async hermesPrompt(prompt, label, { repairMalformedJson = true } = {}) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const sessionId = `skill-${label}-${this.idFactory()}`;
+      try {
+        const result = await this.acpClient.prompt(sessionId, prompt, {
+          cwd: this.workspaceRoot,
+          signal: AbortSignal.timeout(120000)
+        });
+        if (result?.status !== "done") throw new Error(result?.text || `Hermes ${label} 未完成`);
+        try {
+          return { result, json: parseJsonObject(result.text) };
+        } catch (parseError) {
+          if (!repairMalformedJson) throw parseError;
+          const repaired = await this.hermesPrompt([
+            "Repair the malformed JSON response below.",
+            "Preserve its facts and intended structure. Do not perform the task again.",
+            "Return exactly one valid JSON object with no markdown or commentary.",
+            `Original request: ${clean(prompt, 8000)}`,
+            `Malformed response: ${clean(result.text, 12000)}`
+          ].join("\n"), `${label}-json-repair`, { repairMalformedJson: false });
+          return {
+            ...repaired,
+            result: {
+              ...repaired.result,
+              toolCalls: [...(result.toolCalls || []), ...(repaired.result?.toolCalls || [])],
+              jsonRepair: { attempted: true, parseError: clean(parseError.message, 500) }
+            }
+          };
+        }
+      } catch (error) {
+        if (attempt !== 0 || !isTransientAcpConnectionError(error)) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      } finally {
+        await this.acpClient.deleteSession(sessionId).catch(() => false);
+      }
     }
+    throw new Error(`Hermes ${label} 未完成`);
   }
 
   async generateLocal(candidate, onProgress) {
@@ -164,6 +234,8 @@ class HermesSkillLearningManager {
     const generated = await this.hermesPrompt([
       "Create a reusable Hermes SKILL.md contract for the following user goal.",
       `Goal: ${candidate.request}`,
+      `The contract name must be exactly \"${safeSkillName(candidate.name)}\".`,
+      "Do not inspect existing skills, call tools, run commands, or write files. The host application alone will validate the JSON and write SKILL.md.",
       "This may only orchestrate capabilities that already exist. Do not claim unavailable APIs, applications, credentials, media engines, or network access.",
       "Return JSON only with: name, description, triggers (array), instructions (array of concrete steps), testPrompt, expectedSignals (array).",
       "The name must use lowercase letters, numbers, and hyphens. Include at least three instructions and two expectedSignals."
@@ -216,7 +288,12 @@ class HermesSkillLearningManager {
       const runtime = await this.hermesPrompt([
         `Load and apply the installed Hermes skill named "${skill.id}".`,
         `Verification goal: ${candidate.request}`,
-        "Do not modify user files. Produce a concrete sample result using the skill workflow.",
+        "Do not modify user files.",
+        // 验收器必须只读：不得临时安装 openpyxl/pandas/LibreOffice 等依赖，
+        // 否则会把"环境缺依赖"伪装成"技能不可用"，且静默改变客户环境（task-042）。
+        "Do not install or download any package, tool, or dependency. Use only what is already available.",
+        "If required dependencies are missing, report the missing dependency as the result rather than installing it.",
+        "Produce a concrete sample result using the skill workflow.",
         "Return JSON only: {\"skill\":\"skill-id\",\"applied\":true,\"result\":\"non-empty concrete result\",\"evidence\":[\"rule or step actually applied\"]}."
       ].join("\n"), "runtime-test");
       const value = runtime.json;
@@ -293,8 +370,7 @@ class HermesSkillLearningManager {
         agentInvocation,
         resultVerification: { verified: verifiedResult, status: verifiedResult ? "passed" : "failed" }
       },
-      installEvidence: installed.installEvidence || { manifest: skill.path },
-      skills: this.skillService.list()
+      installEvidence: installed.installEvidence || { manifest: skill.path }
     };
     if (success) assertReadyEvidence(result);
     return result;

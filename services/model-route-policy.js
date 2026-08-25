@@ -32,6 +32,15 @@ function isConfiguredProvider(providerId = "", provider = {}) {
   return Boolean(clean(normalized.model));
 }
 
+function isVerifiedProvider(providerId = "", provider = {}) {
+  if (!isConfiguredProvider(providerId, provider) || provider.enabled !== true) return false;
+  const normalized = normalizeProvider(providerId, provider || {});
+  const verifiedBaseURL = clean(provider.verifiedBaseURL).replace(/\/+$/, "");
+  return Boolean(clean(provider.verifiedAt))
+    && clean(provider.verifiedModel) === normalized.model
+    && verifiedBaseURL === normalized.baseURL.replace(/\/+$/, "");
+}
+
 function candidateProviders(settings = {}) {
   const providers = settings.providers || {};
   const preferred = clean(settings.defaultProvider || "deepseek");
@@ -65,7 +74,7 @@ function selectModelRoute(settings = {}, constraints = {}) {
   }
 
   const currentLocal = isLocalProvider(current.id, current.provider);
-  if ((!disallowLocal || !currentLocal) && isConfiguredProvider(current.id, current.provider)) {
+  if ((!disallowLocal || !currentLocal) && isVerifiedProvider(current.id, current.provider)) {
     const normalized = normalizeProvider(current.id, current.provider);
     return Object.freeze({
       providerId: current.id,
@@ -77,7 +86,7 @@ function selectModelRoute(settings = {}, constraints = {}) {
     });
   }
 
-  const remote = entries.find((item) => !isLocalProvider(item.id, item.provider) && isConfiguredProvider(item.id, item.provider));
+  const remote = entries.find((item) => !isLocalProvider(item.id, item.provider) && isVerifiedProvider(item.id, item.provider));
   if (remote) {
     const normalized = normalizeProvider(remote.id, remote.provider);
     return Object.freeze({
@@ -95,11 +104,11 @@ function selectModelRoute(settings = {}, constraints = {}) {
       preferred,
       disallowLocal,
       allowLocalFallback,
-      configuredProviders: entries.filter((item) => isConfiguredProvider(item.id, item.provider)).map((item) => item.id)
+      configuredProviders: entries.filter((item) => isVerifiedProvider(item.id, item.provider)).map((item) => item.id)
     });
   }
 
-  if (isConfiguredProvider(current.id, current.provider)) {
+  if (isVerifiedProvider(current.id, current.provider)) {
     const normalized = normalizeProvider(current.id, current.provider);
     return Object.freeze({
       providerId: current.id,
@@ -129,6 +138,7 @@ module.exports = {
   isLoopbackUrl,
   isLocalProvider,
   isConfiguredProvider,
+  isVerifiedProvider,
   candidateProviders,
   selectModelRoute,
   settingsForModelRoute

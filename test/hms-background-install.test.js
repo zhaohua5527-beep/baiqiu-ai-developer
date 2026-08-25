@@ -17,10 +17,43 @@ test("closing HMS initialization window hides progress UI without cancelling ins
   assert.match(mainJs, /hmsInitializationWindow\.hide\(\);/);
 });
 
-test("normal app startup does not wait for HMS installation before opening main window", () => {
+test("normal app startup opens the main window before starting HMS", () => {
   assert.doesNotMatch(mainJs, /app\.whenReady\(\)\.then\(async \(\) => \{\s*await prepareBundledHmsRuntime\(\);/);
 
   const startupBlock = mainJs.slice(mainJs.indexOf("app.whenReady().then(async () => {"));
-  assert(startupBlock.includes("const hmsRuntimePreparation = prepareBundledHmsRuntime();"));
-  assert(startupBlock.indexOf("createWindow();") < startupBlock.indexOf("hmsRuntimePreparation.catch"));
+  assert(startupBlock.includes("createWindow();"));
+  assert(startupBlock.includes("void ensureHmsRuntimePreparation().catch"));
+  assert(startupBlock.indexOf("createWindow();") < startupBlock.indexOf("void ensureHmsRuntimePreparation()"));
+});
+
+test("installed runtime starts the execution ACP lane during startup", () => {
+  const preparationBlock = mainJs.slice(
+    mainJs.indexOf("async function prepareBundledHmsRuntime"),
+    mainJs.indexOf("function trayIconSourcePath")
+  );
+  assert.match(preparationBlock, /ensureHermesClient\(\)\.start\(\)/);
+  assert.match(preparationBlock, /ensureHermesForegroundClient\(\)\.start\(\)/);
+  assert.doesNotMatch(preparationBlock, /prewarmForegroundSession\(\)/);
+  assert.doesNotMatch(preparationBlock, /prewarmVoiceStt\(\)/);
+  assert.doesNotMatch(preparationBlock, /await ensureHermesClient\(\)\.start\(\)/);
+  assert.doesNotMatch(preparationBlock, /await ensureHermesForegroundClient\(\)\.start\(\)/);
+});
+
+test("failed HMS preparation is not cached as a permanent startup failure", () => {
+  const preparationBlock = mainJs.slice(
+    mainJs.indexOf("function ensureHmsRuntimePreparation"),
+    mainJs.indexOf("function trayIconSourcePath")
+  );
+  assert.match(preparationBlock, /if \(!result\?\.connected\) hmsRuntimePreparationPromise = null/);
+  assert.match(preparationBlock, /hmsRuntimePreparationPromise = null;\s*throw error/);
+});
+
+test("HMS uses the active member entitlement instead of a second confirmation prompt", () => {
+  const permissionBlock = mainJs.slice(
+    mainJs.indexOf("async function requestHermesPermission"),
+    mainJs.indexOf("function ensureHermesClient")
+  );
+  assert.match(permissionBlock, /memberToolEntitlement\(\)/);
+  assert.match(permissionBlock, /hermesPermissionSelection\(params\.options \|\| \[\], "allow_once"\)/);
+  assert.doesNotMatch(permissionBlock, /tool:confirmation-request/);
 });

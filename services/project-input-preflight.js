@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { declaredOutputPaths } = require("./project-delivery-contract");
 
 const TEXT_EXTENSIONS = new Set([".txt", ".md", ".json", ".csv", ".html", ".htm"]);
 
@@ -39,7 +40,7 @@ function requiresProjectInput(goal = "", attachments = []) {
   const action = "(?:分析|读取|打开|处理|拆分|汇总|检查|识别|导入|提取|整理)";
   const referencedInput = new RegExp(`${reference}.{0,12}${inputType}|${action}.{0,12}(?:${reference}.{0,6})?${inputType}`, "i");
   const fileNameOrPath = /(?:[a-z]:[\\/]|\\\\|\.{1,2}[\\/]|[^\s<>:"|?*]+\.(?:txt|md|json|csv|xlsx?|pdf|docx?|pptx?|zip|rar|7z|png|jpe?g|webp))(?:\s|$)/i;
-  return referencedInput.test(text) || fileNameOrPath.test(text);
+  return referencedInput.test(text) || (fileNameOrPath.test(text) && declaredOutputPaths(text).length === 0);
 }
 
 function readableFile(file) {
@@ -110,7 +111,7 @@ function preflightProjectInputs({ goal = "", attachments = [], workspace = "" } 
       ok: false,
       required: true,
       code: "PROJECT_INPUT_NOT_FOUND",
-      message: "任务未找到需要分析的文件。请重新上传文件或先选择文件后再执行。员工任务尚未启动。",
+      message: "任务未找到需要分析的文件。请重新上传文件或先选择文件后再执行。内部任务尚未启动。",
       inputs: [],
       checked: []
     };
@@ -125,7 +126,7 @@ function preflightProjectInputs({ goal = "", attachments = [], workspace = "" } 
       ok: false,
       required: true,
       code: failed.some((item) => item.code === "PROJECT_INPUT_UNREADABLE") ? "PROJECT_INPUT_UNREADABLE" : "PROJECT_INPUT_NOT_FOUND",
-      message: `任务未开始。输入文件不可用：${names}。请重新上传或修复文件后再执行。员工任务尚未启动。`,
+      message: `任务未开始。输入文件不可用：${names}。请重新上传或修复文件后再执行。内部任务尚未启动。`,
       inputs: [],
       checked: results
     };
@@ -165,8 +166,8 @@ function buildAssignmentContracts(assignments = [], { inputManifest = {}, task =
       deliveryMode,
       expectedFileCount: deliveryMode === "file" ? Math.max(1, Number(assignment.expectedFileCount || 1)) : 0,
       deliverable: clean(assignment.deliverable || (deliveryMode === "file"
-        ? "生成用户明确要求的文件，并在员工会话返回文件与结果"
-        : "直接在员工会话返回完整结果，不创建文件"), 1000),
+        ? "生成用户明确要求的文件，并在内部执行会话返回文件与结果"
+        : "直接在内部执行会话返回完整结果，不创建文件"), 1000),
       acceptance: acceptance.map((item) => clean(item, 500)).filter(Boolean).slice(0, 12),
       maxToolCalls: 8
     };

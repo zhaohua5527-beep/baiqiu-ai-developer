@@ -49,6 +49,7 @@ class UpdateState {
       backupPath: typeof data.backupPath === "string" ? data.backupPath : "",
       appPath: typeof data.appPath === "string" ? data.appPath : "",
       tempPath: typeof data.tempPath === "string" ? data.tempPath : "",
+      packageType: typeof data.packageType === "string" ? data.packageType : "",
       error: typeof data.error === "string" ? data.error : ""
     };
   }

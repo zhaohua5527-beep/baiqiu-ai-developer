@@ -35,6 +35,21 @@ function toolSummary(tool = {}) {
 }
 
 function permissionsFor(session = {}) {
+  if (session.projectId && session.type !== "Agent") {
+    return [
+      "conversation",
+      "read_project_context",
+      "read_task_repository",
+      "capability_query",
+      "status_query",
+      "submit_to_hermes",
+      "use_tools",
+      "use_skills",
+      "write_project_files",
+      "verify_results",
+      "delegate_ephemeral_tasks"
+    ];
+  }
   if (session.type === "CEO") {
     return ["delegate_ephemeral_tasks", "read_task_repository", "report_hermes_results"];
   }
@@ -68,7 +83,7 @@ function delegationSummary(item = {}, index = 0) {
     role_session_id: cleanText(item.roleSessionId, 200),
     assignment_id: cleanText(item.assignmentId, 200),
     role: "Hermes Worker 绑定",
-    capability: "执行已绑定的项目员工任务",
+    capability: "执行已绑定的内部项目任务",
     status: cleanText(item.status || "completed", 40),
     agent_class: "HERMES_WORKER_BINDING",
     runtime: "hermes",
@@ -104,10 +119,14 @@ class AgentCapabilityContext {
     const resolvedProjectId = cleanText(projectId || current.projectId, 200);
     const project = projects.find((item) => item.id === resolvedProjectId) || null;
     const projectSessions = sessions.filter((item) => resolvedProjectId && item.projectId === resolvedProjectId);
+    const projectOwner = resolvedProjectId && current.projectId === resolvedProjectId && current.type !== "Agent"
+      ? current
+      : null;
     const ceo = current.type === "CEO"
       ? current
       : projectSessions.find((item) => item.type === "CEO" && (!current.parentSessionId || item.id === current.parentSessionId))
         || projectSessions.find((item) => item.type === "CEO")
+        || projectOwner
         || null;
     const projectRoles = resolvedProjectId
       ? projectSessions.filter((item) => item.type === "Agent").map(projectRoleSummary)
@@ -143,13 +162,16 @@ class AgentCapabilityContext {
       project: {
         id: resolvedProjectId,
         name: cleanText(project?.name || project?.title || "", 200),
+        description: cleanText(project?.description || "", 800),
+        workspacePath: cleanText(project?.workspacePath || project?.rootPath || project?.path || "", 600),
+        workspaceMode: cleanText(project?.workspaceMode || "managed", 40),
         available: Boolean(project)
       },
       ceo: {
         agentId: cleanText(ceo?.agentId || ceo?.id, 200),
         conversationId: cleanText(ceo?.conversationId || ceo?.id, 200),
         name: cleanText(ceo?.name || ceo?.title || "", 160),
-        role: cleanText(ceo?.role || "项目负责人", 160),
+        role: cleanText(ceo?.role || "黑球", 160),
         status: normalizeAgentRuntimeState(ceo?.status, AGENT_RUNTIME_STATES.CREATED)
       },
       projectRoles,

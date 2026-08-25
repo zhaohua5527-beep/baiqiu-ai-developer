@@ -39,14 +39,33 @@ function createTools() {
     createRuntimeTool({
       id: "write_xlsx",
       name: "生成 Excel 表格",
-      description: "在允许范围内生成 xlsx 文件。",
+      description: "在允许范围内生成 xlsx 文件。优先传 sheets；单工作表也可只传顶层 rows。",
       parameters: {
         type: "object",
         required: ["path"],
         properties: {
           path: { type: "string" },
-          sheets: { type: "array" },
-          rows: { type: "array" }
+          sheets: {
+            type: "array",
+            description: "工作表列表。每项必须包含 name 和二维 rows。",
+            items: {
+              type: "object",
+              required: ["name", "rows"],
+              properties: {
+                name: { type: "string", description: "工作表名称，最多 31 个字符。" },
+                rows: {
+                  type: "array",
+                  description: "二维单元格数组。",
+                  items: { type: "array", items: {} }
+                }
+              }
+            }
+          },
+          rows: {
+            type: "array",
+            description: "单工作表兼容写法；未传 sheets 时写入默认 Sheet1。",
+            items: { type: "array", items: {} }
+          }
         }
       },
       permission: { level: "filesystem.write", scope: "app.desktop.saveLocation" },

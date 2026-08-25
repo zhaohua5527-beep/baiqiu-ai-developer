@@ -20,9 +20,14 @@ const MODEL_CAPABILITIES = {
   "deepseek-chat": { tools: true, vision: false, reasoning: true, contextWindow: 64000 },
   "deepseek-reasoner": { tools: false, vision: false, reasoning: true, contextWindow: 64000 },
   // OpenAI
-  "gpt-4.1": { tools: true, vision: true, reasoning: true, contextWindow: 128000 },
+  "gpt-4.1": { tools: true, vision: true, reasoning: false, contextWindow: 128000 },
   "gpt-4.1-mini": { tools: true, vision: true, reasoning: false, contextWindow: 128000 },
   "gpt-4o": { tools: true, vision: true, reasoning: false, contextWindow: 128000 },
+  "gpt-5.6": { tools: true, vision: true, reasoning: true, imageGeneration: false, contextWindow: 128000 },
+  "gpt-5.6sol": { tools: true, vision: true, reasoning: true, imageGeneration: false, contextWindow: 128000 },
+  "gpt-5.6-sol": { tools: true, vision: true, reasoning: true, imageGeneration: false, contextWindow: 128000 },
+  "gpt-5.6-terra": { tools: true, vision: true, reasoning: true, imageGeneration: false, contextWindow: 128000 },
+  "gpt-5.6-luna": { tools: true, vision: true, reasoning: true, imageGeneration: false, contextWindow: 128000 },
   // Claude
   "claude-3-5-sonnet-latest": { tools: true, vision: true, reasoning: true, contextWindow: 200000 },
   "claude-3-5-haiku-latest": { tools: true, vision: true, reasoning: false, contextWindow: 200000 },

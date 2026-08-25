@@ -36,7 +36,9 @@ class ProductExecutionServices {
       decisionId: understanding.decisionId || taskBrain.decision_id || "",
       taskId: taskBrain.task_id || "",
       assignmentId: taskBrain.assignment_id || "",
-      agentId: input.session?.id || ""
+      agentId: input.session?.id || "",
+      knowledgeContext: input.knowledgeContext || "",
+      knowledgeReferences: Array.isArray(input.knowledgeReferences) ? input.knowledgeReferences : []
     };
   }
 
@@ -46,7 +48,12 @@ class ProductExecutionServices {
   }
 
   canUseLocalRouting(input) {
-    return this.canExecuteTask(input) && !input.skipLocalToolRouting;
+    // File-analysis context must not suppress deterministic local commands.
+    // Those commands can decide for themselves whether they handle the request.
+    // skipLocalToolRouting 不抑制本地命令——本地策略自己判断是否处理，
+    // 且 executeSkillShortcut 等会使用 originalText（用户原话）而非替换后的
+    // effectiveText（file-analysis message），避免误触发。
+    return this.canExecuteTask(input);
   }
 
   canUseHermes(input) {
@@ -57,22 +64,6 @@ class ProductExecutionServices {
     return input.understanding?.context?.domainIntent
       || input.taskBrain?.intent
       || "general.chat";
-  }
-
-  async executeImageGuard(input) {
-    const { session, attachments, settings, personaPrefix } = input;
-    const { appendMessage, updateSession, recordAgentState, imageUnsupportedReply } = this.deps;
-    const finalText = this.finalText(personaPrefix, imageUnsupportedReply(settings, attachments));
-    appendMessage(session.id, { role: "assistant", text: finalText, raw: { localImageUnsupported: true, productExecutionRouter: true } });
-    updateSession(session.id, { status: "done" });
-    recordAgentState(session.id, "completed", { intent: "image.unsupported", logicalTool: "local_guard" });
-    this.sendSessionChanged();
-    return {
-      success: true,
-      status: "success",
-      message: finalText,
-      clientResponse: { ok: true, sessionId: session.id, imageUnsupported: true, productExecutionRouter: true }
-    };
   }
 
   async executeDirectCommand(input) {
@@ -97,12 +88,12 @@ class ProductExecutionServices {
   }
 
   async executeSkillShortcut(input) {
-    const { session, effectiveText, personaPrefix } = input;
+    const { session, originalText, effectiveText, personaPrefix } = input;
     const { appendMessage, updateSession, recordAgentState, tryHandleSkillShortcut } = this.deps;
     const intent = this.intentFor(input);
     recordAgentState(session.id, "tool_selected", { intent, logicalTool: "skill_shortcut", currentAgent: "tool_selector", goal: input.understanding?.goal || effectiveText });
     recordAgentState(session.id, "executing", { intent, logicalTool: "skill_shortcut", currentAgent: "executor", goal: input.understanding?.goal || effectiveText });
-    const skillShortcutText = await tryHandleSkillShortcut(effectiveText, { ...this.executionContext(input), sessionId: session.id });
+    const skillShortcutText = await tryHandleSkillShortcut(originalText || effectiveText, { ...this.executionContext(input), sessionId: session.id });
     if (!skillShortcutText) return { handled: false };
     const finalText = this.finalText(personaPrefix, skillShortcutText);
     appendMessage(session.id, { role: "assistant", text: finalText, raw: { skillShortcut: true, productExecutionRouter: true } });
@@ -139,7 +130,7 @@ class ProductExecutionServices {
 
   async executeHermes(input) {
     const { session, payload, effectiveText, attachments, settings, personaPrefix, controller, traceId, taskBrain } = input;
-    const { loadDb, recordAgentState, sendWithHermes } = this.deps;
+    const { appendMessage, updateSession, loadDb, recordAgentState, sendWithHermes } = this.deps;
     const modelSession = loadDb().sessions.find((item) => item.id === session.id) || session;
     const intent = this.intentFor(input);
     recordAgentState(session.id, "intent_detected", {
@@ -156,7 +147,10 @@ class ProductExecutionServices {
     });
     const result = await sendWithHermes(
       modelSession,
-      { ...payload, text: taskBrain?.prompt || effectiveText },
+      // 必须传用户真实消息，不能用 taskBrain.prompt 顶替——否则 HMS 收到的是
+      // "Task Brain 固定任务上下文"而非用户原话，web_search 等工具会用污染文本
+      // 作为 query（task-015/030 根因之一）。
+      { ...payload, text: effectiveText || payload?.originalText || payload?.text || "" },
       attachments,
       settings,
       personaPrefix,
@@ -167,45 +161,25 @@ class ProductExecutionServices {
       intent,
       logicalTool: "hermes_agent"
     });
+    // 写回会话：executeDirectCommand/executeSkillShortcut 都 appendMessage，
+    // Hermes 策略此前漏了——任务路径的 result 只 complete TaskBrain 不写回，
+    // 并发场景 A 的"结果被吃掉"（用户界面看不到）正是这条漏写（task-041 rc.8）。
+    const replyText = result?.text || (ok ? "任务已完成。" : "任务执行未完成。");
+    if (ok) {
+      appendMessage(session.id, { role: "assistant", text: replyText, raw: { productExecutionRouter: true, runtime: "hermes", hermes: true, raw: result } });
+      updateSession(session.id, { status: "done" });
+    } else {
+      appendMessage(session.id, { role: "assistant", text: replyText, raw: { productExecutionRouter: true, runtime: "hermes", error: true, raw: result } });
+      updateSession(session.id, { status: "failed" });
+    }
+    this.sendSessionChanged?.();
     return {
       success: ok,
       status: ok ? "success" : (result?.status === "cancelled" ? "cancelled" : "failed"),
-      message: result?.text || "",
+      message: replyText,
       toolResults: result?.toolCalls || [],
       raw: result,
       clientResponse: { ok, sessionId: session.id, ...result, productExecutionRouter: true, runtime: "hermes" }
-    };
-  }
-
-  async executeLlmTool(input) {
-    const { session, originalText, effectiveText, attachments, settings, personaPrefix, controller, traceId, taskBrain } = input;
-    const { appendMessage, updateSession, recordAgentState, directProviderChat, applyBaiqiuActions, onPersonaPrefix } = this.deps;
-    const intent = this.intentFor(input);
-    recordAgentState(session.id, "intent_detected", { intent, logicalTool: "llm_agent_loop", currentAgent: "supervisor", goal: input.understanding?.goal || effectiveText });
-    recordAgentState(session.id, "executing", { intent, logicalTool: "llm_agent_loop", currentAgent: "executor", goal: input.understanding?.goal || effectiveText });
-    const direct = await directProviderChat(settings, taskBrain?.prompt || effectiveText, attachments, session.id, {
-      ...this.executionContext(input),
-      signal: controller.signal,
-      traceId,
-      originalUserMessage: originalText,
-      agentIntent: intent
-    });
-    recordAgentState(session.id, "validating", { intent, logicalTool: "llm_agent_loop", currentAgent: "verifier" });
-    const actioned = await applyBaiqiuActions(direct.text, { ...this.executionContext(input), originalUserMessage: originalText, traceId, sessionId: session.id });
-    const toolResults = mergeToolResults(direct.raw?.baiqiuActions || [], actioned.results || []);
-    const finalText = this.finalText(personaPrefix, actioned.text);
-    if (personaPrefix) onPersonaPrefix?.();
-    appendMessage(session.id, { role: "assistant", text: finalText, raw: { ...direct.raw, baiqiuActions: toolResults, productExecutionRouter: true } });
-    updateSession(session.id, { status: "done" });
-    recordAgentState(session.id, "completed", { intent, logicalTool: "llm_agent_loop" });
-    this.sendSessionChanged();
-    return {
-      success: true,
-      status: "success",
-      message: finalText,
-      toolResults,
-      raw: direct.raw,
-      clientResponse: { ok: true, direct: true, sessionId: session.id, productExecutionRouter: true }
     };
   }
 }

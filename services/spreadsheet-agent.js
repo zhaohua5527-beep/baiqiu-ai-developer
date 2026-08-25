@@ -147,7 +147,7 @@ function summarizeSheet(name, rawRows) {
 
 function analyzeWorkbook(XLSX, buffer, { name = "表格文件", maxSheets = 12 } = {}) {
   if (!XLSX) throw new Error("缺少 xlsx 解析能力");
-  const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
+  const { workbook, encoding } = readSpreadsheetWorkbook(XLSX, buffer, { name });
   const sheets = workbook.SheetNames.slice(0, maxSheets).map((sheetName) => {
     const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, blankrows: false, raw: true });
     return summarizeSheet(sheetName, rows);
@@ -158,6 +158,7 @@ function analyzeWorkbook(XLSX, buffer, { name = "表格文件", maxSheets = 12 }
     analyzedSheetCount: sheets.length,
     totalRows: sheets.reduce((sum, sheet) => sum + Number(sheet.rowCount || 0), 0),
     totalColumns: sheets.reduce((sum, sheet) => sum + Number(sheet.columnCount || 0), 0),
+    sourceEncoding: encoding,
     sheets
   };
 }
@@ -207,3 +208,4 @@ module.exports = {
   analyzeWorkbook,
   formatWorkbookAnalysis
 };
+const { readSpreadsheetWorkbook } = require("./spreadsheet-attachment-reader");

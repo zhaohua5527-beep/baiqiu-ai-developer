@@ -6,7 +6,46 @@ const { randomUUID } = require("node:crypto");
 const { createConsciousBackup, readConsciousBackup } = require("./conscious-backup");
 const { MemoryDistiller } = require("./memory-distiller");
 
+const COGNITIVE_SNAPSHOT_FIELDS = new Set([
+  "background",
+  "coreDecisions",
+  "decisions",
+  "projectConstraints",
+  "constraints",
+  "explicitRequirements",
+  "userPreferences",
+  "user_preferences",
+  "chatHistorySummary",
+  "conversation_summary",
+  "distillation",
+  "nextPlan",
+  "next_actions",
+  "sessionMemory",
+  "globalPersona",
+  "memoryLayer",
+  "contextReplacement"
+]);
+
+function executionCore(core = {}) {
+  if (!core || typeof core !== "object") return {};
+  const allowed = ["goal", "current_stage", "completed_tasks", "pending_tasks", "important_files", "agent_state"];
+  return Object.fromEntries(allowed.filter((key) => core[key] !== undefined).map((key) => [key, clone(core[key])]));
+}
+
+function stripCognitiveSnapshotFields(snapshot, { defaultResponsibility = "" } = {}) {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const clean = {};
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (COGNITIVE_SNAPSHOT_FIELDS.has(key)) continue;
+    clean[key] = key === "core" ? executionCore(value) : clone(value);
+  }
+  clean.schemaVersion = Math.max(3, Number(clean.schemaVersion || 0));
+  clean.responsibility = clean.responsibility || defaultResponsibility || "execution_state";
+  return clean;
+}
+
 function clone(value) {
+  if (value === undefined) return undefined;
   return JSON.parse(JSON.stringify(value));
 }
 
@@ -41,18 +80,19 @@ function sanitizeSnapshotInput(input = {}) {
 
 function compactConsciousSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return null;
+  const safeSnapshot = stripCognitiveSnapshotFields(snapshot);
   const fields = [
     "schemaVersion", "type", "id", "version", "scope", "sourceId", "projectId", "sessionId",
-    "title", "projectName", "projectGoal", "currentTaskGoal", "currentProgress", "coreDecisions",
-    "completedTasks", "pendingTasks", "projectConstraints", "explicitRequirements", "fileChanges",
-    "nextPlan", "sourceStats", "agentStates", "agentRuntimeState", "userPreferences", "core",
-    "snapshot_id", "user_goal", "current_objective", "current_stage", "decisions", "constraints",
-    "completed_tasks", "pending_tasks", "next_actions", "important_files", "timestamp", "status",
-    "createdAt", "updatedAt", "important", "archived"
+    "title", "projectName", "projectGoal", "currentTaskGoal", "currentProgress",
+    "completedTasks", "pendingTasks", "fileChanges", "sourceStats", "agentStates", "agentRuntimeState", "core",
+    "snapshot_id", "user_goal", "current_objective", "current_stage", "completed_tasks", "pending_tasks",
+    "important_files", "taskBrainState", "task_brain_state", "agent_state", "timestamp", "status",
+    "createdAt", "updatedAt", "important", "archived", "responsibility",
+    "extractionMode", "retentionClass", "manualExtractionAt"
   ];
   const compact = {};
   for (const field of fields) {
-    if (snapshot[field] !== undefined) compact[field] = clone(snapshot[field]);
+    if (safeSnapshot[field] !== undefined) compact[field] = clone(safeSnapshot[field]);
   }
   return compact;
 }
@@ -94,14 +134,10 @@ function collectKeywords(snapshot) {
     snapshot.title,
     snapshot.projectGoal,
     snapshot.currentTaskGoal,
-    snapshot.background,
     ...(snapshot.completedTasks || []),
     ...(snapshot.pendingTasks || []),
-    ...(snapshot.projectConstraints || []),
-    ...(snapshot.explicitRequirements || []),
-    ...(snapshot.coreDecisions || []).flatMap((item) => [item.decision, item.reason]),
     ...(snapshot.agentStates || []).flatMap((item) => [item.name, item.role, item.task]),
-    ...(snapshot.chatHistorySummary || []).map((item) => item.text)
+    ...(snapshot.fileChanges || []).flatMap((item) => [item.name, item.path])
   ].join(" ").toLowerCase();
   return unique(source.split(/[^\p{L}\p{N}_-]+/u).filter((item) => item.length >= 2), 300);
 }
@@ -114,35 +150,22 @@ function snapshotStatus(snapshot) {
 
 function applyWorkStateContract(snapshot) {
   const core = snapshot.core || {};
-  const decisions = core.decisions?.length ? core.decisions : snapshot.coreDecisions || [];
   const completed = snapshot.completedTasks?.length ? snapshot.completedTasks : core.completed_tasks || [];
   const pending = snapshot.pendingTasks?.length ? snapshot.pendingTasks : core.pending_tasks || [];
-  const constraints = snapshot.projectConstraints?.length ? snapshot.projectConstraints : core.constraints || [];
   const files = core.important_files?.length ? core.important_files : snapshot.fileChanges || [];
   const agents = snapshot.agentRuntimeState?.length ? snapshot.agentRuntimeState : core.agent_state?.length ? core.agent_state : snapshot.agentStates || [];
-  const preferences = core.user_preferences || snapshot.userPreferences || snapshot.globalPersona || {};
-  const conversationSummary = cleanText(
-    snapshot.distillation?.compactContext
-      || (snapshot.chatHistorySummary || []).map((item) => item.text || item).join(" "),
-    12000
-  );
   return {
     ...snapshot,
     snapshot_id: snapshot.id,
     user_goal: cleanText(snapshot.projectGoal || core.goal || snapshot.currentTaskGoal || snapshot.title, 2000),
     current_objective: cleanText(snapshot.currentTaskGoal || core.goal || snapshot.projectGoal || snapshot.title, 2000),
     current_stage: cleanText(core.current_stage || snapshot.currentProgress?.summary || "待继续", 500),
-    decisions: clone(decisions),
-    constraints: clone(constraints),
     completed_tasks: clone(completed),
     pending_tasks: clone(pending),
-    next_actions: clone((snapshot.nextPlan?.length ? snapshot.nextPlan : pending).slice(0, 30)),
     important_files: clone(files),
     project_state: sanitizeWorkspaceProject(snapshot.workspaceState?.project || {}),
     task_brain_state: clone(snapshot.taskBrainState || []),
     agent_state: clone(agents),
-    user_preferences: clone(preferences),
-    conversation_summary: conversationSummary,
     timestamp: snapshot.updatedAt || snapshot.createdAt
   };
 }
@@ -161,6 +184,7 @@ class ConsciousCenter {
     this.snapshotsRoot = path.join(root, "snapshots");
     this.indexFile = path.join(root, "index.json");
     this.ensureStore();
+    this.migrateStoredSnapshots();
   }
 
   now() {
@@ -169,12 +193,70 @@ class ConsciousCenter {
 
   ensureStore() {
     fs.mkdirSync(this.snapshotsRoot, { recursive: true });
-    if (!fs.existsSync(this.indexFile)) writeJsonAtomic(this.indexFile, { schemaVersion: 1, items: [], updatedAt: this.now() });
+    if (!fs.existsSync(this.indexFile)) writeJsonAtomic(this.indexFile, {
+      schemaVersion: 2,
+      items: [],
+      lastManualExtractionAt: null,
+      updatedAt: this.now()
+    });
+  }
+
+  migrateStoredSnapshots() {
+    const index = this.readIndex();
+    const indexById = new Map(index.items.map((item) => [item.id, item]));
+    let changed = false;
+    for (const file of fs.readdirSync(this.snapshotsRoot).filter((name) => name.endsWith(".json"))) {
+      const filePath = path.join(this.snapshotsRoot, file);
+      const stored = readJson(filePath, null);
+      if (stored?.type !== "conscious-snapshot") continue;
+      const legacyManual = stored.auto === false;
+      const migrated = stripCognitiveSnapshotFields({
+        ...stored,
+        extractionMode: stored.extractionMode || (legacyManual ? "manual" : "execution"),
+        responsibility: legacyManual ? "manual_consciousness" : (stored.responsibility || "execution_state"),
+        retentionClass: stored.retentionClass || (legacyManual ? (stored.scope === "project" ? "project" : "short_term") : "execution_state"),
+        manualExtractionAt: legacyManual ? (stored.manualExtractionAt || stored.updatedAt || stored.createdAt || null) : null
+      });
+      if (JSON.stringify(stored) !== JSON.stringify(migrated)) {
+        writeJsonAtomic(filePath, migrated);
+        changed = true;
+      }
+      const item = indexById.get(migrated.id);
+      if (!item) continue;
+      const keywords = collectKeywords(migrated);
+      const nextActions = (migrated.pending_tasks || migrated.pendingTasks || []).slice(0, 3);
+      const searchText = [migrated.title, migrated.projectName, migrated.projectGoal, migrated.currentTaskGoal, ...keywords]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      if (JSON.stringify(item.keywords || []) !== JSON.stringify(keywords)
+        || JSON.stringify(item.nextActions || []) !== JSON.stringify(nextActions)
+        || item.searchText !== searchText
+        || item.extractionMode !== migrated.extractionMode
+        || item.responsibility !== migrated.responsibility
+        || item.retentionClass !== migrated.retentionClass) {
+        item.keywords = keywords;
+        item.nextActions = nextActions;
+        item.searchText = searchText;
+        item.extractionMode = migrated.extractionMode;
+        item.responsibility = migrated.responsibility;
+        item.retentionClass = migrated.retentionClass;
+        item.manualExtractionAt = migrated.manualExtractionAt || null;
+        changed = true;
+      }
+      if (legacyManual && migrated.manualExtractionAt && (!index.lastManualExtractionAt || String(migrated.manualExtractionAt) > String(index.lastManualExtractionAt))) {
+        index.lastManualExtractionAt = migrated.manualExtractionAt;
+        changed = true;
+      }
+    }
+    if (changed) this.writeIndex(index);
   }
 
   readIndex() {
-    const value = readJson(this.indexFile, { schemaVersion: 1, items: [], updatedAt: null });
+    const value = readJson(this.indexFile, { schemaVersion: 2, items: [], lastManualExtractionAt: null, updatedAt: null });
     if (!Array.isArray(value.items)) value.items = [];
+    value.schemaVersion = Math.max(2, Number(value.schemaVersion || 0));
+    if (!Object.hasOwn(value, "lastManualExtractionAt")) value.lastManualExtractionAt = null;
     return value;
   }
 
@@ -189,7 +271,7 @@ class ConsciousCenter {
 
   get(id) {
     const value = readJson(this.snapshotFile(id), null);
-    return value?.type === "conscious-snapshot" ? value : null;
+    return value?.type === "conscious-snapshot" ? stripCognitiveSnapshotFields(value) : null;
   }
 
   remove(id) {
@@ -206,10 +288,11 @@ class ConsciousCenter {
     return clone(snapshot || item);
   }
 
-  list({ query = "", includeArchived = true, limit = 200 } = {}) {
+  list({ query = "", includeArchived = true, includeExecutionState = false, limit = 200 } = {}) {
     const needle = cleanText(query, 200).toLowerCase();
     return this.readIndex().items
       .filter((item) => includeArchived || !item.archived)
+      .filter((item) => includeExecutionState || item.responsibility !== "execution_state")
       .filter((item) => !needle || item.searchText.includes(needle) || (item.keywords || []).some((word) => word.includes(needle)))
       .sort((a, b) => Number(Boolean(b.important)) - Number(Boolean(a.important)) || String(b.updatedAt).localeCompare(String(a.updatedAt)))
       .slice(0, Math.max(1, Math.min(500, Number(limit) || 200)))
@@ -217,7 +300,8 @@ class ConsciousCenter {
   }
 
   latestFor(scope, sourceId) {
-    return this.list({ includeArchived: true, limit: 500 }).find((item) => item.scope === scope && item.sourceId === sourceId) || null;
+    return this.list({ includeArchived: true, includeExecutionState: true, limit: 500 })
+      .find((item) => item.scope === scope && item.sourceId === sourceId) || null;
   }
 
   hasSnapshot(scope, sourceId) {
@@ -235,11 +319,15 @@ class ConsciousCenter {
       title: legacy.projectName || "项目意识",
       createdAt: legacy.createdAt || this.now(),
       updatedAt: legacy.createdAt || this.now(),
+      auto: false,
+      extractionMode: "manual",
+      responsibility: "manual_consciousness",
+      retentionClass: "project",
       legacyImported: true
     });
   }
 
-  buildProjectSnapshot({ project, sessions, messagesBySession, tasks, queue, settings, memoryState, agentRuntimeState = [], auto = false, trigger = "manual" }) {
+  buildProjectSnapshot({ project, sessions, messagesBySession, tasks, queue, settings, memoryState, agentRuntimeState = [], auto = false, trigger = "manual", extractionMode = "" }) {
     const safeProject = sanitizeWorkspaceProject(project);
     const safeSessions = sessions.map(sanitizeWorkspaceSession).filter(Boolean);
     const base = createConsciousBackup({ project: safeProject, sessions: safeSessions, messagesBySession, tasks, queue, settings });
@@ -251,7 +339,7 @@ class ConsciousCenter {
     const distilled = this.distiller.distill({ scope: "project", project: safeProject, sessions: linked, messages: linkedMessages, tasks: taskBrainState, settings });
     const completedFromBrain = unique(taskBrainState.flatMap((task) => task.completed?.length ? task.completed : task.status === "completed" ? [task.goal] : []), 80);
     const pendingFromBrain = unique(taskBrainState.filter((task) => !["completed", "failed", "cancelled"].includes(task.status)).flatMap((task) => task.pending?.length ? task.pending : [task.current_step || task.goal]), 80);
-    return {
+    return stripCognitiveSnapshotFields({
       ...base,
       scope: "project",
       sourceId: safeProject.id,
@@ -259,24 +347,24 @@ class ConsciousCenter {
       currentTaskGoal: cleanText(taskBrainState.find((task) => !["completed", "failed", "cancelled"].includes(task.status))?.goal || ceo?.task || safeProject.description, 2000),
       completedTasks: completedFromBrain.length ? completedFromBrain : base.completedTasks,
       pendingTasks: pendingFromBrain.length ? pendingFromBrain : base.pendingTasks,
-      nextPlan: (pendingFromBrain.length ? pendingFromBrain : base.pendingTasks).slice(0, 20),
       sessionMemory: clone(ceo?.memory?.sessionMemory || {}),
       globalPersona: clone(ceo?.memory?.globalPersona || settings.personaMemory || {}),
       memoryLayer: clone(memoryState || {}),
       core: distilled.core,
       distillation: distilled.metrics,
-      contextReplacement: { messages: distilled.compactMessages },
-      chatHistorySummary: distilled.evidenceSummary,
       taskBrainState: distilled.relevantTasks,
       ceoState: base.agentStates.find((item) => item.type === "CEO") || null,
       agentRuntimeState: clone(agentRuntimeState),
       auto: Boolean(auto),
       trigger,
+      extractionMode: extractionMode || (auto ? "execution" : "manual"),
+      responsibility: auto ? "execution_state" : "manual_consciousness",
+      retentionClass: auto ? "execution_state" : "project",
       workspaceState: { project: safeProject, sessions: linked }
-    };
+    }, { defaultResponsibility: auto ? "execution_state" : "manual_consciousness" });
   }
 
-  buildSessionSnapshot({ session, project, messages, tasks, settings, memoryState, agentRuntimeState = [], auto = false, trigger = "manual" }) {
+  buildSessionSnapshot({ session, project, messages, tasks, settings, memoryState, agentRuntimeState = [], auto = false, trigger = "manual", extractionMode = "" }) {
     const safeSession = sanitizeWorkspaceSession(session);
     const safeProject = sanitizeWorkspaceProject(project);
     const sessionTasks = tasks.filter((task) => (task.session_id || task.sessionId) === session.id);
@@ -284,7 +372,7 @@ class ConsciousCenter {
     const completedTasks = unique(sessionTasks.flatMap((task) => task.completed?.length ? task.completed : task.status === "completed" ? [task.goal] : []), 80);
     const pendingTasks = unique(sessionTasks.filter((task) => !["completed", "failed", "cancelled"].includes(task.status)).flatMap((task) => task.pending?.length ? task.pending : [task.current_step || task.goal]), 80);
     const userRequirements = unique(messages.filter((message) => message.role === "user").map((message) => message.text || message.content), 40);
-    return {
+    return stripCognitiveSnapshotFields({
       schemaVersion: 2,
       type: "conscious-snapshot",
       scope: "session",
@@ -296,7 +384,6 @@ class ConsciousCenter {
       projectGoal: cleanText(project?.description || session.task || session.title, 2000),
       currentTaskGoal: cleanText(sessionTasks.find((task) => !["completed", "failed", "cancelled"].includes(task.status))?.goal || session.task || session.title, 2000),
       background: userRequirements.slice(0, 12),
-      coreDecisions: [],
       currentProgress: {
         percent: sessionTasks.length ? Math.round((sessionTasks.filter((task) => task.status === "completed").length / sessionTasks.length) * 100) : 0,
         summary: cleanText(session.status || "已保存当前会话状态", 300),
@@ -309,31 +396,33 @@ class ConsciousCenter {
       agentRuntimeState: clone(agentRuntimeState),
       auto: Boolean(auto),
       trigger,
+      extractionMode: extractionMode || (auto ? "execution" : "manual"),
+      responsibility: auto ? "execution_state" : "manual_consciousness",
+      retentionClass: auto ? "execution_state" : "short_term",
       completedTasks,
       pendingTasks,
-      projectConstraints: unique(sessionTasks.flatMap((task) => task.constraints || []), 60),
-      explicitRequirements: userRequirements,
-      userPreferences: clone(settings.personaMemory || settings.persona || {}),
       sessionMemory: clone(session.memory?.sessionMemory || {}),
       globalPersona: clone(session.memory?.globalPersona || settings.personaMemory || {}),
       memoryLayer: clone(memoryState || {}),
       core: distilled.core,
       distillation: distilled.metrics,
-      contextReplacement: { messages: distilled.compactMessages },
-      chatHistorySummary: distilled.evidenceSummary,
       taskBrainState: distilled.relevantTasks,
       fileChanges: [],
-      nextPlan: pendingTasks.slice(0, 20),
       sourceStats: { sessions: 1, messages: messages.length, taskBrainTasks: sessionTasks.length, queuedTasks: 0, files: 0 },
       workspaceState: { project: safeProject, sessions: [safeSession] },
       createdAt: this.now()
-    };
+    }, { defaultResponsibility: auto ? "execution_state" : "manual_consciousness" });
   }
 
   persist(input) {
     const now = this.now();
     const previous = this.latestFor(input.scope, input.sourceId);
     const safeInput = sanitizeSnapshotInput(input);
+    const isManual = safeInput.extractionMode === "manual"
+      || safeInput.responsibility === "manual_consciousness"
+      || safeInput.auto === false;
+    const extractionMode = isManual ? "manual" : "execution";
+    const responsibility = isManual ? "manual_consciousness" : "execution_state";
     let snapshot = {
       ...clone(safeInput),
       schemaVersion: 2,
@@ -343,9 +432,13 @@ class ConsciousCenter {
       createdAt: input.createdAt || now,
       updatedAt: now,
       important: Boolean(input.important),
-      archived: false
+      archived: false,
+      extractionMode,
+      responsibility,
+      retentionClass: safeInput.retentionClass || (isManual ? (input.scope === "project" ? "project" : "short_term") : "execution_state"),
+      manualExtractionAt: isManual ? (safeInput.manualExtractionAt || now) : null
     };
-    snapshot = applyWorkStateContract(snapshot);
+    snapshot = stripCognitiveSnapshotFields(applyWorkStateContract(snapshot), { defaultResponsibility: responsibility });
     snapshot.status = snapshotStatus(snapshot);
     snapshot.keywords = collectKeywords(snapshot);
     writeJsonAtomic(this.snapshotFile(snapshot.id), snapshot);
@@ -365,9 +458,13 @@ class ConsciousCenter {
       currentStage: snapshot.current_stage,
       reductionPercent: Number(snapshot.distillation?.reductionPercent || 0),
       recentlyCompleted: snapshot.completed_tasks.slice(-3),
-      nextActions: snapshot.next_actions.slice(0, 3),
+      nextActions: snapshot.pending_tasks.slice(0, 3),
       auto: Boolean(snapshot.auto),
       trigger: snapshot.trigger || "manual",
+      extractionMode: snapshot.extractionMode,
+      responsibility: snapshot.responsibility,
+      retentionClass: snapshot.retentionClass,
+      manualExtractionAt: snapshot.manualExtractionAt || null,
       createdAt: snapshot.createdAt,
       updatedAt: snapshot.updatedAt,
       important: snapshot.important,
@@ -376,10 +473,54 @@ class ConsciousCenter {
       searchText: [snapshot.title, snapshot.projectName, snapshot.projectGoal, snapshot.currentTaskGoal, ...snapshot.keywords].join(" ").toLowerCase()
     };
     index.items.unshift(item);
+    if (isManual) index.lastManualExtractionAt = snapshot.manualExtractionAt || snapshot.updatedAt;
     index.items = index.items.slice(0, 1000);
     this.writeIndex(index);
     this.autoPrune(input.scope, input.sourceId);
     return clone(snapshot);
+  }
+
+  pruneExpiredShortTerm({ inactivityDays = 30 } = {}) {
+    const index = this.readIndex();
+    const lastManual = Date.parse(index.lastManualExtractionAt || "");
+    const now = Date.parse(this.now());
+    const inactivityMs = Math.max(1, Number(inactivityDays) || 30) * 24 * 60 * 60 * 1000;
+    if (!Number.isFinite(lastManual) || !Number.isFinite(now) || now - lastManual < inactivityMs) {
+      return {
+        deleted: 0,
+        skipped: true,
+        reason: "manual_extraction_recent_or_unknown",
+        lastManualExtractionAt: index.lastManualExtractionAt || null
+      };
+    }
+
+    const cutoff = now - inactivityMs;
+    const expired = index.items.filter((item) => {
+      if (item.important || item.responsibility !== "manual_consciousness" || item.retentionClass !== "short_term") return false;
+      const updatedAt = Date.parse(item.updatedAt || item.createdAt || "");
+      return Number.isFinite(updatedAt) && updatedAt <= cutoff;
+    });
+    if (!expired.length) {
+      return {
+        deleted: 0,
+        skipped: false,
+        reason: "nothing_expired",
+        lastManualExtractionAt: index.lastManualExtractionAt || null
+      };
+    }
+
+    for (const item of expired) {
+      try { fs.unlinkSync(this.snapshotFile(item.id)); } catch {}
+    }
+    const expiredIds = new Set(expired.map((item) => item.id));
+    index.items = index.items.filter((item) => !expiredIds.has(item.id));
+    this.writeIndex(index);
+    return {
+      deleted: expired.length,
+      deletedIds: expired.map((item) => item.id),
+      skipped: false,
+      lastManualExtractionAt: index.lastManualExtractionAt || null
+    };
   }
 
   autoPrune(scope, sourceId) {
@@ -550,6 +691,7 @@ module.exports = {
   collectKeywords,
   applyWorkStateContract,
   compactConsciousSnapshot,
+  stripCognitiveSnapshotFields,
   sanitizeWorkspaceProject,
   sanitizeWorkspaceSession
 };

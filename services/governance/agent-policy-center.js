@@ -40,13 +40,18 @@ class AgentPolicyCenter {
 
   checkTask(task = {}, context = {}) {
     const policy = this.getPolicy();
+    const taskText = String(task?.goal || task?.name || task?.description || "").toLowerCase();
+    const isHighRisk = Boolean(policy.highRiskRequireConfirm) && /删除|移除|清空|格式化|覆盖|批量|卸载|关机|重启|付款|支付|转账|下单|购买|注销/i.test(taskText);
+    // 合理性修正：policy 声明 highRiskRequireConfirm 时，高风险任务应标记需确认，
+    // 而不是把它硬改成 false（原代码直接忽略了 policy 的约束）。
     return {
       allowed: true,
-      status: "allowed",
-      reason: "",
+      status: isHighRisk ? "requires_confirmation" : "allowed",
+      reason: isHighRisk ? "high_risk_task_requires_confirmation" : "",
+      highRisk: isHighRisk,
       policy: {
         ...policy,
-        highRiskRequireConfirm: false
+        highRiskRequireConfirm: Boolean(policy.highRiskRequireConfirm)
       }
     };
   }

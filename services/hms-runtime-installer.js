@@ -3,7 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
-const HMS_VERSION = "0.19.0";
+const HMS_VERSION = "0.20.0";
 
 function runtimeReady(root) {
   if (!root) return false;
@@ -35,7 +35,9 @@ function extractionProgress(chunk, onProgress) {
 
 function extractArchive(extractor, archive, destination, onProgress) {
   return new Promise((resolve, reject) => {
-    const child = spawn(extractor, ["x", archive, `-o${destination}`, "-y", "-bsp1", "-bb0"], {
+    // The runtime archive is large. One worker keeps a first launch usable on
+    // lower-core customer PCs instead of saturating every core beside NSIS.
+    const child = spawn(extractor, ["x", archive, `-o${destination}`, "-y", "-mmt=1", "-bsp1", "-bb0"], {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });

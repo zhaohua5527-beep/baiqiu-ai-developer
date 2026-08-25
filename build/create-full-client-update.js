@@ -37,6 +37,17 @@ function listFiles(root, relative = "") {
   });
 }
 
+function copyDirectory(source, target) {
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.cpSync(source, target, {
+    recursive: true,
+    dereference: true,
+    force: true,
+    errorOnExist: false
+  });
+}
+
 function readVersion(clientDir) {
   const packageFile = path.join(clientDir, "resources", "app", "package.json");
   const versionFile = path.join(clientDir, "resources", "app", "version.json");
@@ -128,18 +139,19 @@ function main() {
   fs.writeFileSync(path.join(clientDir, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   const stagingRoot = path.join(path.dirname(outputFile), `.update-stage-${version}`);
   const stagedClient = path.join(stagingRoot, "client");
-  if (!fs.existsSync(stagingRoot)) fs.mkdirSync(stagingRoot, { recursive: true });
-  if (!fs.existsSync(stagedClient)) fs.symlinkSync(clientDir, stagedClient, "junction");
+  fs.rmSync(stagingRoot, { recursive: true, force: true });
+  fs.mkdirSync(stagingRoot, { recursive: true });
+  copyDirectory(clientDir, stagedClient);
   fs.rmSync(outputFile, { force: true });
-  const archive = spawnSync("powershell.exe", [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    "Compress-Archive -LiteralPath 'client' -DestinationPath $env:BAIQIU_RELEASE_OUTPUT -CompressionLevel Fastest -Force"
+  const archive = spawnSync("tar.exe", [
+    "-a",
+    "-c",
+    "-f",
+    outputFile,
+    "-C",
+    stagingRoot,
+    "client"
   ], {
-    cwd: stagingRoot,
-    env: { ...process.env, BAIQIU_RELEASE_OUTPUT: outputFile },
     stdio: "inherit"
   });
   if (archive.status !== 0) throw new Error(`ZIP creation failed with exit code ${archive.status}`);

@@ -3,6 +3,20 @@
   if (typeof module !== "undefined" && module.exports) module.exports = SessionTaskQueue;
   if (root) root.BaiqiuSessionTaskQueue = SessionTaskQueue;
 })(typeof window !== "undefined" ? window : globalThis, () => {
+  const MAX_SESSION_QUEUE_SIZE = 20;
+
+  function taskFingerprint(task = {}) {
+    const text = String(task.text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const attachments = (Array.isArray(task.attachments) ? task.attachments : [])
+      .map((item) => String(item?.id || item?.path || `${item?.name || ""}:${item?.sizeBytes || item?.size || 0}`))
+      .sort();
+    const quote = task.quote && typeof task.quote === "object"
+      ? String(task.quote.messageId || task.quote.text || "").trim()
+      : "";
+    const context = task.context && typeof task.context === "object" ? JSON.stringify(task.context) : "";
+    return JSON.stringify([text, attachments, quote, context]);
+  }
+
   class SessionTaskQueue {
     constructor() {
       this.queues = new Map();
@@ -19,6 +33,10 @@
       if (!key) throw new Error("sessionId is required");
       const queue = this.list(key);
       if (!this.queues.has(key)) this.queues.set(key, queue);
+      const fingerprint = taskFingerprint(task);
+      const duplicate = queue.find((item) => (task.id && item.id === task.id) || item.fingerprint === fingerprint);
+      if (duplicate) return duplicate;
+      if (queue.length >= MAX_SESSION_QUEUE_SIZE) return null;
       const item = {
         id: task.id || `preset-${Date.now()}-${++this.sequence}`,
         text: String(task.text || "").trim(),
@@ -27,6 +45,7 @@
         ui: task.ui && typeof task.ui === "object" ? { ...task.ui } : null,
         quote: task.quote && typeof task.quote === "object" ? { ...task.quote } : null,
         autoStart: task.autoStart === true,
+        fingerprint,
         createdAt: task.createdAt || Date.now()
       };
       queue.push(item);
@@ -42,6 +61,7 @@
       if (patch.ui && typeof patch.ui === "object") task.ui = { ...patch.ui };
       if (Object.prototype.hasOwnProperty.call(patch, "quote")) task.quote = patch.quote && typeof patch.quote === "object" ? { ...patch.quote } : null;
       if (Object.prototype.hasOwnProperty.call(patch, "autoStart")) task.autoStart = patch.autoStart === true;
+      task.fingerprint = taskFingerprint(task);
       return task;
     }
 

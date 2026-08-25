@@ -50,7 +50,7 @@ function isCapabilityConsultation(input, context = {}) {
 function classifyRequestMode(input, context = {}) {
   const text = normalizeText(input);
   if (isCapabilityConsultation(text, context)) return "capability_consultation";
-  if (context.hasAttachments && /(打开|读取|分析|处理|修改|识别|预览)/i.test(text)) return "operation_request";
+  if (context.hasAttachments) return "operation_request";
   const operation = hasOperationalRequest(text);
   if (operation && !context.hasAttachments && /(分析|处理|修改|读取|打开).{0,12}(文件|图片|表格|文档|资料)/i.test(text)
     && !/(路径|桌面|下载|文件名|\.\w{2,5}\b)/i.test(text)) return "answer_then_clarify";
@@ -59,8 +59,8 @@ function classifyRequestMode(input, context = {}) {
 }
 
 function hasOperationalRequest(text) {
-  return /(帮我|给我|替我|请你|立即|马上|直接).{0,12}(打开|读取|分析|处理|修改|生成|创建|制作|开发|导出|执行)/i.test(text)
-    || /^(打开|读取|分析|处理|修改|生成|创建|制作|开发|导出|执行)/i.test(text);
+  return /(帮我|给我|替我|请你|立即|马上|直接).{0,16}(打开|读取|分析|处理|修改|生成|创建|制作|开发|导出|执行|填入|填写|套入|放入|筛选|匹配|剔除|汇总)/i.test(text)
+    || /^(打开|读取|分析|处理|修改|生成|创建|制作|开发|导出|执行|填入|填写|套入|放入|筛选|匹配|剔除|汇总)/i.test(text);
 }
 
 function capabilityConsultationReply(input) {

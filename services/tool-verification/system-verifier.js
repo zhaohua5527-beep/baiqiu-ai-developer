@@ -29,6 +29,8 @@ function verifySkillInstall({ result = {} } = {}) {
   const skill = output?.skill || output;
   const skillsJson = output?.skillsJson || "";
   const fileOk = skillsJson ? fs.existsSync(skillsJson) : true;
+  // 本验证器只产出诊断，不构成授权门：技能是否 READY 由 Hermes/HMS 运行时声明，
+  // 本地校验（文件存在、状态字段）只是辅助证据，不能把已成功的安装改写成失败。
   const installed = skill?.status === "READY" && output?.verification?.verified === true;
   const failedState = skill?.status === "failed" || output?.status === "failed";
   const checks = [
@@ -42,7 +44,8 @@ function verifySkillInstall({ result = {} } = {}) {
     verified: failed.length === 0,
     status: failed.length === 0 ? "passed" : "failed",
     checks,
-    reason: failed.length ? `skill_install 验证失败：${failed.map((item) => item.name).join(", ")}` : "skill_install 验证通过"
+    reason: failed.length ? `skill_install 验证失败：${failed.map((item) => item.name).join(", ")}` : "skill_install 验证通过",
+    diagnostic: true
   };
 }
 

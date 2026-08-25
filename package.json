@@ -1,18 +1,24 @@
 {
   "name": "baiqiu-ai",
-  "version": "3.0.4",
-  "description": "Baiqiu AI desktop client powered by Hermes Agent",
+  "version": "3.0.20",
+  "description": "Baiqiu AI desktop client with Black Ball execution",
   "main": "main.js",
+  "packageManager": "pnpm@11.9.0",
   "scripts": {
-    "build": "electron-builder --win --config",
-    "build:dir": "electron-builder --win --dir",
+    "build:knowledge-universe": "esbuild renderer-v2/knowledge-universe-3d.js --bundle --format=iife --global-name=BaiqiuKnowledgeUniverse3D --outfile=renderer-v2/knowledge-universe-3d.bundle.js --minify",
+    "prepare:integrity": "npm run build:knowledge-universe && node build/generate-integrity-manifest.js",
+    "build": "npm run prepare:integrity && electron-builder --win --config",
+    "build:dir": "npm run prepare:integrity && electron-builder --win --dir -c.win.forceCodeSigning=false",
+    "package:release": "npm run prepare:integrity && electron-builder --win --config && node build/create-full-client-update.js dist\\win-unpacked dist\\baiqiu-customer-%npm_package_version%.zip %npm_package_version%",
     "prepare:hms": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\scripts\\prepare-bundled-hms.ps1",
-    "build:hms": "npm run prepare:hms && electron-builder --win --config",
+    "build:hms": "npm run prepare:hms && npm run build",
     "test:hms-background-install": "node --test test/hms-background-install.test.js",
     "test:conversation-routing": "node --test test/conversation-routing.test.js",
     "test:hermes-prompt-timeout": "node --test test/hermes-acp-client-timeout.test.js",
     "test:progressive-typing": "node --test test/progressive-typing-render.test.js",
-    "test:sidebar-typography": "node --test test/sidebar-typography.test.js"
+    "test:sidebar-typography": "node --test test/sidebar-typography.test.js",
+    "build:qa": "npm run prepare:integrity && electron-builder --win --dir -c.win.forceCodeSigning=false -c.directories.output=D:\\\\baiqiu-build\\\\dist",
+    "build:qa:installer": "npm run prepare:integrity && electron-builder --win --config -c.win.forceCodeSigning=false -c.directories.output=D:\\\\baiqiu-build\\\\dist"
   },
   "private": true,
   "dependencies": {
@@ -22,6 +28,7 @@
     "cheerio": "^1.1.2",
     "docx": "^9.5.1",
     "fast-xml-parser": "^5.7.0",
+    "iconv-lite": "^0.6.3",
     "jszip": "^3.10.1",
     "mammoth": "^1.12.0",
     "marked": "^15.0.12",
@@ -47,27 +54,21 @@
       "services/hermes-direct-delegation.py"
     ],
     "win": {
+      "forceCodeSigning": true,
       "target": [
-        "nsis-web",
+        "nsis",
         "zip"
       ],
       "icon": "assets/icon.ico"
     },
     "nsis": {
       "include": "build/installer.nsh",
-      "oneClick": true,
-      "allowToChangeInstallationDirectory": false,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
+      "packElevateHelper": false,
       "shortcutName": "白球AI"
-    },
-    "nsisWeb": {
-      "oneClick": true,
-      "allowToChangeInstallationDirectory": false,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "白球AI",
-      "appPackageUrl": "http://47.108.191.67/download/baiqiu-ai-3.0.4-r2-x64.nsis.7z"
     },
     "artifactName": "BaiqiuAI-Setup-${version}.${ext}",
     "extraResources": [
@@ -132,8 +133,11 @@
     ]
   },
   "devDependencies": {
+    "3d-force-graph": "^1.80.0",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
-    "rcedit": "^5.0.2"
+    "esbuild": "^0.28.2",
+    "rcedit": "^5.0.2",
+    "three": "^0.185.1"
   }
 }

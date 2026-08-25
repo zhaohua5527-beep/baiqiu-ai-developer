@@ -58,6 +58,17 @@ function resolveBridgePath(options = {}) {
   return found;
 }
 
+function resolveXlsxHelperPath(options = {}) {
+  const source = options.resourcesPath
+    ? path.join(options.resourcesPath, "app.asar.unpacked", "services", "hms-xlsx-writer.py")
+    : "";
+  const local = path.join(__dirname, "hms-xlsx-writer.py");
+  const candidates = [options.xlsxHelperPath, source, local].filter(Boolean);
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!found) throw new Error("Baiqiu XLSX backend was not packaged.");
+  return found;
+}
+
 function abortError() {
   const error = new Error("Hermes direct delegation was cancelled.");
   error.name = "AbortError";
@@ -78,9 +89,15 @@ async function runDirectHermesDelegation({
   const launch = resolveDirectHermesLaunch(options);
   const python = resolvePython(options);
   const bridge = resolveBridgePath(options);
+  const xlsxHelper = resolveXlsxHelperPath(options);
   const hermesRoot = launch.hermesHome;
   const agentRoot = launch.agentRoot;
-  const tasks = buildHermesDelegationTasks(assignments, { projectId, runId, workspace });
+  const tasks = buildHermesDelegationTasks(assignments, {
+    projectId,
+    runId,
+    workspace,
+    xlsxBackend: { pythonPath: python, helperPath: xlsxHelper }
+  });
   const parentSessionId = `project-dispatch:${runId}`;
   if (signal?.aborted) throw abortError();
   const request = JSON.stringify({
@@ -101,7 +118,9 @@ async function runDirectHermesDelegation({
         HERMES_HOME: hermesRoot,
         ...(pythonPath ? { PYTHONPATH: pythonPath } : {}),
         PYTHONIOENCODING: "utf-8",
-        PYTHONUTF8: "1"
+        PYTHONUTF8: "1",
+        BAIQIU_HMS_PYTHON: python,
+        BAIQIU_XLSX_HELPER: xlsxHelper
       },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true
@@ -190,4 +209,4 @@ async function runDirectHermesDelegation({
   });
 }
 
-module.exports = { resolveBridgePath, resolveDirectHermesLaunch, resolveHermesRoot, resolvePython, runDirectHermesDelegation };
+module.exports = { resolveBridgePath, resolveDirectHermesLaunch, resolveHermesRoot, resolvePython, resolveXlsxHelperPath, runDirectHermesDelegation };

@@ -124,7 +124,7 @@ async function resolveDelegationSourceReply({
       return {
         matched: true,
         text: session?.pendingDelegation?.required
-          ? "这轮任务还在进行中，暂时没有可追溯的子 Agent 结果。"
+          ? "这轮任务还在进行中，暂时没有可追溯的内部执行结果。"
           : "我找到了委派痕迹，但没有拿到可回溯的真实结果。它可能还在进行中，或者相关记录已经清空。",
         delegationIds: artifacts.delegationIds,
         delegationResults: [],
@@ -137,8 +137,8 @@ async function resolveDelegationSourceReply({
   return {
     matched: true,
     text: session?.pendingDelegation?.required
-      ? "这轮任务还在进行中，暂时没有可追溯的子 Agent 结果。"
-      : "我没有找到这条回复对应的真实子 Agent 记录；它可能是主模型直接生成的，或者相关执行记录已经清空。",
+      ? "这轮任务还在进行中，暂时没有可追溯的内部执行结果。"
+      : "我没有找到这条回复对应的真实内部执行记录；它可能是主模型直接生成的，或者相关执行记录已经清空。",
     delegationIds: [],
     delegationResults: [],
     delegationEvidence: [],

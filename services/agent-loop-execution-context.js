@@ -34,6 +34,9 @@ function bindAgentLoopExecutionContext(options = {}, defaults = {}) {
 }
 
 function canExposeAgentLoopTools(context = {}) {
+  // Black Ball owns execution. White Ball may carry routing metadata, but it
+  // must not remove the tools that the execution owner is allowed to use.
+  if (context.blackBallOwnsExecution === true) return true;
   return context.disableTools !== true;
 }
 

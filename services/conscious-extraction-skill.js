@@ -12,25 +12,17 @@ class ConsciousExtractionSkill {
     const completedFromTasks = taskStates.filter((task) => task.status === "completed").flatMap((task) => task.completed?.length ? task.completed : [task.goal]);
     const pendingFromTasks = taskStates.filter((task) => !["completed", "failed", "cancelled"].includes(task.status)).flatMap((task) => task.pending?.length ? task.pending : [task.current_step || task.goal]);
     const completed = (core.completed_tasks?.length ? core.completed_tasks : completedFromTasks.length ? completedFromTasks : snapshot.completedTasks || []).slice(-20).map((item) => clean(item)).filter(Boolean);
-    const pending = (core.pending_tasks?.length ? core.pending_tasks : pendingFromTasks.length ? pendingFromTasks : snapshot.pendingTasks || snapshot.nextPlan || []).slice(0, 20).map((item) => clean(item)).filter(Boolean);
-    const decisions = (core.decisions?.length ? core.decisions : snapshot.coreDecisions || []).slice(-12).map((item) => clean(item.decision || item)).filter(Boolean);
+    const pending = (core.pending_tasks?.length ? core.pending_tasks : pendingFromTasks.length ? pendingFromTasks : snapshot.pendingTasks || []).slice(0, 20).map((item) => clean(item)).filter(Boolean);
     const state = {
       projectGoal: clean(core.goal || snapshot.projectGoal || snapshot.title, 2000),
       currentTaskGoal: clean(core.goal || snapshot.currentTaskGoal || snapshot.projectGoal, 2000),
       currentStage: clean(core.current_stage || snapshot.currentProgress?.summary || snapshot.taskBrainState?.at(-1)?.current_stage || "已恢复", 500),
       completed,
       pending,
-      decisions,
-      constraints: (core.constraints?.length ? core.constraints : snapshot.projectConstraints || []).slice(0, 30).map((item) => clean(item)).filter(Boolean),
-      userRequirements: (snapshot.explicitRequirements || []).slice(-20).map((item) => clean(item)).filter(Boolean),
-      userPreferences: core.user_preferences?.length ? core.user_preferences : (snapshot.userPreferences || {}),
       agentStates: core.agent_state?.length ? core.agent_state : (snapshot.agentStates || []),
       taskBrainState: snapshot.taskBrainState || [],
-      sessionMemory: snapshot.sessionMemory || {},
-      globalPersona: snapshot.globalPersona || {},
-      chatHistorySummary: snapshot.chatHistorySummary || [],
       associatedFiles: core.important_files?.length ? core.important_files : (snapshot.fileChanges || []),
-      distilledContext: snapshot.contextReplacement?.messages || []
+      workspaceState: snapshot.workspaceState || null
     };
     const report = [
       "老板，我已经恢复之前的工作状态。",

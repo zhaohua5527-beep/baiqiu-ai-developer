@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { adminPage } = require("./admin-page");
 
 const CHARSET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 const PORT = Number(process.env.BAIQIU_LICENSE_PORT || 18790);
@@ -275,7 +276,7 @@ function resolveBrandIconFile() {
   return candidates.find((file) => fs.existsSync(file)) || "";
 }
 
-function adminPage() {
+function legacyAdminPage() {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1235,6 +1236,34 @@ async function handleAdminList(req, res) {
   return sendJson(res, 200, { success: true, licenses: readDb().licenses || [] });
 }
 
+async function handleAdminTracking(req, res) {
+  if (req.headers["x-admin-token"] !== ADMIN_TOKEN) return sendJson(res, 401, { success: false, message: "管理员令牌无效" });
+  const body = await readBody(req);
+  const code = normalizeCode(body.code);
+  const status = String(body.status || "none");
+  const followUpAt = String(body.followUpAt || "").trim();
+  const lastContactedAt = String(body.lastContactedAt || "").trim();
+  const notes = String(body.notes || "").trim().slice(0, 2000);
+  if (!isCodeFormatValid(code)) return sendJson(res, 400, { success: false, message: "授权码格式无效" });
+  if (!["none", "pending", "progress", "done"].includes(status)) return sendJson(res, 400, { success: false, message: "跟进状态无效" });
+  if ((followUpAt && Number.isNaN(Date.parse(followUpAt))) || (lastContactedAt && Number.isNaN(Date.parse(lastContactedAt)))) {
+    return sendJson(res, 400, { success: false, message: "联系时间格式无效" });
+  }
+  const db = readDb();
+  const item = (db.licenses || []).find((entry) => entry.code === code);
+  if (!item) return sendJson(res, 404, { success: false, message: "授权码不存在" });
+  item.customerTracking = {
+    status,
+    followUpAt,
+    lastContactedAt,
+    notes,
+    updatedAt: Date.now()
+  };
+  item.updatedAt = Date.now();
+  writeDb(db);
+  return sendJson(res, 200, { success: true, tracking: item.customerTracking });
+}
+
 async function handleAdminReleases(req, res, origin) {
   if (req.headers["x-admin-token"] !== ADMIN_TOKEN) return sendJson(res, 401, { success: false, message: "管理员令牌无效" });
   const manifest = readJson(MANIFEST_PATH, { channels: { stable: [] } });
@@ -1316,6 +1345,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/membership/device/unbind") return handleMembershipDeviceUnbind(req, res);
   if (req.method === "POST" && url.pathname === "/admin/licenses/create") return handleAdminCreate(req, res);
   if (req.method === "GET" && url.pathname === "/admin/licenses") return handleAdminList(req, res);
+  if (req.method === "POST" && url.pathname === "/admin/licenses/tracking") return handleAdminTracking(req, res);
   if (req.method === "GET" && url.pathname === "/admin/releases") return handleAdminReleases(req, res, origin);
   if (req.method === "POST" && url.pathname === "/admin/releases/upload") return handleAdminReleaseUpload(req, res, url);
   if (req.method === "GET" && (url.pathname === "/manifest.json" || url.pathname === "/baiqiu-update.json")) {

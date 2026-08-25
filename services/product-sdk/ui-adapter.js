@@ -2,6 +2,7 @@ const path = require("node:path");
 const { ProductSDK } = require("./product-sdk");
 const { TaskExperience } = require("./task-experience");
 const { userFacingError } = require("../user-facing-error-adapter");
+const { evaluateHmsResponse } = require("../hms-outcome-contract");
 
 function firstText(...values) {
   const value = values.find((item) => typeof item === "string" && item.trim());
@@ -12,7 +13,8 @@ function structuredResponseEvidence(response = {}) {
   const keys = [
     "ceoOrchestration", "integratedCeoDelivery", "projectRunId", "assignments", "results", "employeeResults",
     "report", "reportStatus", "delegationIds", "delegationResults", "delegationEvidence",
-    "hermesSessionId", "traceId"
+    "hermesSessionId", "traceId", "clarification", "presentation", "outline", "knowledgeReferences",
+    "hmsOutcome", "toolCalls", "files", "generatedFiles", "baiqiuToolProtocol", "executionLog"
   ];
   return keys.reduce((result, key) => {
     if (response[key] !== undefined) result[key] = response[key];
@@ -44,6 +46,9 @@ class UIAdapter {
 
   async submitUIInput(input = {}) {
     const message = String(input.message || input.text || "");
+    if (input.canonicalTask === true || input.context?.canonicalTask === true) {
+      return this.submitCanonicalUIInput({ ...input, message });
+    }
     const task = input.taskId ? {
       ...this.sdk.queryTask(input.taskId),
       ...input,
@@ -114,6 +119,46 @@ class UIAdapter {
     return this.toUIResult(completed);
   }
 
+  async submitCanonicalUIInput(input = {}) {
+    const message = String(input.message || input.text || "");
+    const useChatRuntime = input.context?.chatRuntime || input.templateId === "desktop.chat_runtime";
+    const response = useChatRuntime
+      ? (typeof this.chatRunner === "function"
+        ? await this.chatRunner({ ...input, message })
+        : { ok: false, status: "failed", error: "chat_runner_missing", text: "聊天运行通道不可用。" })
+      : await this.answerConversation({ ...input, message });
+    const evaluation = evaluateHmsResponse(response, { canonicalTask: true });
+    const responseText = firstText(response?.text, response?.message);
+    const text = evaluation.success
+      ? evaluation.text
+      : response?.ok === true && responseText
+        ? responseText
+      : userFacingError(response?.error || evaluation.error || response?.text || "conversation_response_text_invalid", {
+        classification: input.context?.conversationUnderstanding?.classification,
+        domain: input.context?.conversationUnderstanding?.domain || ""
+      });
+    const success = evaluation.success;
+    const responseEvidence = structuredResponseEvidence(response);
+    const responseRaw = response?.raw && typeof response.raw === "object" ? response.raw : {};
+    const structuredRaw = Object.keys(responseEvidence).length || Object.keys(responseRaw).length
+      ? { ...responseRaw, ...responseEvidence }
+      : null;
+    return {
+      taskId: String(input.taskId || ""),
+      productId: input.productId || "desktop-assistant",
+      status: evaluation.status,
+      success,
+      verified: evaluation.verified,
+      text: text || firstText(response?.error, "响应未返回可显示文本。"),
+      error: success ? null : (response?.error || evaluation.error || "conversation_response_text_invalid"),
+      result: response?.result || null,
+      ...responseEvidence,
+      raw: structuredRaw,
+      traceId: input.traceId || "",
+      updatedAt: new Date().toISOString()
+    };
+  }
+
   completeRuntimeTask(task = {}, response = {}) {
     const responseText = firstText(response.text, response.message);
     const ok = response.ok !== false && Boolean(responseText);
@@ -122,6 +167,9 @@ class UIAdapter {
     const completed = {
       ...task,
       status: ok ? "success" : response.status === "blocked" ? "blocked" : "failed",
+      runtimeStatus: String(response.runtimeStatus || response.status || ""),
+      deliveryStatus: String(response.deliveryStatus || ""),
+      presentationStatus: String(response.presentationStatus || ""),
       result: {
         success: ok,
         text: responseText,
@@ -205,7 +253,13 @@ class UIAdapter {
       ...(raw.results !== undefined ? { results: raw.results } : {}),
       ...(raw.employeeResults !== undefined ? { employeeResults: raw.employeeResults } : {}),
       ...(raw.report !== undefined ? { report: raw.report } : {}),
+      ...(raw.clarification !== undefined ? { clarification: raw.clarification } : {}),
+      ...(raw.presentation !== undefined ? { presentation: raw.presentation } : {}),
+      raw: Object.keys(raw).length ? raw : null,
       experience: task.experience || null,
+      runtimeStatus: task.runtimeStatus || "",
+      deliveryStatus: task.deliveryStatus || "",
+      presentationStatus: task.presentationStatus || "",
       traceId: task.traceId,
       updatedAt: task.updatedAt
     };

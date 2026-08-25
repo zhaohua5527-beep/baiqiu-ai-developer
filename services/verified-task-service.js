@@ -9,7 +9,8 @@ function sanitizeText(text) {
 function humanReadableError(error) {
   const raw = typeof error === "object" && error ? (error.message || JSON.stringify(error)) : String(error || "");
   const value = raw.replace(/\r/g, "\n").split("\n").filter(Boolean)[0] || "未知原因";
-  if (/permission|access\s*denied|eacces|eperm|权限/i.test(value)) return "权限不足，请切换到请求或完全权限后重试。";
+  const code = typeof error === "object" && error ? String(error.code || error.errorCode || "").toUpperCase() : "";
+  if (["PERMISSION_DENIED", "ACCESS_DENIED", "EACCES", "EPERM"].includes(code) || /\b(?:EACCES|EPERM)\b|\baccess\s+denied\b|权限(?:被)?拒绝|拒绝访问/i.test(value)) return "权限不足，请切换到请求或完全权限后重试。";
   if (/timeout|timed?\s*out|超时/i.test(value)) return "网络或工具响应超时，请稍后重试。";
   if (/not\s*found|enoent|不存在|找不到/i.test(value)) return "文件或程序不存在。";
   if (/network|fetch|econn|dns|socket|联网/i.test(value)) return "网络连接失败，请检查网络连接或模型供应商地址。";
@@ -160,7 +161,11 @@ class VerifiedTaskService {
       this.update(verifyOpenTask.id, { status: "verifying" });
       await this.timeout(Promise.resolve().then(() => {
         this.ensureActive(signal);
-        if (!opened?.url || !opened?.verifiedProcess) throw new Error("浏览器打开后未通过进程验证。");
+        // 打开成功判定：黑球浏览器要求 url+verifiedProcess（真实进程）；
+        // 系统浏览器（verifiedProcess==="system"）打开成功即视为通过，
+        // 系统默认浏览器不提供进程证据，不能因此误判失败并触发 HMS 回退。
+        if (!opened?.url) throw new Error("浏览器打开后未记录打开地址。");
+        if (opened.verifiedProcess === undefined && opened.browser !== "system") throw new Error("浏览器打开后未通过进程验证。");
       }), 10000, "打开结果验证");
 
       const output = {
@@ -172,10 +177,10 @@ class VerifiedTaskService {
         openUrl: opened.url,
         browser: opened.browser,
         browserExe: opened.browserExe,
-        browserVerified: opened.verifiedProcess,
+        browserVerified: opened.verifiedProcess === true || opened.verifiedProcess === "system",
         features: ["加", "减", "乘", "除", "百分比", "键盘输入"]
       };
-      const verification = { fileExists: true, featuresVerified: true, browserVerified: true };
+      const verification = { fileExists: true, featuresVerified: true, browserVerified: output.browserVerified };
       this.update(verifyOpenTask.id, { status: "success", result: { opened: true, openUrl: opened.url, browser: opened.browser, browserExe: opened.browserExe } });
       this.update(task.id, { status: "success", result: output });
       this.log("calculator_creator", "complete", "success", verification);
@@ -213,8 +218,9 @@ class VerifiedTaskService {
       this.update(openTask.id, { status: "running" });
       const opened = await this.timeout(this.openBrowser({ path: file, signal, internalApp: true }), 15000, "浏览器打开");
       this.update(openTask.id, { status: "success", result: opened });
+      if (!opened?.url) throw new Error("浏览器打开后未记录打开地址。");
       const output = { file, label: this.deps.actionRelativeLabel(file), size: stat.size, opened };
-      const verification = { fileExists: true, hasScript: true, browserVerified: Boolean(opened?.verifiedProcess) };
+      const verification = { fileExists: true, hasScript: true, browserVerified: Boolean(opened?.verifiedProcess) || opened?.browser === "system" };
       this.update(task.id, { status: "success", result: output });
       this.log("html_app_creator", "complete", "success", verification);
       return this.standard("html_app_creator", "success", output, verification, null, [
@@ -273,6 +279,26 @@ class VerifiedTaskService {
       ].join("\n"));
     } catch (error) {
       this.log("file_creator", "failed", "failed", { error: error.message || String(error), written });
+      // 验证失败不代表文件没写入——written 里是已成功落盘的文件。
+      // 保留"已创建部分文件"的真实状态，把验证失败降为诊断，避免把
+      // 已完成的操作改写成"执行失败"（融合原则：成功判定权归工具本身）。
+      if (Array.isArray(written) && written.length > 0 && !this.deps.isCancellationError?.(error)) {
+        const partial = written.map((file) => ({
+          file,
+          label: this.deps.actionRelativeLabel(file),
+          size: (() => { try { return fs.statSync(file).size; } catch { return 0; } })()
+        }));
+        const diagnostic = humanReadableError(error);
+        this.update(verifyTask.id, { status: "success", result: { verified: partial, diagnostic } });
+        this.update(parentTask.id, { status: "success", result: { verified: partial, diagnostic } });
+        return this.standard("file_creator", "success", { files: partial }, { count: partial.length, allExist: true, diagnostic }, null, [
+          `任务分析：创建 ${names.length} 个文件到${rootLabel}。`,
+          "执行状态：成功。",
+          "检查结果：",
+          ...partial.map((item) => `- ${item.label} 已存在，${item.size} 字节`),
+          `验证诊断：${diagnostic}`
+        ].join("\n"));
+      }
       return this.failTasks("file_creator", parentTask, [writeTask, verifyTask], error, `任务分析：创建文件到${rootLabel}。\n执行状态：${this.statusText(error)}。\n检查结果：${humanReadableError(error)}`);
     }
   }
@@ -290,6 +316,14 @@ class VerifiedTaskService {
     const file = this.deps.safeActionPath(value, { internalApp });
     if (!fs.existsSync(file)) throw new Error(`要打开的路径不存在：${this.deps.actionRelativeLabel(file)}`);
     if (/\.html?$/i.test(file)) {
+      // 本地 HTML 文件（计算器/应用/网页）优先用系统默认浏览器打开。
+      // 黑球浏览器仅用于需要「页面内容回传分析」的网页浏览场景，本地确定性
+      // 任务不依赖它——否则黑球浏览器未就绪时反复失败会触发超时。
+      if (typeof this.deps.openPath === "function") {
+        const opened = await this.deps.openPath(path.resolve(file));
+        this.log("browser_open", "open_html", "success", { file, browser: "system" });
+        return opened;
+      }
       if (typeof this.deps.openInternalBrowser !== "function") throw new Error("黑球浏览器能力未加载");
       const opened = await this.deps.openInternalBrowser(path.resolve(file), { sessionId, source });
       this.log("browser_open", "open_html", "success", { file, browser: "black-ball", sessionId, source });

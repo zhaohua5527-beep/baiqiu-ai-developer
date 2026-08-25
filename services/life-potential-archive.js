@@ -193,12 +193,9 @@ class LifePotentialArchive {
     if (!snapshot || snapshot.type !== "conscious-snapshot") throw new Error("意识快照无效，无法解析生命潜能");
     const sourceId = clean(snapshot.sourceId || snapshot.projectId || snapshot.sessionId, 300);
     const stats = snapshot.sourceStats || {};
-    const messages = Math.max(Number(stats.messages || 0), array(snapshot.chatHistorySummary).length);
+    const messages = Number(stats.messages || 0);
     const completed = array(snapshot.completed_tasks || snapshot.completedTasks).length;
     const pending = array(snapshot.pending_tasks || snapshot.pendingTasks).length;
-    const decisions = array(snapshot.decisions || snapshot.coreDecisions || snapshot.core?.decisions).length;
-    const constraints = array(snapshot.constraints || snapshot.projectConstraints || snapshot.core?.constraints).length;
-    const requirements = array(snapshot.explicitRequirements).length;
     const files = array(snapshot.important_files || snapshot.fileChanges || snapshot.core?.important_files).length;
     const agents = Math.max(array(snapshot.agent_state || snapshot.agentStates || snapshot.core?.agent_state).length, Number(stats.sessions || 0));
     const tasks = Math.max(Number(stats.taskBrainTasks || 0), completed + pending, array(snapshot.taskBrainState).length);
@@ -206,18 +203,18 @@ class LifePotentialArchive {
     const progress = clamp(snapshot.currentProgress?.percent || 0);
     const messageDepth = Math.min(24, Math.log2(messages + 1) * 5.2);
     const taskDepth = Math.min(22, tasks * 2.8);
-    const evidenceTotal = messages + tasks + decisions + constraints + requirements + files + agents;
+    const evidenceTotal = messages + tasks + completed + pending + files + agents;
     const previousScores = scoreMap(previous?.potentials || []);
 
     const definitions = {
-      cognition: { raw: 38 + messageDepth * 0.8 + decisions * 3 + taskDepth * 0.35, evidence: messages + decisions + tasks },
-      learning: { raw: 36 + messageDepth * 0.75 + version * 2.3 + requirements * 0.8, evidence: messages + version + requirements },
+      cognition: { raw: 38 + messageDepth * 0.8 + taskDepth * 0.55, evidence: messages + tasks },
+      learning: { raw: 36 + messageDepth * 0.75 + version * 2.3 + completed * 0.8, evidence: messages + version + completed },
       creation: { raw: 34 + messageDepth * 0.45 + files * 4.5 + completed * 2.5, evidence: messages + files + completed },
-      judgment: { raw: 37 + decisions * 4.5 + constraints * 2.4 + taskDepth * 0.45, evidence: decisions + constraints + tasks },
+      judgment: { raw: 37 + taskDepth * 0.8 + completed * 2.1 + progress * 0.08, evidence: completed + tasks },
       adaptation: { raw: 39 + version * 3.2 + Math.min(18, (completed + pending) * 1.8) + messageDepth * 0.35, evidence: version + completed + pending + messages },
       execution: { raw: 36 + completed * 4.2 + taskDepth * 0.55 + progress * 0.16, evidence: completed + tasks },
-      insight: { raw: 35 + decisions * 2.8 + requirements * 2.1 + constraints * 1.5 + messageDepth * 0.55, evidence: decisions + requirements + constraints + messages },
-      leadership: { raw: 29 + agents * 8.5 + decisions * 2.2 + completed * 1.7 + (snapshot.scope === "project" ? 6 : 0), evidence: agents + decisions + completed }
+      insight: { raw: 35 + files * 2.8 + taskDepth * 0.55 + messageDepth * 0.55, evidence: files + tasks + messages },
+      leadership: { raw: 29 + agents * 8.5 + completed * 2.2 + (snapshot.scope === "project" ? 6 : 0), evidence: agents + completed }
     };
 
     const potentials = POTENTIALS.map((potential) => {

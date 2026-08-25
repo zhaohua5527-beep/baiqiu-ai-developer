@@ -89,7 +89,7 @@ function atomicWrite(file, value) {
 class AgentHealthManager {
   constructor({
     root = path.join(dataRoot(), "agent-health"),
-    intentAgent = null,
+    productionUnderstandingProbe = null,
     capabilityCenter = null,
     toolProvider = null,
     taskBrain = null,
@@ -107,7 +107,7 @@ class AgentHealthManager {
     this.root = root;
     this.latestFile = path.join(root, "latest.json");
     this.historyFile = path.join(root, "history.json");
-    this.intentAgent = intentAgent;
+    this.productionUnderstandingProbe = typeof productionUnderstandingProbe === "function" ? productionUnderstandingProbe : null;
     this.capabilityCenter = capabilityCenter;
     this.toolProvider = typeof toolProvider === "function" ? toolProvider : () => [];
     this.taskBrain = taskBrain;
@@ -343,19 +343,28 @@ class AgentHealthManager {
     };
   }
 
-  probeUnderstanding() {
-    const cases = [
-      { input: "帮我做一个计算器", expected: ["dev.code.calculator", "dev.code"] },
-      { input: "开发一个小工具", expected: ["dev.code"] },
-      { input: "分析这个 Excel 文件", expected: ["office.doc", "file.create"] },
-      { input: "你好，解释什么是缓存", expected: ["general.chat"] }
-    ];
-    const tests = cases.map((item) => {
-      const actual = this.intentAgent?.analyze?.(item.input, { hasAttachments: /Excel/.test(item.input) })?.primaryIntent || "unavailable";
-      return { ...item, actual, passed: item.expected.includes(actual) };
-    });
-    const score = clamp((tests.filter((item) => item.passed).length / tests.length) * 100);
-    return { score, passed: score >= 60, tests, errors: tests.filter((item) => !item.passed).length, quality: qualityFor(score), detail: `完成 ${tests.filter((item) => item.passed).length}/${tests.length} 项意图测试` };
+  async probeUnderstanding() {
+    if (this.productionUnderstandingProbe) {
+      const result = await this.productionUnderstandingProbe();
+      const tests = Array.isArray(result?.tests) ? result.tests : [];
+      const score = scoreFromChecks(tests);
+      return {
+        ...result,
+        score,
+        passed: tests.length > 0 && tests.every((item) => item.passed === true),
+        errors: tests.filter((item) => item.passed !== true).length,
+        quality: qualityFor(score),
+        detail: result?.detail || `生产请求入口 ${tests.filter((item) => item.passed).length}/${tests.length} 项通过`
+      };
+    }
+    return {
+      score: 0,
+      passed: false,
+      tests: [{ name: "production-request-entry", passed: false, detail: "未配置生产请求入口探针" }],
+      errors: 1,
+      quality: "未验证",
+      detail: "旧 IntentAgent 静态分类不再作为生产链路证据"
+    };
   }
 
   probeContext() {

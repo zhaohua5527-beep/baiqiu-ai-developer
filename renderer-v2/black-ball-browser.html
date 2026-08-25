@@ -9,22 +9,41 @@
 <body>
   <header class="browser-toolbar">
     <div class="browser-brand" title="黑球浏览器"><i></i><span>黑球</span></div>
-    <nav aria-label="网页导航">
-      <button id="backBtn" type="button" title="后退" aria-label="后退">&#x2190;</button>
-      <button id="forwardBtn" type="button" title="前进" aria-label="前进">&#x2192;</button>
-      <button id="reloadBtn" type="button" title="刷新" aria-label="刷新">&#x21bb;</button>
-      <button id="homeBtn" type="button" title="主页" aria-label="主页">&#x2302;</button>
+    <nav class="browser-nav" aria-label="网页导航">
+      <button id="backBtn" class="icon-button" type="button" title="后退" aria-label="后退">←</button>
+      <button id="forwardBtn" class="icon-button" type="button" title="前进" aria-label="前进">→</button>
+      <button id="reloadBtn" class="icon-button" type="button" title="刷新" aria-label="刷新">↻</button>
+      <button id="homeBtn" class="icon-button" type="button" title="新标签页" aria-label="新标签页">⌂</button>
     </nav>
     <form id="addressForm">
-      <span id="securityState" title="网页连接状态">&#x25cf;</span>
-      <input id="addressInput" type="text" autocomplete="off" spellcheck="false" aria-label="网址或搜索词" placeholder="输入网址或使用 Google 搜索">
+      <span id="securityState" title="网页连接状态">●</span>
+      <input id="addressInput" type="text" autocomplete="off" spellcheck="false" aria-label="网址或搜索词" placeholder="输入网址或搜索词">
+      <button id="bookmarkBtn" class="icon-button" type="button" title="加入收藏" aria-label="加入收藏">☆</button>
+      <button id="searchBtn" type="submit" title="访问" aria-label="访问">↵</button>
     </form>
     <div class="browser-actions">
       <span id="loadingState" aria-live="polite"></span>
-      <button id="analyzeBtn" class="primary" type="button" title="提取当前页面内容并发送到原会话">分析当前页</button>
-      <button id="externalBtn" type="button" title="使用系统浏览器打开当前网页" aria-label="外部打开">外部打开</button>
+      <button id="savedBtn" class="icon-button" type="button" title="收藏和已保存账号" aria-label="收藏和已保存账号">☰</button>
+      <button id="analyzeBtn" class="icon-button" type="button" title="分析当前页面" aria-label="分析当前页面">AI</button>
+      <button id="externalBtn" class="icon-button" type="button" title="在系统浏览器打开" aria-label="在系统浏览器打开">↗</button>
     </div>
   </header>
+  <nav id="browserTabs" class="browser-tabs" aria-label="打开的网页标签">
+    <button id="newTabBtn" class="browser-new-tab" type="button" title="新建标签页" aria-label="新建标签页">+</button>
+  </nav>
+  <aside id="savedPanel" class="saved-panel" hidden>
+    <section><header><strong>收藏</strong></header><div id="bookmarkList" class="saved-list"></div></section>
+    <section><header><strong>已保存账号</strong><button id="saveCredentialBtn" type="button">保存当前账号</button></header><div id="credentialList" class="saved-list"></div></section>
+  </aside>
+  <dialog id="credentialDialog" class="credential-dialog">
+    <form id="credentialForm" method="dialog">
+      <header><strong>保存账号</strong><button value="cancel" aria-label="关闭" title="关闭">×</button></header>
+      <p id="credentialOrigin"></p>
+      <label>账号<input id="credentialUsername" name="username" autocomplete="username" required></label>
+      <label>密码<input id="credentialPassword" name="password" type="password" autocomplete="current-password" required></label>
+      <footer><button value="cancel" type="button" id="credentialCancelBtn">取消</button><button value="save" type="submit" class="primary">加密保存</button></footer>
+    </form>
+  </dialog>
   <div id="errorBar" class="browser-error" hidden></div>
   <script src="black-ball-browser.js"></script>
 </body>
