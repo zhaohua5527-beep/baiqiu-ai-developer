@@ -10948,6 +10948,7 @@ function registerLiveChatStream(streamId, sessionId, thinkingRow, options = {}) 
     pendingReasoningBlockId: "",
     queuedReasoningDeltas: [],
     structuredPanel: null,
+    structuredEvents: [],
     structuredNodes: new Map(),
     seenStructuredEventIds: new Set(),
     answerStartedSegments: new Set(),
@@ -11125,6 +11126,17 @@ function appendLiveStructuredResult(entry, progress = {}) {
     if (entry.seenStructuredEventIds.has(eventId)) return null;
     entry.seenStructuredEventIds.add(eventId);
   }
+  entry.structuredEvents ||= [];
+  const structuredSequence = Number(progress.sequence || progress.seq || 0) || entry.structuredEvents.length + 1;
+  const structuredEventId = eventId || `${entry.turnId}:structured:${structuredSequence}:${String(progress.type || progress.kind || "public_progress")}`;
+  entry.structuredEvents.push({
+    ...progress,
+    turnId: String(progress.turnId || entry.turnId || entry.streamId || "").trim(),
+    eventId: structuredEventId,
+    sequence: structuredSequence,
+    target: "structured",
+    __shownAt: Date.now()
+  });
   const segmentId = String(progress.segmentId || progress.segment_id || "").trim() || "__default";
   const block = ensureLiveSegmentBlock(entry, segmentId);
   const panel = placeLiveStructuredResultPanel(entry, segmentId);
@@ -22094,3 +22106,125 @@ api.init().then(async (db) => {
   }, 1500);
 });
 123
+
+// The React renderer consumes this sanitized view only. Black Ball events,
+// persistence, and all IPC actions remain owned by the legacy renderer.
+(function installAssistantUiBridge() {
+  const listeners = new Set();
+  let lastFingerprint = "";
+  const copyEvent = (event, target) => event && typeof event === "object" ? { ...event, target } : null;
+  const messageEvents = (message = {}) => {
+    const raw = message.raw && typeof message.raw === "object" ? message.raw : {};
+    const product = raw.productResult && typeof raw.productResult === "object" ? raw.productResult : {};
+    const productRaw = product.raw && typeof product.raw === "object" ? product.raw : {};
+    const structuredEvents = [
+      ...(Array.isArray(message.structuredEvents) ? message.structuredEvents : []),
+      ...(Array.isArray(raw.structuredEvents) ? raw.structuredEvents : []),
+      ...(Array.isArray(product.structuredEvents) ? product.structuredEvents : []),
+      ...(Array.isArray(productRaw.structuredEvents) ? productRaw.structuredEvents : [])
+    ].map((event) => copyEvent(event, "structured")).filter(Boolean);
+    const executionEvents = [
+      ...(Array.isArray(raw.executionLog) ? raw.executionLog : []),
+      ...(Array.isArray(raw.requestRun?.evidence?.executionLog) ? raw.requestRun.evidence.executionLog : []),
+      ...(Array.isArray(product.executionLog) ? product.executionLog : []),
+      ...(Array.isArray(productRaw.executionLog) ? productRaw.executionLog : []),
+      ...(Array.isArray(product.taskBrain?.execution_log) ? product.taskBrain.execution_log : [])
+    ].map((event) => copyEvent(event, "execution")).filter((event) => event
+      && !["reasoning_delta", "reasoning_note", "public_reasoning"].includes(String(event.kind || event.type || "").toLowerCase()));
+    const answerSegments = [
+      ...(Array.isArray(message.answerSegments) ? message.answerSegments : []),
+      ...(Array.isArray(raw.answerSegments) ? raw.answerSegments : []),
+      ...(Array.isArray(product.answerSegments) ? product.answerSegments : []),
+      ...(Array.isArray(productRaw.answerSegments) ? productRaw.answerSegments : [])
+    ].map((event) => copyEvent(event, "answer")).filter(Boolean);
+    return { structuredEvents, executionEvents, answerSegments };
+  };
+  const safeMessage = (message = {}) => ({
+    id: String(message.id || ""),
+    role: message.role === "user" ? "user" : "assistant",
+    text: String(message.text || message.content || ""),
+    createdAt: message.createdAt || message.timestamp || Date.now(),
+    turnId: String(message.turnId || message.raw?.productResult?.turnId || ""),
+    eventId: String(message.eventId || ""),
+    sequence: Number(message.sequence || 0),
+    ...messageEvents(message)
+  });
+  const liveMessage = (entry) => {
+    if (!entry || entry.sessionId !== String(state.selectedSessionId || "")) return null;
+    if (!entry.row?.isConnected && !entry.finalizing) return null;
+    return {
+      id: `live:${String(entry.streamId || entry.turnId || Date.now())}`,
+      role: "assistant",
+      text: String(entry.visibleText || entry.targetText || ""),
+      createdAt: entry.startedAt || Date.now(),
+      turnId: String(entry.turnId || entry.streamId || ""),
+      eventId: "",
+      sequence: Number(entry.lastFrameSequence || 0),
+      live: true,
+      executionEvents: (Array.isArray(entry.activityDetails) ? entry.activityDetails : [])
+        .map((event) => copyEvent(event, "execution")).filter(Boolean),
+      structuredEvents: (Array.isArray(entry.structuredEvents) ? entry.structuredEvents : [])
+        .map((event) => copyEvent(event, "structured")).filter(Boolean),
+      answerSegments: []
+    };
+  };
+  const snapshot = () => {
+    const db = state.db && typeof state.db === "object" ? state.db : {};
+    const sessionId = String(state.selectedSessionId || db.selectedSessionId || "");
+    const session = (Array.isArray(db.sessions) ? db.sessions : []).find((item) => String(item.id) === sessionId);
+    const messages = Array.isArray(state.currentMessages) ? state.currentMessages.map(safeMessage) : [];
+    const live = [...liveChatStreams.values()].map(liveMessage).filter(Boolean).at(-1);
+    if (live && messages.at(-1)?.text !== live.text) messages.push(live);
+    const sessions = (Array.isArray(db.sessions) ? db.sessions : []).filter((item) => !isTrashSession(item)).map((item) => ({
+      id: String(item.id || ""),
+      title: String(projectSessionDisplayName(item) || item.title || "新对话"),
+      type: String(item.type || "chat"),
+      status: String(item.status || "created"),
+      running: sessionIsRunning(item),
+      pinned: item.pinned === true
+    }));
+    return {
+      sessionId,
+      sessionTitle: String(projectSessionDisplayName(session || {}) || "新对话"),
+      model: String(db.settings?.model || db.settings?.modelId || currentModelBadge?.textContent || "DeepSeek"),
+      running: Boolean(state.busy || sessionIsRunning(session)),
+      sessions,
+      messages
+    };
+  };
+  const fingerprint = (value) => JSON.stringify({
+    sessionId: value.sessionId,
+    running: value.running,
+    sessions: value.sessions.map((item) => `${item.id}:${item.title}:${item.status}`),
+    messages: value.messages.map((item) => `${item.id}:${item.text.length}:${item.structuredEvents.length}:${item.executionEvents.length}`)
+  });
+  const notify = (force = false) => {
+    const value = snapshot();
+    const nextFingerprint = fingerprint(value);
+    if (!force && nextFingerprint === lastFingerprint) return;
+    lastFingerprint = nextFingerprint;
+    listeners.forEach((listener) => listener());
+  };
+  window.baiqiuAssistantUI = {
+    getSnapshot: snapshot,
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    send(text) {
+      const value = String(text || "").trim();
+      if (!value || !chatInput || !chatForm) return;
+      chatInput.value = value;
+      chatInput.dispatchEvent(new Event("input", { bubbles: true }));
+      chatForm.requestSubmit?.();
+    },
+    cancel() { sendBtn?.click(); },
+    newSession() { newSessionBtn?.click(); },
+    selectSession(id) {
+      [...(sessionList?.querySelectorAll("[data-id]") || [])]
+        .find((node) => String(node.dataset.id) === String(id))?.click();
+    },
+    openSettings() { settingsBtn?.click(); },
+    openTasks() { taskBoardToggleBtn?.click(); },
+    windowAction(action) { document.querySelector(`[data-window="${CSS.escape(String(action))}"]`)?.click(); }
+  };
+  setInterval(() => notify(false), 220);
+  requestAnimationFrame(() => notify(true));
+})();

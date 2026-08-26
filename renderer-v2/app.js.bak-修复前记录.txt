@@ -1,0 +1,49 @@
+白球AI 最终回复隐藏 Bug 修复前备份记录
+========================================
+文件：renderer-v2/app.js
+时间：2026-08-15（修复前）
+
+以下是要修改的旧函数代码，用于还原参考。
+
+--------------------------------------------------
+1) filterAssistantExecutionOutput（原代码）
+--------------------------------------------------
+function filterAssistantExecutionOutput(text) {
+  const cleaned = window.BaiqiuAssistantCodeUtils.hideInternalToolOutput(
+    window.BaiqiuAssistantCodeUtils.hideCodeBlocks(text)
+  ).trim();
+  return stripHmsOutlineEnvelopeTags(stripHmsProgressEnvelopeTags(stripHmsPresentationEnvelopeTags(cleaned)));
+}
+
+--------------------------------------------------
+2) rawBlackBallAnswerText（原代码）
+--------------------------------------------------
+function rawBlackBallAnswerText(text = "") {
+  const source = String(text || "");
+  const finalMatches = [...source.matchAll(/<baiqiu-final>([\s\S]*?)<\/baiqiu-final>/ig)];
+  const answer = finalMatches.length ? finalMatches.at(-1)?.[1] || "" : source;
+  return String(answer)
+    .replace(/<baiqiu-(?:progress|presentation|outcome|clarification|outline)>[\s\S]*?<\/baiqiu-(?:progress|presentation|outcome|clarification|outline)>/ig, "")
+    .replace(/<baiqiu-(?:progress|presentation|outcome|clarification|outline)>[\s\S]*$/ig, "")
+    .trim();
+}
+
+--------------------------------------------------
+3) stripHmsProgressEnvelopeTags（原代码）
+--------------------------------------------------
+function stripHmsProgressEnvelopeTags(text = "") {
+  return String(text || "")
+    .replace(/<baiqiu-progress>[\s\S]*?<\/baiqiu-progress>/ig, "")
+    .replace(/<baiqiu-progress>[\s\S]*$/ig, "")
+    .trim();
+}
+
+--------------------------------------------------
+4) stripHmsOutlineEnvelopeTags（原代码）
+--------------------------------------------------
+function stripHmsOutlineEnvelopeTags(text = "") {
+  return String(text || "")
+    .replace(/<baiqiu-outline>[\s\S]*?<\/baiqiu-outline>/ig, "")
+    .replace(/<baiqiu-outline>[\s\S]*$/ig, "")
+    .trim();
+}
