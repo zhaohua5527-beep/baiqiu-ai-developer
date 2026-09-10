@@ -9,6 +9,7 @@ const root = path.join(__dirname, "..");
 const mainSource = fs.readFileSync(path.join(root, "main.js"), "utf8");
 const rendererSource = fs.readFileSync(path.join(root, "renderer-v2", "app.js"), "utf8");
 const { HmsProgressMapper, toolEvent } = require(path.join(root, "services", "hms-progress"));
+const blackBallPublicEvents = require(path.join(root, "services", "black-ball-public-event-contract"));
 
 function sourceBetween(source, start, end) {
   const from = source.indexOf(start);
@@ -48,7 +49,8 @@ test("Black Ball start creates the single visible activity anchor and clock", ()
   assert.match(mainSource, /function emitBlackBallRunStarted/);
   assert.match(mainSource, /emitBlackBallRunStarted\(sessionId, payload\.streamId \|\| requestRunId/);
   assert.match(handler, /const frameProgress = frame\.progress/);
-  assert.match(handler, /if \(frameProgress\) setLiveStreamActivity\(entry, frameProgress\)/);
+  assert.match(handler, /const acceptedEvent = acceptLiveTurnEvent\(entry, frameProgress \|\| frame/);
+  assert.match(handler, /if \(frameProgress\) setLiveStreamActivity\(entry, acceptedEvent\)/);
   assert.match(handler, /if \(frame\.type === "start"\)/);
   assert.match(handler, /entry\.executionStartedAt = Number\(frame\.startedAt\)/);
   assert.match(rendererSource, /startedAt: Number\(options\.startedAt \|\| Date\.now\(\)\)/);
@@ -57,9 +59,16 @@ test("Black Ball start creates the single visible activity anchor and clock", ()
 });
 
 test("duplicate lifecycle frames share one display identity", () => {
-  assert.match(rendererSource, /Lifecycle\/public progress events can be emitted once at request accept/);
-  assert.match(rendererSource, /\["lifecycle", "public_progress", "progress", "execution"\]\.includes\(entry\.kind\)/);
-  assert.match(rendererSource, /const identity = \["lifecycle", "public_progress", "progress", "execution"\]/);
+  const eventBoundary = sourceBetween(rendererSource, "function transitionLiveTurn", "function registerLiveChatStream");
+  const harness = new Function("blackBallPublicEvents", `${eventBoundary}; return { acceptLiveTurnEvent };`)(blackBallPublicEvents);
+  const entry = { streamId: "turn-1", turnId: "turn-1", eventLedger: new Map(), eventsByTarget: new Map(), protocolErrors: [] };
+  const event = { turnId: "turn-1", eventId: "turn-1:start", sequence: 1, target: "execution_activity", type: "lifecycle", message: "request accepted" };
+
+  assert.ok(harness.acceptLiveTurnEvent(entry, event));
+  assert.equal(harness.acceptLiveTurnEvent(entry, event), null);
+  assert.equal(entry.eventLedger.size, 1);
+  assert.equal(entry.eventsByTarget.get("execution").length, 1);
+  assert.equal(entry.protocolErrors.length, 0);
 });
 
 test("the lifecycle anchor owns the only clock and never becomes fake reasoning", () => {
@@ -106,6 +115,16 @@ test("model-authored progress and real tool events retain Black Ball provenance"
   assert.equal(tool.toolCallId, "tool-1");
 });
 
+test("the producer must close public progress before starting a native tool", () => {
+  assert.match(require("../services/public-response-protocol").publicResponseStreamPrompt(), /每个标签必须闭合后再调用工具/);
+});
+
+test("stage results contain only completed facts and next work requires a separate action", () => {
+  const protocol = require("../services/public-response-protocol").publicResponseStreamPrompt();
+  assert.match(protocol, /正文只包含已完成的事实、结论或交付内容/);
+  assert.match(protocol, /下一步另发 action/);
+});
+
 test("White Ball lifecycle labels are rejected at the IPC boundary", () => {
   const publicBoundary = sourceBetween(mainSource, "function isBlackBallPublicProgress", "function safeReasoningDelta");
   assert.match(publicBoundary, /provenance\.startsWith\("blackball_"\)/);
@@ -134,24 +153,29 @@ test("each answer segment retires only its temporary process surface", () => {
   assert.match(completeReasoning, /if \(remainingVisibleMs > 0\) setTimeout\(beginExit, remainingVisibleMs\)/);
   assert.match(delta, /const firstAnswerDelta = !entry\.answerStartedSegments\.has\(segmentId\)/);
   assert.match(delta, /entry\.pendingReasoningBlockId = ""/);
-  assert.match(delta, /if \(firstAnswerDelta\) retireLiveExecutionPhase\(entry, segmentId\)/);
-  assert.match(reasoning, /entry\.activityDetails = \[/);
+  assert.match(delta, /if \(firstAnswerDelta\) \{\s*retireLiveExecutionPhase\(entry, segmentId\);\s*\}/);
+  assert.match(reasoning, /entry\.reasoningDetails = \[/);
   assert.match(reasoning, /setLiveCurrentThinking\(entry, combinedText/);
-  assert.doesNotMatch(reasoning, /scheduleLiveActivityPaint\(entry\)/);
-  assert.doesNotMatch(reasoning, /scheduleLiveReasoningReveal/);
+  assert.match(rendererSource, /PUBLIC_REASONING_MIN_VISIBLE_MS/);
+  assert.match(rendererSource, /structured_result|execution-event-narrative/);
   assert.match(rendererSource, /const EXECUTION_ACTIVITY_VISIBLE_LIMIT = 3/);
   assert.match(rendererSource, /entry\.activity\.dataset\.activityExpanded = "0"/);
   assert.match(finalize, /entry\.finalized = true/);
-  assert.match(finalize, /appendLiveFinalAnswerSuffix/);
+  assert.match(finalize, /entry\.finalizeWhenDrained = applyCompletedRow/);
+  assert.match(finalize, /collapseCompletedExecutionActivity\(entry\.activity/);
 });
 
-test("completed process UI removes the temporary activity surface", () => {
+test("completed process UI retains the full expandable execution timeline", () => {
   const collapse = sourceBetween(rendererSource, "function collapseCompletedExecutionActivity", "function streamActivityHtml");
   assert.match(collapse, /stopExecutionActivityFlow\(root\)/);
-  assert.match(collapse, /root\.remove\(\)/);
-  assert.match(collapse, /return null/);
+  assert.match(collapse, /root\.dataset\.lifecycle = "completed"/);
+  assert.doesNotMatch(collapse, /execution-completion-count/);
+  assert.match(collapse, /streaming-elapsed/);
+  assert.match(collapse, /root\.__executionActivityDetails = history/);
+  assert.doesNotMatch(collapse, /execution-activity-duration-only/);
+  assert.match(collapse, /return root/);
   const finish = sourceBetween(rendererSource, "function finishLiveExecutionSurface", "function collapseCompletedExecutionActivity");
-  assert.match(finish, /activity\.remove\(\)/);
-  assert.match(finish, /entry\.activity = null/);
+  assert.match(finish, /activity\.classList\.add\("execution-activity-completed"\)/);
+  assert.match(finish, /paintExecutionActivityDetails\(activity, entry\.activityDetails \|\| \[\]\)/);
   assert.doesNotMatch(rendererSource, /createThinkingMessage\("已接收任务，正在建立执行上下文"/);
 });

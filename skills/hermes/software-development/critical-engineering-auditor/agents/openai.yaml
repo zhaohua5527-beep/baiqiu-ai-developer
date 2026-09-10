@@ -1,0 +1,4 @@
+interface:
+  display_name: "工程质疑审计"
+  short_description: "Audit engineering changes, edge cases, and regressions"
+  default_prompt: "Use $critical-engineering-auditor to audit this engineering change before implementation."

@@ -20,7 +20,7 @@ test("short contextual questions are not rebound before Black Ball sees them", (
 test("failed product results cannot persist unverified model prose as a normal answer", () => {
   assert.match(mainSource, /const failedResult = \["failed", "timed_out"\]\.includes\(requestRun\.executionOutcome\)/);
   assert.match(mainSource, /executionOutcome: requestRun\.executionOutcome/);
-  assert.match(mainSource, /existing\.text = resolvedText/);
+  assert.match(mainSource, /existing\.text = mergePermanentHmsAnswer\(existing\.text, resolvedText\)/);
   assert.match(mainSource, /requestRun\.executionOutcome === "timed_out" \? "执行超时" : "执行失败"/);
 });
 

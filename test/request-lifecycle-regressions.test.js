@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const SessionTaskQueue = require("../renderer-v2/session-task-queue");
+const blackBallPublicEvents = require("../services/black-ball-public-event-contract");
 
 const root = path.join(__dirname, "..");
 const mainSource = fs.readFileSync(path.join(root, "main.js"), "utf8");
@@ -18,10 +19,13 @@ function sourceBetween(source, start, end) {
 }
 
 function liveFrameHarness(entry) {
+  const eventBoundary = sourceBetween(rendererSource, "function transitionLiveTurn", "function registerLiveChatStream");
   const body = sourceBetween(rendererSource, "function handleChatStreamFrame", "function removeSessionExecutionIndicator");
   const liveChatStreams = new Map([[entry.streamId, entry]]);
   const factory = new Function(
     "liveChatStreams",
+    "LIVE_TURN_STATES",
+    "LIVE_TURN_TRANSITIONS",
     "handleVoiceConversationStreamFrame",
     "setLiveStreamStage",
     "setLiveStreamActivity",
@@ -30,16 +34,25 @@ function liveFrameHarness(entry) {
     "streamSegmentKey",
     "adoptPendingReasoningBlock",
     "placeLiveActivityBeforeBlock",
+    "placeLiveStructuredResultPanel",
+    "orderLiveSegmentBlocks",
     "retireLiveExecutionPhase",
     "settleLiveSegmentTransition",
     "scheduleLiveChatStreamPaint",
     "resetLiveChatStreamReveal",
     "setLiveCurrentThinking",
     "updateLiveStreamElapsed",
-    `${body}; return handleChatStreamFrame;`
+    "freezeLiveStreamElapsed",
+    "syncSessionRuntimeControls",
+    "appendLiveStreamNotice",
+    "recycleLiveStructuredProcess",
+    "blackBallPublicEvents",
+    `const reportStartupMetric = () => {}; ${sourceBetween(rendererSource, "function reportLiveOutputTiming", 'reportStartupMetric("renderer:script-start")')}\n${eventBoundary}\n${body}; return handleChatStreamFrame;`
   );
   return factory(
     liveChatStreams,
+    { CREATED: "CREATED", RUNNING: "RUNNING", TERMINAL_RECEIVED: "TERMINAL_RECEIVED" },
+    { CREATED: new Set(["RUNNING", "TERMINAL_RECEIVED"]), RUNNING: new Set(["TERMINAL_RECEIVED"]) },
     () => {},
     () => {},
     () => {},
@@ -53,7 +66,14 @@ function liveFrameHarness(entry) {
     () => {},
     () => {},
     () => {},
-    () => {}
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    blackBallPublicEvents
   );
 }
 
@@ -102,10 +122,10 @@ test("a duplicate start frame cannot erase or replace text already owned by the 
     row: null
   };
   const frame = liveFrameHarness(entry);
-  frame({ type: "start", streamId: "run-1", sessionId: "session-1", seq: 1 });
-  frame({ type: "delta", delta: "第一段", streamId: "run-1", sessionId: "session-1", seq: 2 });
-  frame({ type: "start", streamId: "run-1", sessionId: "session-1", seq: 3 });
-  frame({ type: "delta", delta: "第二段", streamId: "run-1", sessionId: "session-1", seq: 4 });
+  frame({ type: "start", eventId: "run-1:start", sequence: 1, target: "execution", eventType: "execution_start", streamId: "run-1", sessionId: "session-1", seq: 1 });
+  frame({ type: "delta", eventId: "run-1:answer:1", sequence: 1, target: "answer", eventType: "answer_delta", delta: "第一段", streamId: "run-1", sessionId: "session-1", seq: 2 });
+  frame({ type: "start", eventId: "run-1:start:duplicate", sequence: 2, target: "execution", eventType: "execution_start", streamId: "run-1", sessionId: "session-1", seq: 3 });
+  frame({ type: "delta", eventId: "run-1:answer:2", sequence: 2, target: "answer", eventType: "answer_delta", delta: "第二段", streamId: "run-1", sessionId: "session-1", seq: 4 });
   assert.equal(entry.text, "第一段第二段");
   assert.doesNotMatch(sourceBetween(rendererSource, "function handleChatStreamFrame", "function removeSessionExecutionIndicator"), /resetPending/);
 });
@@ -125,9 +145,9 @@ test("the first terminal frame is latched and later frames cannot mutate the ans
     activity: null
   };
   const frame = liveFrameHarness(entry);
-  frame({ type: "done", streamId: entry.streamId, sessionId: entry.sessionId, seq: 1 });
-  frame({ type: "delta", delta: "late", streamId: entry.streamId, sessionId: entry.sessionId, seq: 2 });
-  frame({ type: "error", message: "late error", streamId: entry.streamId, sessionId: entry.sessionId, seq: 3 });
+  frame({ type: "done", eventId: "run-terminal:done", sequence: 1, target: "answer", eventType: "turn_complete", streamId: entry.streamId, sessionId: entry.sessionId, seq: 1 });
+  frame({ type: "delta", eventId: "run-terminal:late-answer", sequence: 2, target: "answer", eventType: "answer_delta", delta: "late", streamId: entry.streamId, sessionId: entry.sessionId, seq: 2 });
+  frame({ type: "error", eventId: "run-terminal:late-error", sequence: 3, target: "execution", eventType: "turn_complete", message: "late error", streamId: entry.streamId, sessionId: entry.sessionId, seq: 3 });
   assert.equal(entry.text, "answer");
   assert.equal(entry.terminalType, "done");
   assert.equal(entry.lastFrameSequence, 1);
@@ -136,10 +156,12 @@ test("the first terminal frame is latched and later frames cannot mutate the ans
 test("durable final text cannot replace a mismatched live answer that is already visible", () => {
   const finalize = sourceBetween(rendererSource, "function finalizeLiveChatStream", "function discardLiveChatStreamsForSession");
   assert.match(finalize, /finalTextDiffers/);
-  assert.match(finalize, /if \(rendered && !hasStreamedAnswer\)/);
+  assert.match(finalize, /if \(rendered && \(!hasStreamedAnswer \|\| answerPaintIncomplete\)\)/);
   assert.doesNotMatch(finalize, /rendered && \(!hasStreamedAnswer \|\| finalTextDiffers\)/);
   assert.match(finalize, /const committedText = hasStreamedAnswer && !finalExtendsStream[\s\S]*?streamedDisplayText/);
-  assert.match(finalize, /renderProgressiveMarkdown\(rendered, finalDisplayText, \{ final: true \}\)/);
+  assert.match(finalize, /renderSegmentedLiveAnswer\(entry\)/);
+  assert.match(finalize, /else if \(finalTextDiffers\)[\s\S]*?durable_answer_conflicts_with_stream/);
+  assert.doesNotMatch(finalize, /renderProgressiveMarkdown\(rendered, finalDisplayText/);
   assert.doesNotMatch(finalize, /addMessage\(/);
 });
 
@@ -161,7 +183,7 @@ test("product submissions have one per-session owner, idempotent replay, and a m
   assert.match(submit, /const controller = new AbortController\(\)/);
   assert.doesNotMatch(submit, /previousRun[\s\S]*?previousRun\.controller/);
   assert.match(submit, /timeoutMs: PRODUCT_RUN_TIMEOUT_MS/);
-  const runtimeResult = submit.indexOf("const result = await submitProductWithTaskBrain(payload)");
+  const runtimeResult = submit.indexOf("submitProductWithTaskBrain(payload)");
   const commitBarrier = submit.indexOf("ensureRunActive(controller.signal)", runtimeResult);
   const persistedResult = submit.indexOf("return persistProductResult", commitBarrier);
   assert.ok(runtimeResult >= 0 && commitBarrier > runtimeResult && persistedResult > commitBarrier);
@@ -297,11 +319,12 @@ test("persisted rows are adopted by response identity instead of creating a seco
   assert.match(send, /const persistedRow = responseMessageId \? messageRowForId\(responseMessageId\) : null/);
 });
 
-test("live activity keeps a bounded de-duplicated history and no-progress aborts the owned run", () => {
+test("live activity keeps every uniquely identified event and no-progress aborts the owned run", () => {
   const activity = sourceBetween(rendererSource, "function setLiveStreamActivity", "function ensureLiveStreamRow");
   const progress = sourceBetween(rendererSource, "function checkLiveStreamProgress", "function reasoningSegmentKey");
   assert.match(activity, /\[\.\.\.entry\.activityDetails, activityEntry\]/);
-  assert.match(activity, /executionActivityEntryKey/);
+  assert.match(activity, /uniqueExecutionActivityEntries/);
+  assert.doesNotMatch(activity, /EXECUTION_ACTIVITY_HISTORY_LIMIT/);
   assert.doesNotMatch(activity, /entry\.activityDetails = \[activityEntry\]/);
   assert.match(progress, /handleLiveStreamTimeout\(entry, "连续 2 分钟/);
   assert.match(progress, /reason: "timeout"/);

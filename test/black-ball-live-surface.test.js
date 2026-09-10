@@ -14,21 +14,44 @@ function sourceBetween(start, end) {
   return source.slice(from, to);
 }
 
-test("live activity uses one dynamic top row without a duplicate fixed title", () => {
+test("live activity uses one factual row above the real result", () => {
   const activity = sourceBetween("function streamActivityHtml", "function updateLiveStreamElapsed");
-  const theater = sourceBetween("function executionTheaterSceneFromActivity", "function enqueueExecutionActivityTheater");
+  const narrative = sourceBetween("function paintLiveExecutionNarrative", "function scheduleExecutionNarrativeReveal");
   const head = activity.match(/<div class="execution-activity-head">([\s\S]*?)<\/div>\s*<div class="execution-activity-shell">/)?.[1] || "";
 
-  assert.match(head, /execution-activity-inline-theater/);
   assert.match(head, /streaming-elapsed/);
-  assert.doesNotMatch(activity, /streaming-activity-label/);
-  assert.doesNotMatch(activity, new RegExp("\\u9ed1\\u7403\\u5c0f\\u5267\\u573a"));
-  assert.equal((activity.match(/execution-activity-inline-theater/g) || []).length, 1);
-  assert.match(theater, /name: "\u9ed1\u7403"/);
+  assert.match(head, /streaming-activity-label/);
+  assert.doesNotMatch(head, /execution-activity-step-label/);
+  assert.doesNotMatch(head, /execution-stage-summary|execution-activity-narrative|execution-event-narrative/);
+  assert.match(activity, /execution-activity-narrative streaming-structured-result/);
+  assert.match(activity, /execution-event-narrative/);
+  assert.doesNotMatch(activity, /data-theater="1"/);
+  assert.match(activity, /mini-theatre-region execution-activity-inline-theater/);
+  assert.match(activity, /execution-process-region/);
+  assert.ok(activity.indexOf("mini-theatre-region") < activity.indexOf("execution-process-region"));
+  assert.match(narrative, /item\.publicSummary/);
+  assert.doesNotMatch(narrative, /Math\.random|nextExecutionActivityWhimsy|renderExecutionActivityWhimsyScene/);
+});
+
+test("live execution lines type real events without event clocks or clipping", () => {
+  const lines = sourceBetween("function executionActivityLineHtml", "function replaceExecutionActivityLines");
+  const push = sourceBetween("function pushExecutionActivityDetail", "function executionActivityFlowIsPending");
+
+  assert.doesNotMatch(lines, /execution-activity-line-marker|executionActivityTimeText|document\.createElement\("time"\)/);
+  assert.match(lines, /line\.append\(text\)/);
+  assert.match(push, /root\.dataset\.lifecycle === "completed" && root\.dataset\.activityExpanded !== "1"/);
+  assert.match(push, /flow\.queue = \[\.\.\.flow\.queue, detail\]/);
+});
+
+test("live task step keeps only the latest real execution summary", () => {
+  const narrative = sourceBetween("function paintLiveExecutionNarrative", "function scheduleExecutionNarrativeReveal");
+
+  assert.match(narrative, /summaries\.slice\(-1\)/);
+  assert.doesNotMatch(narrative, /summaries\.slice\(-EXECUTION_ACTIVITY_VISIBLE_LIMIT\)/);
 });
 
 test("English internal narration is buffered across stream chunks", () => {
-  const helpers = sourceBetween("function rawBlackBallAnswerText", "function isNativeBlackBallMessage");
+  const helpers = sourceBetween("function normalizeEscapedBaiqiuProtocolClosers", "function isNativeBlackBallMessage");
   const { filterLiveAssistantDelta } = new Function(`${helpers}; return { filterLiveAssistantDelta };`)();
   const entry = { suppressingInternalNarration: false, internalNarrationBuffer: "" };
 
@@ -45,18 +68,34 @@ test("English internal narration is buffered across stream chunks", () => {
   assert.equal(filterLiveAssistantDelta(englishEntry, "Hello, how can I help?"), "Hello, how can I help?");
 });
 
-test("terminal session state wins over a stale local queue flag", () => {
+test("runtime controls are independent from queue and presentation drain state", () => {
+  const localRuntime = sourceBetween("function liveChatStreamRuntimePhase", "function sessionIsRunning");
   const running = sourceBetween("function sessionIsRunning", "async function selectSessionById");
   const sidebar = sourceBetween("function projectSessionStatus", "function projectSidebarStatus");
 
-  assert.ok(running.indexOf("terminalStatuses.includes(status)") < running.indexOf("sessionTaskQueue.isActive(session.id)"));
-  assert.ok(sidebar.indexOf('["SUCCESS", "DONE", "COMPLETED"]') < sidebar.lastIndexOf("sessionTaskQueue.isActive(session.id)"));
+  assert.match(localRuntime, /LIVE_TURN_STATES\.CREATED, LIVE_TURN_STATES\.RUNNING/);
+  assert.match(localRuntime, /LIVE_TURN_STATES\.TERMINAL_RECEIVED/);
+  assert.match(localRuntime, /LIVE_TURN_STATES\.ANSWER_COMMITTED/);
+  assert.match(running, /localRuntime\.phase === "running"/);
+  assert.match(running, /localRuntime\.phase === "terminal"/);
+  assert.doesNotMatch(running, /sessionTaskQueue\.isActive/);
+  assert.doesNotMatch(running, /activeLiveChatStreamForSession\(session\.id\).*return true/);
+  assert.match(sidebar, /localRuntime\.phase === "running"/);
+  assert.doesNotMatch(sidebar, /sessionTaskQueue\.isActive/);
 });
 
-test("terminal replies remove the temporary theater and activity timeline", () => {
+test("terminal replies retain the full expandable execution timeline", () => {
   const collapse = sourceBetween("function collapseCompletedExecutionActivity", "function streamActivityHtml");
 
   assert.match(collapse, /stopExecutionActivityFlow\(root\)/);
-  assert.match(collapse, /root\.remove\(\)/);
-  assert.match(collapse, /return null/);
+  assert.match(collapse, /root\.dataset\.lifecycle = "completed"/);
+  assert.doesNotMatch(collapse, /execution-completion-count/);
+  assert.match(collapse, /streaming-elapsed/);
+  assert.match(collapse, /streaming-activity-label.*小剧场/);
+  assert.doesNotMatch(collapse, /execution-activity-step-label.*步骤/);
+  assert.match(collapse, /executionActivityRenderedDetails\(root, history\)/);
+  assert.doesNotMatch(collapse, /execution-activity-duration-only/);
+  assert.match(collapse, /return root/);
+  assert.match(source, /if \(root\?\.dataset\?\.lifecycle === "completed"[\s\S]*?return \[\]/);
+  assert.match(source, /if \(viewport\) viewport\.hidden = visible\.length === 0;/);
 });

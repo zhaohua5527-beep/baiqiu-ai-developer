@@ -55,13 +55,14 @@ test("public progress removes runtime identity names without exposing private th
 
 test("stream transport preserves model progress identity and transient runtime state", () => {
   assert.match(mainSource, /const kind = safeActivitySnippet\(supplied\.kind/);
-  assert.match(mainSource, /kind,\s*phase,/);
+  assert.match(mainSource, /kind,\s*type:[\s\S]*?phase,/);
   assert.match(mainSource, /transient: supplied\.transient === true/);
-  assert.match(mainSource, /\[Public response channel protocol\]/);
-  assert.match(mainSource, /publish a concise factual public reasoning summary before each answer segment/);
-  assert.match(mainSource, /公开判断必须包含真实逻辑/);
-  assert.match(mainSource, /Continuously write real public work summaries/);
-  assert.match(mainSource, /公开过程必须按真实段落严格交替发送/);
+  const protocol = require("../services/public-response-protocol").publicResponseStreamPrompt();
+  assert.match(protocol, /Black Ball event ownership/);
+  assert.match(protocol, /你决定是否调用工具、何时给出公开进展和答案/);
+  assert.match(protocol, /工具返回前不声称读取、写入、测试或验证成功/);
+  assert.match(protocol, /Public structured progress protocol/);
+  assert.match(protocol, /不输出‘正在思考\/收到请求’等填充文字/);
   assert.match(mainSource, /credentials/);
   assert.match(mainSource, /function isBlackBallPublicProgress/);
   assert.match(rendererSource, /entry\.activityTransient = transient;/);
@@ -72,7 +73,9 @@ test("reasoning and reply streams are sequenced and painted without local replay
   assert.match(mainSource, /const chatStreamFrameSequences = new Map\(\);/);
   assert.match(mainSource, /\.\.\.frame,\s*seq,/);
   assert.match(mainSource, /delta: \["reasoning_delta", "reasoning_note", "public_reasoning"\]\.includes\(kind\)/);
-  assert.match(rendererSource, /frameSequence > 0 && frameSequence <= Number\(entry\.lastFrameSequence \|\| 0\)/);
+  assert.match(rendererSource, /function acceptLiveTurnEvent\(entry, source = \{\}, defaults = \{\}\)/);
+  assert.match(rendererSource, /entry\.eventLedger \\|\\|= new Map\(\)/);
+  assert.match(rendererSource, /if \(existing\) \{/);
   assert.match(rendererSource, /function appendLiveReasoningDelta\(entry, progress = \{\}\)/);
   assert.match(rendererSource, /activityPaintFrame = requestAnimationFrame/);
   assert.match(rendererSource, /const continuesCurrentReasoning = previous/);
@@ -81,5 +84,6 @@ test("reasoning and reply streams are sequenced and painted without local replay
     rendererSource.indexOf("function completedActivityHtml")
   );
   assert.match(liveReveal, /entry\.visibleText = entry\.visibleChars\.join\(""\)/);
-  assert.doesNotMatch(liveReveal, /assistantTypingCharsPerSecond|typingPauseFor/);
+  assert.match(liveReveal, /assistantTypingCharsPerSecond/);
+  assert.match(liveReveal, /typingPauseFor/);
 });

@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld("heiqiu", {
   wechatQr: () => ipcRenderer.invoke("wechat:qr"),
   wechatQrStatus: () => ipcRenderer.invoke("wechat:qr-status"),
   wechatSync: () => ipcRenderer.invoke("wechat:sync"),
+  wechatSend: (payload) => ipcRenderer.invoke("wechat:send", payload),
   wechatUnbind: () => ipcRenderer.invoke("wechat:unbind"),
   wechatEnsureSession: (options = {}) => ipcRenderer.invoke("wechat:ensure-session", options),
   onBlackBallProgress: (callback) => {

@@ -51,6 +51,27 @@ test("configured cloud and credential-free local models are ready", () => {
   }).configured, true);
 });
 
+test("verified base URL accepts an equivalent full completion endpoint", () => {
+  const result = selectedModelReadiness({
+    defaultProvider: "custom-provider",
+    providers: {
+      "custom-provider": {
+        name: "Custom Provider",
+        model: "custom-model",
+        baseURL: "https://example.test/v1/chat/completions",
+        apiKey: "configured",
+        enabled: true,
+        verifiedAt: "2026-08-27T00:00:00.000Z",
+        verifiedModel: "custom-model",
+        verifiedBaseURL: "https://example.test/v1"
+      }
+    }
+  });
+
+  assert.equal(result.configured, true);
+  assert.deepEqual(result.missing, []);
+});
+
 test("renderer preserves the exact internal model-manager and first-use guide links", () => {
   const renderer = fs.readFileSync(path.join(__dirname, "..", "renderer-v2", "app.js"), "utf8");
   assert.match(renderer, /href === "baiqiu:\/\/open-model-manager"/);

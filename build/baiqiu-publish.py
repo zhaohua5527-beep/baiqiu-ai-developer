@@ -213,8 +213,8 @@ def verify_online_manifest(manifest_file: Path, version: str, package: Path, ins
     if int(manifest.get("installerSize") or 0) != installer.stat().st_size:
         fail("online update manifest installer size does not match the uploaded installer")
 
-    expected_zip_url = f"http://47.108.191.67/baiqiu-{version}.zip"
-    expected_installer_url = f"http://47.108.191.67/download/baiqiu-{version}-setup.exe"
+    expected_zip_url = f"http://156.239.227.26/baiqiu-{version}.zip"
+    expected_installer_url = f"http://156.239.227.26/download/baiqiu-{version}-setup.exe"
     if str(manifest.get("downloadUrl") or "") != expected_zip_url:
         fail("online update manifest ZIP URL is not the official release URL")
     if str(manifest.get("installerUrl") or "") != expected_installer_url:

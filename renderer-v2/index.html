@@ -6,11 +6,10 @@
   <title>白球 AI</title>
   <link rel="icon" href="./assets/baiqiu-tray.png">
   <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./mini-theatre.css">
   <link rel="stylesheet" href="./knowledge-universe-3d.css">
-  <link rel="stylesheet" href="./assistant-ui-shell.css">
 </head>
 <body>
-  <div id="assistantUiRoot" aria-label="白球 AI 工作区"></div>
   <div class="app" id="app">
     <header class="titlebar">
       <div class="drag-region" aria-hidden="true"></div>
@@ -23,10 +22,6 @@
     </header>
 
     <aside class="sessions">
-      <div class="sidebar-brand">
-        <img src="./assets/baiqiu-tray.png" alt="白球 AI" decoding="async">
-        <strong>白球 AI</strong>
-      </div>
       <div class="sessions-head">
         <button id="newSessionBtn" class="sidebar-primary-action" title="新建普通聊天">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
@@ -50,7 +45,8 @@
           <span>完善资料</span>
           <b id="profileOnboardingProgress">1/5</b>
         </button>
-        <button id="wechatBtn" title="微信"><span class="quick-action-icon quick-action-wechat-icon" aria-hidden="true">
+        <button id="modelQuickBtn" title="模型管理"><span class="quick-action-icon quick-action-model-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="m12 3.2 7.2 4.15v8.3L12 19.8l-7.2-4.15v-8.3L12 3.2Z"></path><circle cx="12" cy="12" r="2.1"></circle><path d="M12 5.8v4M6.6 9l3.45 2M17.4 9l-3.45 2M8.2 16.4l2.1-3.3M15.8 16.4l-2.1-3.3"></path></svg></span><span>模型管理</span></button>
+        <button id="wechatBtn" title="微信" hidden><span class="quick-action-icon quick-action-wechat-icon" aria-hidden="true">
           <svg viewBox="0 0 32 32" focusable="false">
             <path d="M12.8 8.4c-5 0-9 3.1-9 7 0 2.2 1.3 4.2 3.4 5.5l-.7 2.4 2.8-1.4c1.1.3 2.2.5 3.5.5 5 0 9-3.1 9-7s-4-7-9-7Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
             <path d="M18.8 13.4c4.6.4 8 3.2 8 6.7 0 1.9-1 3.6-2.7 4.8l.6 2.1-2.5-1.2c-1 .3-2 .4-3.2.4-2.6 0-4.9-.9-6.4-2.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
@@ -68,7 +64,7 @@
           </span>
           <span>知识星球</span>
         </button>
-        <button id="updateQuickBtn" title="检查更新"><span aria-hidden="true">↻</span><span>检查更新</span><b id="updateQuickBadge" class="update-quick-badge" hidden>1</b></button>
+        <button id="consciousQuickBtn" title="意识中心"><span class="quick-action-conscious-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="12" r="2.1"></circle><path d="M5.1 12a6.9 6.9 0 0 1 11.7-4.95M18.9 12a6.9 6.9 0 0 1-11.7 4.95"></path><circle cx="6.1" cy="8.2" r="1.2"></circle><circle cx="17.9" cy="15.8" r="1.2"></circle></svg></span><span>意识中心</span></button>
         <button id="settingsBtn" title="设置"><span aria-hidden="true">⚙</span><span>设置</span></button>
       </div>
     </aside>
@@ -83,6 +79,7 @@
           <button id="currentModelBadge" type="button">DeepSeek</button>
         </div>
         <div class="chat-header-tools">
+          <button id="wechatConversationUnbindBtn" class="wechat-conversation-unbind" type="button" hidden>解绑微信</button>
           <div id="contextHeaderBar" class="system-state-rail" role="progressbar" aria-label="上下文压缩剩余" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
             <span id="contextHeaderFill"></span>
           </div>
@@ -91,6 +88,7 @@
       </header>
       <nav id="taskProgressRail" class="task-progress-rail" aria-label="当前任务执行阶段"></nav>
       <div id="taskStagePopover" class="task-stage-popover" hidden></div>
+      <aside id="miniTheatreHost" class="mini-theatre-host" aria-label="黑球小剧场" hidden></aside>
       <div id="conversationStage" class="conversation-stage">
         <section id="messageList" class="message-list"></section>
         <aside id="composerClarification" class="intent-predict-panel" aria-label="建议选项" hidden>
@@ -132,16 +130,16 @@
         </section>
         <div id="composerResizeHandle" class="composer-resize-handle" role="separator" aria-label="调整输入框高度" aria-orientation="horizontal" title="拖动调整输入框高度，双击恢复默认" tabindex="0"></div>
         <textarea id="chatInput" rows="1" placeholder="给 Gantz 发送消息"></textarea>
-        <div id="modelRecommendBadge" class="composer-recommend-badge" hidden>
-          <span id="recommendBadgeText"></span>
-          <button id="recommendBadgeSwitch" type="button">切换</button>
-          <button id="recommendBadgeClose" type="button" aria-label="关闭">×</button>
-        </div>
         <div class="composer-tools">
         <button id="attachBtn" type="button" title="上传文件">＋</button>
         <div id="reasoningWaterControl" class="reasoning-mode-btn" role="button" tabindex="0" data-level="maximum" data-maximum="1" aria-haspopup="menu" aria-expanded="false" title="当前模型与推理等级">
           <span id="reasoningModelLabel" class="reasoning-model-label">模型</span>
           <span id="reasoningModeMenu" class="reasoning-mode-menu" role="menu"></span>
+        </div>
+        <div id="modelRecommendBadge" class="composer-recommend-badge" hidden>
+          <span id="recommendBadgeText"></span>
+          <button id="recommendBadgeSwitch" type="button">切换</button>
+          <button id="recommendBadgeClose" type="button" aria-label="关闭">×</button>
         </div>
         <div id="voiceModeControl" class="voice-mode-control" role="group" aria-label="语音模式">
           <button type="button" data-voice-mode="input" aria-pressed="true">输入</button>
@@ -466,8 +464,6 @@
         <button type="button" class="settings-tab internal-tab" data-settings-tab="general"><span>通用设置</span><small class="settings-tab-summary">启动与文件</small></button>
         <button type="button" class="settings-tab internal-tab" data-settings-tab="voice"><span>语音设置</span><small class="settings-tab-summary">STT 未配置</small></button>
         <button type="button" class="settings-tab internal-tab" data-settings-tab="profile"><span>我的资料</span><small class="settings-tab-summary">查看与修改资料</small></button>
-        <button type="button" class="settings-tab internal-tab" data-settings-tab="conscious"><span>意识中心</span><small class="settings-tab-summary">意识档案</small></button>
-        <button type="button" class="settings-tab internal-tab" data-settings-tab="wechat"><span>微信链接</span><small class="settings-tab-summary">未连接</small></button>
         <button type="button" class="settings-tab internal-tab" data-settings-tab="skills"><span>工具中心</span><small class="settings-tab-summary">技能状态</small></button>
         <button id="updateTabBtn" type="button" class="settings-tab internal-tab" data-settings-tab="update"><span>系统更新</span><small class="settings-tab-summary">当前版本</small></button>
         <button id="developerLogsTab" type="button" class="settings-tab internal-tab" data-settings-tab="developerLogs" hidden>开发日志</button>
@@ -545,10 +541,9 @@
             </header>
             <div id="modelConfigBody" class="model-config-body"></div>
             <footer class="model-config-actions">
-              <button id="testModelConnectionBtn" type="button">测试连接</button>
               <span id="modelConfigSaveState" class="model-config-save-state" role="status">✓ 已保存</span>
               <button id="modelConfigCancelBtn" type="button">取消</button>
-              <button id="saveModelConfigBtn" class="primary" type="button">保存配置</button>
+              <button id="saveModelConfigBtn" class="primary" type="button">保存并验证</button>
             </footer>
           </aside>
         </div>
@@ -738,49 +733,6 @@
           <p class="provider-note">修改后立即生效。白球会按这里的称呼与风格与你对话，并按用途与身份调整推荐方向。</p>
           <button id="saveProfileSettingsBtn" type="button">保存资料</button>
           <span id="profileSettingsStatus" class="profile-settings-status" role="status" aria-live="polite"></span>
-        </div>
-      </section>
-
-      <section class="settings-page conscious-settings-page" data-settings-page="conscious">
-        <header class="general-settings-header">
-          <strong>意识中心</strong>
-          <span>查看和恢复白球保存的项目、会话工作状态</span>
-        </header>
-        <div class="settings-card conscious-settings-card">
-          <div class="wechat-link-status conscious-link-status">
-            <span>意识档案</span>
-            <b id="consciousSettingsStatus">可从这里打开完整中心</b>
-          </div>
-          <div class="wechat-link-actions">
-            <button id="openConsciousSettingsBtn" type="button">打开意识中心</button>
-            <button id="extractConsciousSettingsBtn" type="button">提取当前意识</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="settings-page wechat-link-page" data-settings-page="wechat">
-        <header class="general-settings-header">
-          <strong>微信链接</strong>
-          <span>黑球微信网关绑定状态与扫码入口</span>
-        </header>
-        <div class="settings-card wechat-link-card" data-wechat-state="unknown">
-          <div class="wechat-link-status">
-            <span>连接状态</span>
-            <b id="wechatStatusPill">读取中</b>
-          </div>
-          <div id="wechatQrBox" class="wechat-qr-box" aria-live="polite">
-            <img id="wechatQrImage" alt="微信绑定二维码" hidden>
-            <div id="wechatQrPlaceholder" class="wechat-qr-placeholder"><i aria-hidden="true"></i><span id="wechatQrText">正在读取黑球微信网关状态</span></div>
-          </div>
-          <div class="wechat-link-meta">
-            <span>会话入口</span>
-            <b id="wechatLastSync">微信消息会进入左侧固定的“微信聊天”目录</b>
-          </div>
-          <div class="wechat-link-actions">
-            <button id="refreshWechatQrBtn" type="button">刷新二维码</button>
-            <button id="openWechatSessionBtn" type="button">打开微信聊天</button>
-            <button id="unbindWechatBtn" type="button">解绑</button>
-          </div>
         </div>
       </section>
 
@@ -1137,6 +1089,18 @@
     </form>
   </dialog>
 
+  <dialog id="wechatDialog" class="wechat-dialog">
+    <form method="dialog">
+      <header><strong>微信</strong><span class="wechat-dialog-actions"><button id="disconnectWechatTopBtn" type="button" hidden>解绑</button><button id="wechatDialogCloseBtn" type="button" aria-label="关闭微信">×</button></span></header>
+      <div class="wechat-dialog-body">
+        <div class="wechat-link-status"><span>连接状态</span><b id="wechatStatusPill">读取中</b></div>
+        <div id="wechatQrBox" class="wechat-qr-box" aria-live="polite"><img id="wechatQrImage" alt="微信绑定二维码" hidden><div id="wechatQrPlaceholder" class="wechat-qr-placeholder"><i aria-hidden="true"></i><span id="wechatQrText">正在读取黑球微信网关状态</span></div></div>
+        <div class="wechat-link-meta"><span>会话入口</span><b id="wechatLastSync">微信消息会进入左侧固定的“微信聊天”目录</b></div>
+        <div class="wechat-link-actions"><button id="refreshWechatQrBtn" type="button">刷新二维码</button><button id="openWechatSessionBtn" type="button">打开微信聊天</button></div>
+      </div>
+    </form>
+  </dialog>
+
   <section id="blackCoreLayer" class="black-core-layer" hidden data-phase="idle" aria-labelledby="blackCoreTitle">
     <canvas id="blackCoreCanvas" aria-hidden="true"></canvas>
     <div class="black-core-noise" aria-hidden="true"></div>
@@ -1420,12 +1384,17 @@
   <script src="../services/membership-utils.js"></script>
       <script src="../services/knowledge/knowledge-keyline.js"></script>
   <script src="../services/assistant-code-utils.js"></script>
+  <script src="../services/result-ast.js"></script>
       <script src="./knowledge-universe-3d.bundle.js"></script>
       <script src="./session-task-queue.js"></script>
       <script src="./task-board-edge-position.js"></script>
       <script src="./draggable-panel-position.js"></script>
       <script src="./context-menu-position.js"></script>
+      <script src="../services/black-ball-public-event-contract.js"></script>
+      <script src="./persisted-replay.js"></script>
+      <script src="./event-aggregator.js"></script>
+      <script src="./mini-theatre.js"></script>
+      <script src="./task-face.js"></script>
       <script src="./app.js"></script>
-      <script src="./assistant-ui-shell.bundle.js"></script>
 </body>
 </html>

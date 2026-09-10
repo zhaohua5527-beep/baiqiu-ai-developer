@@ -1,5 +1,6 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
 const { normalizeProvider } = require("./model-adapter");
 
 const LOCAL_PROVIDER_IDS = new Set(["ollama", "local"]);
@@ -32,13 +33,27 @@ function isConfiguredProvider(providerId = "", provider = {}) {
   return Boolean(clean(normalized.model));
 }
 
-function isVerifiedProvider(providerId = "", provider = {}) {
-  if (!isConfiguredProvider(providerId, provider) || provider.enabled !== true) return false;
+function providerCredentialFingerprint(providerId = "", provider = {}) {
+  const normalized = normalizeProvider(providerId, provider || {});
+  return createHash("sha256")
+    .update(`${clean(providerId).toLowerCase()}\0${normalized.requiresApiKey ? clean(normalized.apiKey) : "credential-free"}`)
+    .digest("hex");
+}
+
+function providerVerificationMatches(providerId = "", provider = {}) {
+  if (!isConfiguredProvider(providerId, provider)) return false;
   const normalized = normalizeProvider(providerId, provider || {});
   const verifiedBaseURL = clean(provider.verifiedBaseURL).replace(/\/+$/, "");
+  const verifiedCredential = clean(provider.verifiedCredentialFingerprint);
   return Boolean(clean(provider.verifiedAt))
     && clean(provider.verifiedModel) === normalized.model
-    && verifiedBaseURL === normalized.baseURL.replace(/\/+$/, "");
+    && verifiedBaseURL === normalized.baseURL.replace(/\/+$/, "")
+    && (!provider.verifiedApiStyle || provider.verifiedApiStyle === normalized.apiStyle)
+    && (!verifiedCredential || verifiedCredential === providerCredentialFingerprint(providerId, provider));
+}
+
+function isVerifiedProvider(providerId = "", provider = {}) {
+  return provider.enabled === true && providerVerificationMatches(providerId, provider);
 }
 
 function candidateProviders(settings = {}) {
@@ -138,6 +153,8 @@ module.exports = {
   isLoopbackUrl,
   isLocalProvider,
   isConfiguredProvider,
+  providerCredentialFingerprint,
+  providerVerificationMatches,
   isVerifiedProvider,
   candidateProviders,
   selectModelRoute,

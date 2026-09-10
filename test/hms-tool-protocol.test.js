@@ -132,6 +132,10 @@ test("main keeps recent task context and never exposes tool JSON as the final fa
   assert.match(source, /files: delivery\.files/);
   assert.match(source, /function mergePermanentHmsAnswer/);
   assert.match(source, /answerEnvelopeOnly: true/);
+  assert.match(source, /progress → action/);
+  assert.match(source, /progress → answer/);
+  assert.match(source, /以下是白球受控后端刚刚返回的真实结构化结果[\s\S]{0,1200}\{ answerEnvelopeOnly: true \}/);
+  assert.match(source, /function routePlainVisibleDelta|const routePlainVisibleDelta/);
   assert.match(source, /finalText\.slice\(streamedText\.length\)/);
   assert.doesNotMatch(source, /text:\s*JSON\.stringify\(envelope\)/);
 });

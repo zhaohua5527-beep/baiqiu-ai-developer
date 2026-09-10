@@ -124,6 +124,7 @@ function executionOutcomeFromResult(result = {}, evidence = evidenceFromResult(r
   const status = cleanText(result.status, 80).toLowerCase();
   if (["cancelled", "aborted"].includes(status) || result.cancelled === true) return "cancelled";
   if (status === "timed_out") return "timed_out";
+  if (result.stopReason === "missing_public_final_envelope" && hasDurableEvidence(evidence)) return "succeeded";
   if (result.success === false || ["failed", "error", "blocked"].includes(status)) return "failed";
   if (result.success === true || ["done", "completed", "success", "succeeded"].includes(status)) return "succeeded";
   if (evidence.hmsFinal === true) return "succeeded";

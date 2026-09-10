@@ -5,13 +5,41 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { evaluateHmsResponse, parseHmsOutcomeEnvelope } = require("../services/hms-outcome-contract");
+const {
+  evaluateHmsResponse,
+  parseHmsOutcomeEnvelope,
+  parseTrailingHmsProtocolObjects
+} = require("../services/hms-outcome-contract");
 
 test("parses HMS outcome without exposing the machine block", () => {
   const parsed = parseHmsOutcomeEnvelope('Done.\n<baiqiu-outcome>{"kind":"analysis","status":"completed","summary":"Done"}</baiqiu-outcome>');
   assert.equal(parsed.text, "Done.");
   assert.equal(parsed.hmsOutcome.status, "completed");
   assert.equal(parsed.hmsOutcome.kind, "analysis");
+});
+
+test("recovers complete trailing clarification and outcome lines without exposing JSON", () => {
+  const parsed = parseTrailingHmsProtocolObjects([
+    "需要先确认查询城市。",
+    JSON.stringify({ question: "请确认要查询成都吗？", required: ["城市"], options: ["成都", "绵阳"] }),
+    JSON.stringify({ kind: "analysis", status: "awaiting_input", summary: "等待城市确认", evidenceType: "none" })
+  ].join("\n"));
+  assert.equal(parsed.text, "需要先确认查询城市。");
+  assert.equal(parsed.clarification.question, "请确认要查询成都吗？");
+  assert.equal(parsed.hmsOutcome.status, "awaiting_input");
+  const evaluated = evaluateHmsResponse({
+    status: "partial",
+    text: parsed.text,
+    clarification: parsed.clarification,
+    hmsOutcome: parsed.hmsOutcome
+  }, { canonicalTask: true });
+  assert.equal(evaluated.status, "awaiting_input");
+  assert.equal(evaluated.success, true);
+});
+
+test("does not reinterpret ordinary or malformed JSON as HMS protocol", () => {
+  assert.equal(parseTrailingHmsProtocolObjects('答案\n{"city":"成都","temperature":28}'), null);
+  assert.equal(parseTrailingHmsProtocolObjects('答案\n{"kind":"analysis","status":"awaiting_input"'), null);
 });
 
 test("plain text cannot complete a canonical task", () => {

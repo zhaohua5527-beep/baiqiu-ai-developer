@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+dist-*/
 _asar_temp/
 
 # HMS bundle (symlink to external runtime, not source code)
@@ -30,6 +31,12 @@ test-data/
 test-userdata/
 tests/
 resources/
+test-artifacts/
+test-artifacts*.png
+
+# Local scratch files
+$tmp/
+.codex-write-test.txt
 
 # OS files
 Thumbs.db

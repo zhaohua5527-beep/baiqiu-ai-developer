@@ -63,6 +63,63 @@ function copyMissingTree(source, destination) {
   return copied;
 }
 
+function mergeBundledManifest(source, destination, allowedNames = null) {
+  if (!fs.existsSync(source)) return false;
+  const lines = (file) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const current = lines(destination);
+  const names = new Set(current.map((line) => line.split(":", 1)[0].trim()));
+  const additions = lines(source).filter((line) => {
+    const name = line.split(":", 1)[0].trim();
+    if (!name || names.has(name) || (allowedNames && !allowedNames.has(name))) return false;
+    names.add(name);
+    return true;
+  });
+  if (!additions.length) return false;
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.writeFileSync(destination, `${[...current, ...additions].join("\n")}\n`, "utf8");
+  return true;
+}
+
+function bundledSkillDirectories(root) {
+  if (!fs.existsSync(root)) return [];
+  const directories = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const target = path.join(directory, entry.name);
+      if (fs.existsSync(path.join(target, "SKILL.md"))) directories.push(target);
+      else visit(target);
+    }
+  };
+  visit(root);
+  return directories;
+}
+
+function syncApplicationBundledSkills(home, options = {}) {
+  const source = path.resolve(
+    options.applicationSkillsPath || path.join(__dirname, "..", "skills", "hermes")
+  );
+  if (!fs.existsSync(source)) return { copied: 0, manifestMerged: false };
+  const destination = path.join(home, "skills");
+  let copied = 0;
+  const copiedNames = new Set();
+  for (const skillDirectory of bundledSkillDirectories(source)) {
+    const target = path.join(destination, path.relative(source, skillDirectory));
+    if (fs.existsSync(target)) continue;
+    copied += copyMissingTree(skillDirectory, target);
+    copiedNames.add(path.basename(skillDirectory));
+  }
+  const manifestMerged = mergeBundledManifest(
+    path.join(source, ".bundled_manifest"),
+    path.join(destination, ".bundled_manifest"),
+    copiedNames
+  );
+  return { copied, manifestMerged };
+}
+
 function bundledHomeIdentity(runtime) {
   if (!runtime?.manifestPath || !fs.existsSync(runtime.manifestPath)) return null;
   return {
@@ -123,12 +180,16 @@ function ensureModelsDevOfflineCache(home) {
 function ensureBundledHermesHome(options = {}) {
   const runtime = resolveBundledHermesRuntime(options);
   const home = resolveHermesHome(options);
-  if (!runtime) return { available: false, home, copied: 0 };
   fs.mkdirSync(home, { recursive: true });
+  if (!runtime) {
+    const applicationSkills = syncApplicationBundledSkills(home, options);
+    return { available: false, home, copied: applicationSkills.copied, applicationSkills };
+  }
   const identity = bundledHomeIdentity(runtime);
   if (bundledHomeAlreadySynced(runtime, home, identity)) {
+    const applicationSkills = syncApplicationBundledSkills(home, options);
     ensureModelsDevOfflineCache(home);
-    return { available: true, home, copied: 0, cached: true, runtime };
+    return { available: true, home, copied: applicationSkills.copied, cached: true, runtime, applicationSkills };
   }
   let copied = 0;
   copied += copyMissingTree(path.join(runtime.hermesRoot, "skills"), path.join(home, "skills"));
@@ -139,16 +200,21 @@ function ensureBundledHermesHome(options = {}) {
     fs.copyFileSync(bundledSoul, localSoul);
     copied += 1;
   }
+  const applicationSkills = syncApplicationBundledSkills(home, options);
+  copied += applicationSkills.copied;
   ensureModelsDevOfflineCache(home);
   writeBundledHomeMarker(home, identity);
-  return { available: true, home, copied, cached: false, runtime };
+  return { available: true, home, copied, cached: false, runtime, applicationSkills };
 }
 
 module.exports = {
   copyMissingTree,
   ensureModelsDevOfflineCache,
   ensureBundledHermesHome,
+  bundledSkillDirectories,
+  mergeBundledManifest,
   resolveBundledHermesRuntime,
   resolveHermesHome,
-  runtimePythonPath
+  runtimePythonPath,
+  syncApplicationBundledSkills
 };

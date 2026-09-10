@@ -62,16 +62,14 @@ test("automatic summaries expose the model conclusion instead of a raw prefix sl
   }
 });
 
-test("inactive knowledge moves to recycle bin and can be restored", () => {
+test("knowledge moves to recycle bin only through an explicit action and can be restored", () => {
   const fixture = createVault();
   try {
     fixture.vault.create({ title: "临时资料", category: "resources", body: "一条可清理的资料" });
     const temporary = fixture.vault.state().notes[0];
     fixture.vault.update(temporary.id, { status: "draft" });
     fixture.setDate("2026-02-01T00:00:00.000Z");
-    const recycledState = fixture.vault.state();
-    assert.equal(recycledState.cleanup.movedToRecycle, 1);
-    const recycled = recycledState.notes.find((note) => note.category === "recycle-bin");
+    const recycled = fixture.vault.recycle(temporary.id).note;
     assert.ok(recycled);
     assert.equal(recycled.status, "recycled");
 
@@ -84,14 +82,14 @@ test("inactive knowledge moves to recycle bin and can be restored", () => {
   }
 });
 
-test("inactive active knowledge enters recycle after 30 days", () => {
+test("inactive active knowledge remains available after 30 days", () => {
   const fixture = createVault();
   try {
     fixture.vault.create({ title: "Active note", category: "projects", status: "active", body: "Keep this knowledge." });
     fixture.setDate("2026-04-15T00:00:00.000Z");
     const state = fixture.vault.state();
-    assert.equal(state.cleanup.movedToRecycle, 1);
-    assert.equal(state.notes[0].status, "recycled");
+    assert.equal(state.cleanup.movedToRecycle, 0);
+    assert.equal(state.notes[0].status, "active");
   } finally {
     fixture.dispose();
   }
@@ -118,7 +116,7 @@ test("recycled knowledge remains recoverable until the user explicitly deletes i
     const temporary = fixture.vault.state().notes[0];
     fixture.vault.update(temporary.id, { status: "draft" });
     fixture.setDate("2026-02-01T00:00:00.000Z");
-    fixture.vault.state();
+    fixture.vault.recycle(temporary.id);
     fixture.setDate("2026-03-04T00:00:00.000Z");
     const state = fixture.vault.state();
     assert.equal(state.cleanup.permanentlyDeleted, 0);

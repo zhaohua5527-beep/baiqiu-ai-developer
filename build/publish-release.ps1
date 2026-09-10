@@ -19,9 +19,9 @@ param(
 
     [switch]$ForceUpdate,
 
-    [string]$HostName = '47.108.191.67',
+    [string]$HostName = '156.239.227.26',
     [string]$UserName = 'baiqiu-deploy',
-    [string]$KeyPath = "$env:USERPROFILE\.ssh\baiqiu-deploy-ed25519"
+    [string]$KeyPath = "$env:USERPROFILE\.ssh\baiqiu-jiuniu-ed25519"
 )
 
 Set-StrictMode -Version Latest

@@ -17,6 +17,7 @@ test("foreground knowledge references include same-session summaries, recent use
   );
   assert.match(retrieval, /sessionId: session\?\.id \|\| ""/);
   assert.match(retrieval, /excludeAutoSummaries: false/);
+  assert.match(retrieval, /Number\(note\?\.score \|\| 0\) >= 100/);
   assert.match(retrieval, /recentUserKnowledgeContext/);
   assert.match(retrieval, /禁止再次询问同一问题/);
   assert.match(retrieval, /createdAt: note\.createdAt \|\| ""/);

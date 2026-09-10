@@ -1,4 +1,5 @@
 "use strict";
+const { PROVIDER_ERRORS } = require("./hms-stream-failure");
 
 function errorText(error) {
   if (!error) return "";
@@ -46,6 +47,13 @@ function userFacingError(error, context = {}) {
   const status = errorStatus(error);
   const developerMode = context.developerMode === true;
 
+  if (Object.hasOwn(PROVIDER_ERRORS, code)) return PROVIDER_ERRORS[code];
+  if (code === "MODEL_CONNECTION_TIMEOUT") return "请求发出后 30 秒内未收到模型响应数据。";
+  if (code === "MODEL_PUBLIC_OUTPUT_TIMEOUT") return "模型已响应，但 2 分钟内仍未产生正文或公开执行事件。";
+  if (code === "MODEL_TASK_TIMEOUT") return "本次任务已达到 30 分钟执行时限。";
+  if (code === "MODEL_FIRST_EVENT_TIMEOUT") return "模型在 30 秒内没有返回首个内容。";
+  if (code === "MODEL_NO_PROGRESS_TIMEOUT") return "连续 2 分钟没有收到模型、工具或正文事件。";
+
   if (/MODEL_FIRST_EVENT_TIMEOUT|MODEL_REQUEST_TIMEOUT/i.test(code)) {
     return "模型在规定时间内没有返回结果，请检查网络、API Key 或模型供应商状态后重试。";
   }
@@ -76,9 +84,6 @@ function userFacingError(error, context = {}) {
   }
   if (/hms_outcome_missing/i.test(`${code} ${raw}`)) {
     return "黑球没有返回可核验的任务状态，本次未标记为完成。";
-  }
-  if (/missing_public_final_envelope/i.test(`${code} ${raw}`)) {
-    return "黑球没有返回完整的最终答复，过程内容未写入对话。";
   }
   if (/NC3001|UnderstandingDecision is required/i.test(raw)) {
     // TOOL_FAILURE（NC3001）是工具执行失败的兜底前缀。它可能是由超时、

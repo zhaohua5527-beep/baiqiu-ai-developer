@@ -4,6 +4,7 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { spawn } = require("node:child_process");
 const { Readable, Writable } = require("node:stream");
+const { PROVIDER_ERRORS, providerDiagnostic } = require("./hms-stream-failure");
 const {
   ensureBundledHermesHome,
   resolveBundledHermesRuntime,
@@ -119,6 +120,15 @@ function ensureHermesPythonCompat(options = {}) {
     const temp = `${file}.tmp-${process.pid}-${Date.now()}`;
     fs.writeFileSync(temp, WINDOWS_BASH_PREFLIGHT, "utf8");
     fs.renameSync(temp, file);
+  }
+  for (const bridgeName of ["baiqiu_acp_entry.py", "baiqiu_async_delivery.py"]) {
+    const bridgeFile = path.join(directory, bridgeName);
+    const bridgeSource = fs.readFileSync(path.join(__dirname, bridgeName), "utf8");
+    if (!fs.existsSync(bridgeFile) || fs.readFileSync(bridgeFile, "utf8") !== bridgeSource) {
+      const temp = `${bridgeFile}.tmp-${process.pid}-${Date.now()}`;
+      fs.writeFileSync(temp, bridgeSource, "utf8");
+      fs.renameSync(temp, bridgeFile);
+    }
   }
   return directory;
 }
@@ -335,6 +345,9 @@ class HermesAcpClient {
     this.sessions = new Map();
     this.sessionBuilds = new Map();
     this.activePrompts = new Map();
+    this.mcpServers = new Map();
+    this.mcpConnections = new Map();
+    this.nextMcpConnectionId = 0;
     this.stopping = false;
   }
 
@@ -381,7 +394,10 @@ class HermesAcpClient {
     const pythonCompatPath = ensureHermesPythonCompat(this.options);
     const prepared = ensureBundledHermesHome(this.options);
     const pythonPath = runtimePythonPath(this.launch.runtime, [pythonCompatPath, process.env.PYTHONPATH]);
-    const child = this.spawnImpl(this.executablePath, this.launch.args, {
+    const launchArgs = this.launch.runtime && pythonCompatPath
+      ? ["-m", "baiqiu_acp_entry"]
+      : this.launch.args;
+    const child = this.spawnImpl(this.executablePath, launchArgs, {
       cwd: this.defaultCwd,
       env: {
         ...process.env,
@@ -409,6 +425,12 @@ class HermesAcpClient {
           const activePrompt = [...this.activePrompts.values()]
             .find((item) => item.hermesSessionId === hermesSessionId);
           return this.permissionHandler(context.params, activePrompt?.permissionContext || {});
+        })
+        .onRequest("mcp/connect", (value) => value, (context) => this.connectMcp(context.params))
+        .onRequest("mcp/message", (value) => value, (context) => this.messageMcp(context.params))
+        .onRequest("mcp/disconnect", (value) => value, (context) => this.disconnectMcp(context.params))
+        .onNotification("mcp/message", (value) => value, (context) => {
+          void this.messageMcp(context.params, { notification: true });
         });
       const stream = this.acp.ndJsonStream(
         Writable.toWeb(child.stdin),
@@ -469,6 +491,7 @@ class HermesAcpClient {
     for (const session of this.sessions.values()) session.active?.dispose?.();
     this.sessions.clear();
     this.activePrompts.clear();
+    this.mcpConnections.clear();
     this.status(expected ? "stopped" : "failed", {
       exitCode: code,
       signal: signal || null,
@@ -482,7 +505,69 @@ class HermesAcpClient {
     try { this.child?.kill?.(); } catch {}
     this.connection = null;
     this.child = null;
+    this.mcpConnections.clear();
     this.initialization = null;
+  }
+
+  supportsAcpMcp() {
+    return this.initialization?.agentCapabilities?.mcpCapabilities?.acp === true;
+  }
+
+  configureMcpServer(localSessionId, server = null) {
+    const sessionId = String(localSessionId || "").trim();
+    if (!sessionId || !server || !Array.isArray(server.tools) || typeof server.callTool !== "function") return null;
+    const signature = String(server.signature || JSON.stringify(server.tools));
+    const serverId = String(server.serverId || `baiqiu-whiteball:${sessionId}:${signature.length}`).trim();
+    const configured = {
+      serverId,
+      name: String(server.name || "Baiqiu White Ball Tools").trim(),
+      tools: server.tools,
+      callTool: server.callTool,
+      signature
+    };
+    const existing = this.mcpServers.get(serverId);
+    if (server.prewarm === true && existing?.signature === signature) return existing;
+    this.mcpServers.set(serverId, configured);
+    return configured;
+  }
+
+  connectMcp(params = {}) {
+    const serverId = String(params.serverId || "").trim();
+    if (!this.mcpServers.has(serverId)) throw new Error(`Unknown Baiqiu MCP server: ${serverId}`);
+    const connectionId = `baiqiu-mcp-${++this.nextMcpConnectionId}`;
+    this.mcpConnections.set(connectionId, serverId);
+    return { connectionId };
+  }
+
+  async messageMcp(params = {}, { notification = false } = {}) {
+    const connectionId = String(params.connectionId || "").trim();
+    const server = this.mcpServers.get(this.mcpConnections.get(connectionId));
+    if (!server) throw new Error(`Unknown Baiqiu MCP connection: ${connectionId}`);
+    const method = String(params.method || "").trim();
+    if (method === "initialize") {
+      return {
+        protocolVersion: String(params.params?.protocolVersion || "2025-06-18"),
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: server.name, version: "1.0.0" }
+      };
+    }
+    if (method === "notifications/initialized" || notification) return {};
+    if (method === "ping") return {};
+    if (method === "tools/list") return { tools: server.tools };
+    if (method === "tools/call") {
+      const name = String(params.params?.name || "").trim();
+      const args = params.params?.arguments && typeof params.params.arguments === "object" && !Array.isArray(params.params.arguments)
+        ? params.params.arguments
+        : {};
+      if (!server.tools.some((tool) => tool.name === name)) throw new Error(`Baiqiu MCP tool is not exposed: ${name}`);
+      return server.callTool({ name, arguments: args });
+    }
+    throw new Error(`Unsupported Baiqiu MCP method: ${method}`);
+  }
+
+  disconnectMcp(params = {}) {
+    this.mcpConnections.delete(String(params.connectionId || "").trim());
+    return {};
   }
 
   async ensureSession(localSessionId, options = {}) {
@@ -496,7 +581,8 @@ class HermesAcpClient {
         localSessionId,
         hermesSessionId: session.hermesSessionId
       });
-      return session;
+      if (this.sessionBuilds.get(localSessionId) === pending) this.sessionBuilds.delete(localSessionId);
+      return this.ensureSession(localSessionId, options);
     }
 
     const build = this._ensureSession(localSessionId, options);
@@ -511,8 +597,18 @@ class HermesAcpClient {
   async _ensureSession(localSessionId, options = {}) {
     const timingStartedAt = Number(options.timingStartedAt || Date.now());
     await this.start();
+    const configuredMcp = this.supportsAcpMcp()
+      ? this.configureMcpServer(localSessionId, options.mcpServer)
+      : null;
     const cached = this.sessions.get(localSessionId);
-    if (cached?.active) return cached;
+    if (cached?.active && String(cached.mcpSignature || "") === String(configuredMcp?.signature || "")) {
+      emitPromptTiming(this, options, "sessionReused", timingStartedAt, { localSessionId, hermesSessionId: cached.hermesSessionId });
+      return cached;
+    }
+    if (cached?.active) {
+      cached.active.dispose?.();
+      this.sessions.delete(localSessionId);
+    }
 
     const cwd = path.resolve(options.cwd || this.defaultCwd);
     let active;
@@ -526,31 +622,48 @@ class HermesAcpClient {
         hermesSessionId: persistedHermesSessionId
       });
     }
+    const mcpServers = configuredMcp ? [{
+      type: "acp",
+      name: configuredMcp.name,
+      serverId: configuredMcp.serverId
+    }] : [];
     if (hermesSessionId) {
       emitPromptTiming(this, options, "sessionResumeStart", timingStartedAt, { localSessionId, hermesSessionId });
       try {
-        await this.connection.agent.request(this.acp.methods.agent.session.resume, {
+        const resumed = await this.connection.agent.request(this.acp.methods.agent.session.resume, {
           sessionId: hermesSessionId,
           cwd,
-          mcpServers: []
+          mcpServers
         });
+        const resumedId = resumed?._meta?.baiqiuSessionId;
+        if (resumedId !== hermesSessionId) {
+          throw new Error("恢复返回的会话身份未通过校验。");
+        }
         active = this.connection.agent.attachSession({ sessionId: hermesSessionId });
         emitPromptTiming(this, options, "sessionResumeEnd", timingStartedAt, { localSessionId, hermesSessionId, resumed: true });
       } catch (error) {
         emitPromptTiming(this, options, "sessionResumeEnd", timingStartedAt, { localSessionId, hermesSessionId, resumed: false });
-        this.logger.warn?.(`[HermesACP] Could not resume ${hermesSessionId}; creating a new session: ${error.message}`);
-        hermesSessionId = "";
+        const restoreError = new Error("历史会话恢复失败。原记录已保留，请检查模型配置后重试。");
+        restoreError.code = "HERMES_SESSION_RESTORE_FAILED";
+        restoreError.cause = error;
+        throw restoreError;
       }
     }
 
     if (!active) {
       emitPromptTiming(this, options, "sessionBuildStart", timingStartedAt, { localSessionId });
-      active = await this.connection.agent.buildSession(cwd).start();
+      active = await this.connection.agent.buildSession({ cwd, mcpServers }).start();
       hermesSessionId = active.sessionId;
       emitPromptTiming(this, options, "sessionBuildEnd", timingStartedAt, { localSessionId, hermesSessionId });
     }
 
-    const session = { localSessionId, hermesSessionId, cwd, active };
+    const session = {
+      localSessionId,
+      hermesSessionId,
+      cwd,
+      active,
+      mcpSignature: configuredMcp?.signature || ""
+    };
     this.sessions.set(localSessionId, session);
     return session;
   }
@@ -584,6 +697,14 @@ class HermesAcpClient {
     let newToolCallCount = 0;
     let toolCallsSinceAnswer = 0;
     const updates = [];
+    const diagnostics = [];
+    let lastActivityAt = 0;
+    const observeActivity = (kind) => {
+      const timestamp = Date.now();
+      if (lastActivityAt && timestamp - lastActivityAt < 1000) return;
+      lastActivityAt = timestamp;
+      try { options.onActivity?.({ kind, timestamp }); } catch {}
+    };
     let output = "";
     let rejectAbort;
     let timeoutTimer = null;
@@ -625,6 +746,7 @@ class HermesAcpClient {
         hermesSessionId: session.hermesSessionId
       });
       let firstUpdateSeen = false;
+      const firstContentTimings = new Set();
       for (;;) {
         let message;
         try {
@@ -645,6 +767,7 @@ class HermesAcpClient {
             hermesSessionId: session.hermesSessionId,
             toolCalls: [...tools.values()],
             files: [],
+            diagnostics,
             updates
           };
         }
@@ -677,12 +800,47 @@ class HermesAcpClient {
             hermesSessionId: session.hermesSessionId,
             toolCalls: [...tools.values()],
             files,
+            diagnostics,
             updates
           };
         }
 
         const update = message.notification?.update || message.update;
         if (!update) continue;
+        const diagnostic = providerDiagnostic(update);
+        if (diagnostic) {
+          diagnostics.push(diagnostic);
+          if (["first_byte", "stream_activity"].includes(diagnostic.stage)) observeActivity("response_data");
+          try { options.onDiagnostic?.(diagnostic); } catch {}
+          if (diagnostic.code === "HERMES_PROVIDER_OVERLOADED"
+            || diagnostic.code === "HERMES_PROVIDER_AUTH_FAILED"
+            || diagnostic.code === "HERMES_PROVIDER_RATE_LIMITED") {
+            const error = new Error(PROVIDER_ERRORS[diagnostic.code]);
+            error.code = diagnostic.code;
+            await this.cancel(localSessionId).catch(() => false);
+            session.active?.dispose?.();
+            this.sessions.delete(localSessionId);
+            throw error;
+          }
+          continue;
+        }
+        const generation = update._meta?.baiqiu_execution;
+        const hasText = update.content?.type === "text" && String(update.content.text || "").trim();
+        if (hasText && ["agent_message_chunk", "agent_thought_chunk"].includes(update.sessionUpdate)) observeActivity("model_data");
+        if (["tool_call", "tool_call_update"].includes(update.sessionUpdate) || generation?.type === "tool_generating") observeActivity("tool_event");
+        const contentTiming = generation?.type === "tool_generating"
+          ? "firstToolGenerationUpdate"
+          : update.sessionUpdate === "tool_call" ? "firstToolExecutionUpdate"
+            : hasText && update.sessionUpdate === "agent_message_chunk" ? "firstMessageTextUpdate"
+              : hasText && update.sessionUpdate === "agent_thought_chunk" ? "firstThoughtTextUpdate" : "";
+        if (contentTiming && !firstContentTimings.has(contentTiming)) {
+          firstContentTimings.add(contentTiming);
+          emitPromptTiming(this, options, contentTiming, timingStartedAt, {
+            localSessionId,
+            hermesSessionId: session.hermesSessionId,
+            ...(generation?.eventId ? { eventId: generation.eventId, producerAt: generation.timestamp } : {})
+          });
+        }
         updates.push(update);
         if (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text") {
           output += update.content.text || "";
@@ -722,6 +880,16 @@ class HermesAcpClient {
           toolCalls: [...tools.values()]
         });
       }
+    } catch (error) {
+      error.hermesResult = {
+        status: "failed", text: output, hermesSessionId: session.hermesSessionId,
+        toolCalls: [...tools.values()], updates, diagnostics, files: []
+      };
+      const lastProviderError = diagnostics.findLast((item) => item.type === "provider_error");
+      if (lastProviderError && !String(error.code || "").startsWith("HERMES_PROVIDER_")) {
+        error.providerDiagnostic = lastProviderError;
+      }
+      throw error;
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       signal?.removeEventListener?.("abort", onAbort);
@@ -785,6 +953,8 @@ class HermesAcpClient {
     this.sessionBuilds.clear();
     this.activePrompts.clear();
     this._closeTransport();
+    this.mcpServers.clear();
+    this.mcpConnections.clear();
     this.status("stopped");
   }
 

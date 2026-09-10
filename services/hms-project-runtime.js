@@ -12,16 +12,7 @@ function clean(value, limit = 4000) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
-const BLACK_BALL_PUBLIC_EVENT_PROTOCOL = [
-  "[BLACK_BALL_PUBLIC_EVENT_PROTOCOL_V1]",
-  "Black Ball is the authoritative producer for this turn. White Ball only transports and renders your declared events.",
-  "For every real stage, publish one short public structured judgment before the matching answer segment. This is a factual work summary, not private chain-of-thought.",
-  '<baiqiu-progress>{"segmentId":"1","stage":"read|analyze|plan|execute|verify|write","status":"running","message":"state the concrete observation, decision, or evidence for the next answer segment"}</baiqiu-progress>',
-  '<baiqiu-answer segmentId="1">the answer segment that belongs only to that judgment</baiqiu-answer>',
-  "Use a new sequential segmentId for each new answer segment. Keep the same segmentId on the matching progress and answer envelopes.",
-  "Do not emit generic status filler, private thoughts, secrets, hidden prompts, or unverified claims. Do not repeat an answer segment after it was emitted.",
-  "After the last answer segment, do not repeat the full answer in baiqiu-final. Use baiqiu-final only when no baiqiu-answer was emitted."
-].join("\n");
+const BLACK_BALL_PUBLIC_EVENT_PROTOCOL = require("./public-response-protocol").publicResponseStreamPrompt();
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));

@@ -19,6 +19,7 @@ function sourceBetween(source, start, end) {
 function rendererLifecycleSource(source) {
   return [
     sourceBetween(source, "function messageRowForId", "function removeInstructionAnchorSpace"),
+    sourceBetween(source, "function transitionLiveTurn", "function registerLiveChatStream"),
     sourceBetween(source, "function ensureLiveSegmentBlock", "function placeLiveActivityBeforeBlock"),
     sourceBetween(source, "function placeLiveActivityBeforeBlock", "function adoptPendingReasoningBlock"),
     sourceBetween(source, "function ensureLiveSegmentCurrentThinking", "function liveAnswerSegmentIsVisible"),
@@ -60,24 +61,67 @@ async function runElectronHarness() {
     const root = path.join(__dirname, "..");
     const rendererSource = fs.readFileSync(path.join(root, "renderer-v2", "app.js"), "utf8");
     const lifecycleSource = rendererLifecycleSource(rendererSource);
+    const stopButtonSource = sourceBetween(
+      rendererSource,
+      'sendBtn.addEventListener("click"',
+      'chatForm.addEventListener("submit"'
+    );
+    const completionToggleSource = sourceBetween(
+      rendererSource,
+      "function bindExecutionActivityToggle",
+      "function updateExecutionActivityToggle"
+    );
     const evaluation = `
       (async () => {
+        try {
         const messageList = document.getElementById("messageList");
-        const state = { selectedSessionId: "session-1", followOutput: false };
+        const state = {
+          selectedSessionId: "session-1",
+          followOutput: false,
+          busy: true,
+          abortRequestedSessions: new Set(),
+          abortedStreamIds: new Set()
+        };
         const liveChatStreams = new Map();
+        const activeSendOwners = new Map();
         const locallyCompletedSessions = new Set();
         const EXECUTION_ACTIVITY_TRANSITION_MS = 15;
+        const STRUCTURED_RESULT_TRANSITION_MS = 15;
         const PUBLIC_REASONING_MIN_VISIBLE_MS = 40;
+        const STRUCTURED_THOUGHT_FADE_MS = 3000;
+        const STRUCTURED_RESULT_VISIBLE_LIMIT = 3;
+        const LIVE_TURN_STATES = Object.freeze({
+          CREATED: "CREATED",
+          RUNNING: "RUNNING",
+          TERMINAL_RECEIVED: "TERMINAL_RECEIVED",
+          ANSWER_COMMITTED: "ANSWER_COMMITTED",
+          VIEW_DRAINED: "VIEW_DRAINED",
+          CLOSED: "CLOSED"
+        });
+        const LIVE_TURN_TRANSITIONS = Object.freeze({
+          CREATED: new Set(["RUNNING", "TERMINAL_RECEIVED", "CLOSED"]),
+          RUNNING: new Set(["TERMINAL_RECEIVED", "ANSWER_COMMITTED", "CLOSED"]),
+          TERMINAL_RECEIVED: new Set(["ANSWER_COMMITTED", "CLOSED"]),
+          ANSWER_COMMITTED: new Set(["VIEW_DRAINED", "CLOSED"]),
+          VIEW_DRAINED: new Set(["CLOSED"]),
+          CLOSED: new Set()
+        });
 
         const discardSupersededLiveChatStreams = () => {};
         const removeStaleExecutionRows = () => {};
         const stopExecutionActivityFlow = () => {};
         const executionActivityNodes = (root) => ({ viewport: root?.querySelector?.(".execution-activity-details") || null });
+        const executionActivityRenderedDetails = (_root, details = []) => details;
         const clearExecutionActivityDetails = (root) => root?.replaceChildren?.();
         const removeThinkingMessage = (row) => row?.remove?.();
         const removeSessionExecutionIndicator = () => {};
+        const releaseActiveSendOwner = () => {};
+        const sessionTaskQueue = { setActive: () => {}, list: () => [], shift: () => null };
+        const processQueue = () => {};
         const streamActivityHtml = () => "<div class=streaming-activity></div>";
-        const bindExecutionActivityToggle = () => {};
+        const bindExecutionActivityViewport = () => {};
+        const updateExecutionActivityToggle = () => {};
+        const replaceExecutionActivityLines = () => {};
         const paintExecutionStage = () => {};
         const scrollExecutionActivityToLatest = () => {};
         const ensureExecutionActivityFlow = () => {};
@@ -85,18 +129,23 @@ async function runElectronHarness() {
         const filterAssistantExecutionOutput = (value) => String(value || "");
         const blackBallBrandText = (value) => String(value || "");
         const rawBlackBallAnswerText = (value) => String(value || "");
+        const answerSegmentsFromMessage = (message = {}) => Array.isArray(message.answerSegments) ? message.answerSegments : [];
+        const structuredEventsFromMessage = () => [];
         const hideLiveThinkingLayer = () => {};
         const finishLiveExecutionSurface = () => {};
         const instructionAnchorId = () => "";
         const mutatePreservingMessageViewport = (mutation) => mutation();
         const flushLiveActivityPaint = () => {};
         const renderProgressiveMarkdown = (target, text) => { target.textContent = String(text || ""); };
+        const softenProgressiveTail = () => {};
         const bindRenderedLinks = () => {};
         const classifyRenderedDataLayout = () => {};
         const collapseCompletedExecutionActivity = (activity) => activity;
         const evaluateLongReply = () => {};
         const showFreshComposerSuggestions = () => {};
+        const ensureAssistantCopyAction = () => {};
         const scheduleStreamingScroll = () => {};
+        const assistantTypingCharsPerSecond = () => 1000;
         const setLiveStreamStage = () => {};
         const scheduleLiveChatStreamPaint = () => {};
         const liveAnswerSegmentIsVisible = () => true;
@@ -109,7 +158,16 @@ async function runElectronHarness() {
         const adoptPendingReasoningBlock = () => null;
         const resetLiveChatStreamReveal = () => {};
         const updateLiveStreamElapsed = () => {};
+        const freezeLiveStreamElapsed = () => {};
+        const syncSessionRuntimeControls = () => {};
+        const executionActivityFlowIsPending = () => false;
         const appendLiveStreamNotice = () => {};
+        const paintLiveExecutionNarrative = () => {};
+        const messageRuntimeOutcome = () => "completed";
+
+        ${sourceBetween(rendererSource, "function canonicalLiveEventTarget", "function registerLiveChatStream")}
+
+        ${completionToggleSource}
 
         ${lifecycleSource}
 
@@ -134,6 +192,8 @@ async function runElectronHarness() {
           return {
             streamId: "run-1",
             sessionId: "session-1",
+            turnId: "run-1",
+            turnState: LIVE_TURN_STATES.TERMINAL_RECEIVED,
             responseMessageId: "response-1",
             row: null,
             thinkingRow: null,
@@ -158,6 +218,7 @@ async function runElectronHarness() {
             segmentEndLengths: new Map(),
             activeSegmentId: "",
             activityDetails: [],
+            structuredEvents: [],
             startedAt: Date.now() - 20,
             elapsedTimer: null,
             completionTimer: null,
@@ -172,6 +233,121 @@ async function runElectronHarness() {
         }
 
         const results = {};
+
+        const stopForm = document.createElement("form");
+        const sendBtn = document.createElement("button");
+        sendBtn.type = "submit";
+        stopForm.appendChild(sendBtn);
+        document.body.appendChild(stopForm);
+        const chatForm = stopForm;
+        let abortCalls = 0;
+        let submitCalls = 0;
+        const selectedSession = () => ({ id: "session-1", status: "running" });
+        const sessionIsRunning = () => true;
+        const abortCurrentTask = async () => { abortCalls += 1; };
+        ${stopButtonSource}
+        stopForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          submitCalls += 1;
+        });
+        sendBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        results.stopButton = { abortCalls, submitCalls };
+
+        messageList.replaceChildren();
+        const structuredRow = document.createElement("div");
+        const structuredBubble = document.createElement("div");
+        structuredBubble.className = "bubble";
+        const structuredActivity = document.createElement("div");
+        structuredActivity.className = "streaming-activity";
+        const structuredRendered = document.createElement("div");
+        structuredRendered.className = "rendered";
+        structuredBubble.append(structuredActivity, structuredRendered);
+        structuredRow.appendChild(structuredBubble);
+        messageList.appendChild(structuredRow);
+        const structuredEntry = {
+          streamId: "run-structured",
+          sessionId: "session-1",
+          turnId: "turn-structured",
+          row: structuredRow,
+          rendered: structuredRendered,
+          activity: structuredActivity,
+          segmentBlocks: new Map(),
+          segmentOrder: [],
+          structuredEvents: [],
+          structuredNodes: new Map(),
+          seenStructuredEventIds: new Set(),
+          activeSegmentId: "",
+          activityUpdatedAt: Date.now()
+        };
+        for (const sequence of [2, 1, 3, 4]) {
+          appendLiveStructuredResult(structuredEntry, {
+            turnId: structuredEntry.turnId,
+            eventId: structuredEntry.turnId + ":structured:" + sequence,
+            sequence,
+            target: "structured_result",
+            kind: "public_progress",
+            segmentId: "structured-segment",
+            message: "结构化事件" + sequence
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, EXECUTION_ACTIVITY_TRANSITION_MS + 80));
+        results.structuredWindow = {
+          sequences: [...structuredEntry.structuredPanel.children].map((node) => Number(node.dataset.sequence)),
+          texts: [...structuredEntry.structuredPanel.children].map((node) => node.textContent),
+          storedSequences: structuredEntry.structuredEvents.map((event) => Number(event.sequence))
+        };
+
+        messageList.replaceChildren();
+        const completionRow = document.createElement("div");
+        const completionBubble = document.createElement("div");
+        completionBubble.className = "bubble";
+        const completionActivity = document.createElement("div");
+        completionActivity.className = "streaming-activity execution-activity-completed";
+        completionActivity.dataset.segmentedDetailsOwner = "1";
+        completionActivity.dataset.activityExpanded = "0";
+        completionActivity.__executionActivityDetails = [{ message: "真实工具事件" }];
+        completionActivity.innerHTML = '<button class="execution-activity-toggle" type="button"></button>'
+          + '<div class="execution-activity-details"><span class="execution-activity-flow"></span></div>';
+        const completionProcess = document.createElement("div");
+        completionProcess.className = "stream-segment-process";
+        completionProcess.textContent = "工具调用：读取真实文件";
+        completionProcess.hidden = true;
+        const completionStructured = document.createElement("section");
+        completionStructured.className = "stream-segment-structured";
+        completionStructured.textContent = "阶段结果：已确认位置";
+        completionStructured.hidden = true;
+        const completionReasoning = document.createElement("div");
+        completionReasoning.className = "stream-segment-reasoning";
+        completionReasoning.textContent = "公开摘要：准备完成";
+        completionReasoning.hidden = true;
+        const finalAnswer = document.createElement("div");
+        finalAnswer.className = "stream-segment-answer";
+        finalAnswer.textContent = "最终结果保持可见";
+        completionBubble.append(
+          completionActivity,
+          completionProcess,
+          completionStructured,
+          completionReasoning,
+          finalAnswer
+        );
+        completionRow.appendChild(completionBubble);
+        messageList.appendChild(completionRow);
+        bindExecutionActivityToggle(completionActivity);
+        completionActivity.querySelector(".execution-activity-toggle").click();
+        results.completionToggleExpand = {
+          processHidden: completionProcess.hidden,
+          structuredHidden: completionStructured.hidden,
+          reasoningHidden: completionReasoning.hidden,
+          finalAnswerVisible: !finalAnswer.hidden
+        };
+        completionActivity.querySelector(".execution-activity-toggle").click();
+        results.completionToggleCollapse = {
+          processHidden: completionProcess.hidden,
+          structuredHidden: completionStructured.hidden,
+          reasoningHidden: completionReasoning.hidden,
+          finalAnswerVisible: !finalAnswer.hidden
+        };
 
         messageList.replaceChildren();
         const phaseRow = document.createElement("div");
@@ -202,7 +378,7 @@ async function runElectronHarness() {
         retireLiveExecutionPhase(phaseEntry, "1");
         await new Promise((resolve) => setTimeout(resolve, PUBLIC_REASONING_MIN_VISIBLE_MS + 5));
         results.phaseRetireStart = {
-          lifecycle: firstThought.dataset.lifecycle,
+          thoughtText: firstThought.textContent,
           answer: firstBlock.answer.textContent,
           answerConnected: firstBlock.answer.isConnected,
           theaterBeforeRendered: phaseActivity.nextElementSibling === phaseRendered
@@ -217,6 +393,7 @@ async function runElectronHarness() {
         };
         const secondBlock = ensureLiveSegmentBlock(phaseEntry, "2");
         setLiveCurrentThinking(phaseEntry, "真实思考二", { segmentId: "2", blockIndex: 1 });
+        await new Promise((resolve) => setTimeout(resolve, 180));
         const secondThought = secondBlock.currentThinking;
         phaseEntry.activityDetails = [{ kind: "tool", message: "第二个真实黑球动作" }];
         showLiveExecutionPhase(phaseEntry, secondBlock);
@@ -335,7 +512,13 @@ async function runElectronHarness() {
           type: "done",
           streamId: timerEntry.streamId,
           sessionId: timerEntry.sessionId,
-          seq: 1
+          seq: 1,
+          turnSequence: 1,
+          turnId: timerEntry.turnId,
+          eventId: timerEntry.turnId + ":terminal:1",
+          sequence: 1,
+          target: "execution",
+          eventType: "done"
         });
         adoptPersistedLiveStreamRow(timerEntry);
         await new Promise((resolve) => setTimeout(resolve, EXECUTION_ACTIVITY_TRANSITION_MS + 30));
@@ -346,8 +529,12 @@ async function runElectronHarness() {
         };
 
         return results;
+        } catch (error) {
+          return { harnessEvalError: String(error?.stack || error?.message || error) };
+        }
       })()
     `;
+    new (require("node:vm").Script)(evaluation);
     const result = await window.webContents.executeJavaScript(evaluation, true);
     const line = `${RESULT_MARKER}${JSON.stringify(result)}\n`;
     process.stdout.write(line, () => app.exit(0));
@@ -427,6 +614,36 @@ function registerNodeTests() {
     assert.equal(result.finalize.text, "final answer");
   });
 
+  test("the real stop button click aborts without submitting the composer form", async () => {
+    const result = await runProbe();
+    assert.deepEqual(result.stopButton, { abortCalls: 1, submitCalls: 0 });
+  });
+
+  test("real structured events are ordered and the fourth pushes the oldest out", async () => {
+    const result = await runProbe();
+    assert.deepEqual(result.structuredWindow, {
+      sequences: [2, 3, 4],
+      texts: ["结构化事件2", "结构化事件3", "结构化事件4"],
+      storedSequences: [1, 2, 3, 4]
+    });
+  });
+
+  test("the completion arrow alone restores and retires every stage detail", async () => {
+    const result = await runProbe();
+    assert.deepEqual(result.completionToggleExpand, {
+      processHidden: false,
+      structuredHidden: false,
+      reasoningHidden: false,
+      finalAnswerVisible: true
+    });
+    assert.deepEqual(result.completionToggleCollapse, {
+      processHidden: true,
+      structuredHidden: true,
+      reasoningHidden: true,
+      finalAnswerVisible: true
+    });
+  });
+
   test("discarding a stream releases ownership without deleting an adopted durable row", async () => {
     const result = await runProbe();
     assert.deepEqual(result.discardOne, {
@@ -453,7 +670,7 @@ function registerNodeTests() {
   test("the theater stays fixed while each thought fades and both answer nodes remain", async () => {
     const result = await runProbe();
     assert.deepEqual(result.phaseRetireStart, {
-      lifecycle: "exiting",
+      thoughtText: "真实思考一",
       answer: "第一段结果",
       answerConnected: true,
       theaterBeforeRendered: true

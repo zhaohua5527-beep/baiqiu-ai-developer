@@ -70,3 +70,42 @@ test("a briefly missing delegation record is polled instead of failing immediate
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("terminal worker states stop waiting even without a timeout", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "baiqiu-hermes-terminal-"));
+  try {
+    createStateDb(root);
+    const db = new Database(path.join(root, "state.db"));
+    for (const status of ["unknown", "stalled", "interrupted", "cancelled", "partial", "failed"]) {
+      db.prepare("INSERT INTO async_delegations (delegation_id, state, event_json) VALUES (?, ?, ?)")
+        .run(`deleg_${status}`, status, JSON.stringify({ status, error: "worker ended" }));
+    }
+    db.close();
+    for (const status of ["unknown", "stalled", "interrupted", "cancelled", "partial", "failed"]) {
+      const result = await waitForHermesDelegationCompletion([`deleg_${status}`], { hermesHome: root, timeoutMs: 0 });
+      assert.equal(result.status, "failed");
+      assert.equal(result.error, "worker ended");
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("single completion preserves the summary and empty completion is not success", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "baiqiu-hermes-single-"));
+  try {
+    createStateDb(root);
+    const db = new Database(path.join(root, "state.db"));
+    db.prepare("INSERT INTO async_delegations (delegation_id, state, result_json) VALUES (?, 'completed', ?)")
+      .run("deleg_single", JSON.stringify({ summary: "actual result" }));
+    db.prepare("INSERT INTO async_delegations (delegation_id, state) VALUES (?, 'completed')").run("deleg_empty");
+    db.close();
+    const single = await waitForHermesDelegationCompletion(["deleg_single"], { hermesHome: root });
+    assert.equal(single.status, "completed");
+    assert.equal(single.results[0].summary, "actual result");
+    const empty = await waitForHermesDelegationCompletion(["deleg_empty"], { hermesHome: root });
+    assert.equal(empty.status, "partial");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

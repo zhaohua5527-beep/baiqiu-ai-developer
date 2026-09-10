@@ -12,7 +12,7 @@ test("product:submit-task rejects an overlapping run and creates a fresh control
   const segment = mainSource.slice(start, nextHandler > start ? nextHandler : start + 30000);
 
   assert.match(segment, /const running = activeRuns\.get\(sessionId\);[\s\S]*?if \(running\) \{[\s\S]*?error: "RUN_ALREADY_ACTIVE"/);
-  assert.match(segment, /const controller = new AbortController\(\);\s*activeRuns\.set\(sessionId, \{[\s\S]*?runId: requestRunId,[\s\S]*?controller,/);
+  assert.match(segment, /const controller = new AbortController\(\);[\s\S]*?activeRuns\.set\(sessionId, \{[\s\S]*?runId: requestRunId,[\s\S]*?controller,/);
   assert.doesNotMatch(segment, /previousRun\?\.controller|previousRun && !previousRun\.controller/);
 });
 

@@ -40,6 +40,9 @@
 })();
 
 const api = window.heiqiu;
+const persistedReplay = window.BaiqiuPersistedReplay;
+const blackBallPublicEvents = window.BaiqiuBlackBallPublicEvents;
+const eventAggregator = window.BaiqiuEventAggregator;
 const rendererStartupStartedAt = performance.now();
 
 function reportStartupMetric(name, meta = {}) {
@@ -49,6 +52,25 @@ function reportStartupMetric(name, meta = {}) {
       ...meta
     });
   } catch {}
+}
+
+function reportLiveOutputTiming(entry, stage, event = {}, node = null) {
+  if (!entry?.turnId || entry.finalized || entry.firstOutputTimings?.has(stage)) return;
+  if (event.turnId && String(event.turnId) !== String(entry.turnId)) return;
+  if (node && (!node.isConnected || !String(node.textContent || "").trim()
+    || node.closest("[hidden]") || !node.getClientRects().length)) return;
+  const observedAt = Date.now();
+  entry.firstOutputTimings ||= new Set();
+  entry.firstOutputTimings.add(stage);
+  reportStartupMetric(`cross-reply:output:${stage}`, {
+    sessionId: entry.sessionId,
+    turnId: entry.turnId,
+    eventId: String(event.eventId || ""),
+    eventType: String(event.type || event.eventType || event.semanticType || ""),
+    requestStartedAt: entry.requestStartedAt,
+    observedAt,
+    elapsedMs: Math.max(0, observedAt - entry.requestStartedAt)
+  });
 }
 
 reportStartupMetric("renderer:script-start");
@@ -75,6 +97,20 @@ const TASK_BOARD_TOGGLE_POSITION_KEY = "baiqiu.taskBoardTogglePosition";
 const INTENT_PREDICT_POSITION_KEY = "baiqiu.intentPredictPosition";
 const INTENT_PREDICTION_EXTERNAL_ENABLED = false;
 const COMPOSER_SUGGESTION_IDLE_MS = 15000;
+const CHAT_FONT_SCALE_KEY = "baiqiu.chatFontScale";
+const CHAT_FONT_SCALE_MIN = 0.9;
+const CHAT_FONT_SCALE_MAX = 1.6;
+const CHAT_FONT_SCALE_STEP = 0.1;
+
+function readChatFontScale() {
+  try {
+    const stored = Number(localStorage.getItem(CHAT_FONT_SCALE_KEY));
+    if (Number.isFinite(stored)) return Math.max(CHAT_FONT_SCALE_MIN, Math.min(CHAT_FONT_SCALE_MAX, stored));
+  } catch {}
+  return 1;
+}
+
+let chatFontScale = readChatFontScale();
 
 const state = {
   db: null,
@@ -189,32 +225,51 @@ let composerSuggestionDismissTimer = null;
 // A persisted reply can trigger an IPC refresh while its local typewriter is still playing.
 const activeAssistantTypings = new Map();
 // HMS supplies the content stream. The renderer only controls visible cadence.
-const ASSISTANT_TYPING_MIN_CHARS_PER_SECOND = 300;
-const ASSISTANT_TYPING_MAX_CHARS_PER_SECOND = 500;
+const ASSISTANT_TYPING_MIN_CHARS_PER_SECOND = 105;
+const ASSISTANT_TYPING_MAX_CHARS_PER_SECOND = 290;
 const ASSISTANT_TYPING_MAX_SPEED_LENGTH = 1600;
-const ASSISTANT_TYPING_PUNCTUATION_PAUSE_MS = 24;
-const ASSISTANT_TYPING_SEPARATOR_PAUSE_MS = 8;
+const ASSISTANT_TYPING_PUNCTUATION_PAUSE_MS = 110;
+const ASSISTANT_TYPING_SEPARATOR_PAUSE_MS = 28;
 // Keep Markdown paints batched while preserving a continuous typewriter feel;
 // composer focus uses a slightly wider batch to protect IME input.
 const LIVE_MARKDOWN_BATCH_MS = 32;
 const LIVE_MARKDOWN_INPUT_BATCH_MS = 48;
-const EXECUTION_ACTIVITY_QUEUE_LIMIT = 1;
+const EXECUTION_ACTIVITY_QUEUE_LIMIT = 32;
 const REASONING_SEGMENT_HISTORY_LIMIT = 3;
 const PUBLIC_REASONING_MIN_VISIBLE_MS = 900;
-const TEST_PHASE_MEMBERSHIP_ENABLED = true;
-// Execution status is a temporary present-tense surface, never a transcript.
-const EXECUTION_ACTIVITY_HISTORY_LIMIT = 6;
-const EXECUTION_ACTIVITY_RENDERED_LIMIT = EXECUTION_ACTIVITY_HISTORY_LIMIT;
-// The live surface is intentionally compact: three factual lines are enough
-// to orient the user without turning the conversation into an event dump.
+const TEST_PHASE_MEMBERSHIP_ENABLED = false;
+// Keep the collapsed surface compact; expanding reveals every event in the turn.
 const EXECUTION_ACTIVITY_VISIBLE_LIMIT = 3;
 const EXECUTION_ACTIVITY_TRANSITION_MS = 180;
+const EXECUTION_ACTIVITY_LINE_TRANSITION_MS = 520;
+const EXECUTION_NARRATIVE_LONG_ACTION_MS = 1500;
 const STRUCTURED_RESULT_VISIBLE_LIMIT = 3;
-const STRUCTURED_THOUGHT_FADE_MS = 2400;
+const STRUCTURED_THOUGHT_FADE_MS = 3200;
+const STRUCTURED_RESULT_TRANSITION_MS = 360;
+const LIVE_STREAM_FIRST_EVENT_TIMEOUT_MS = 30_000;
+const LIVE_STREAM_NO_PROGRESS_TIMEOUT_MS = 120_000;
+const LIVE_STREAM_FIRST_PUBLIC_TIMEOUT_MS = 120_000;
+const LIVE_STREAM_TOTAL_TIMEOUT_MS = 30 * 60_000;
+const LIVE_STREAM_PROGRESS_CHECK_MS = 5_000;
 const EXECUTION_ACTIVITY_WHIMSY_DELAY_MS = 1300;
 const EXECUTION_ACTIVITY_WHIMSY_INTERVAL_MS = 5200;
-// The theater has one DOM owner for the full turn. Segment thoughts and answers
-// are rendered below it, so advancing to another answer never relocates it.
+const LIVE_TURN_STATES = Object.freeze({
+  CREATED: "CREATED",
+  RUNNING: "RUNNING",
+  TERMINAL_RECEIVED: "TERMINAL_RECEIVED",
+  ANSWER_COMMITTED: "ANSWER_COMMITTED",
+  VIEW_DRAINED: "VIEW_DRAINED",
+  CLOSED: "CLOSED"
+});
+const LIVE_TURN_TRANSITIONS = Object.freeze({
+  CREATED: new Set(["RUNNING", "TERMINAL_RECEIVED", "CLOSED"]),
+  RUNNING: new Set(["TERMINAL_RECEIVED", "ANSWER_COMMITTED", "CLOSED"]),
+  TERMINAL_RECEIVED: new Set(["ANSWER_COMMITTED", "CLOSED"]),
+  ANSWER_COMMITTED: new Set(["VIEW_DRAINED", "CLOSED"]),
+  VIEW_DRAINED: new Set(["CLOSED"]),
+  CLOSED: new Set()
+});
+// The theater is a local waiting surface; it never emits or mutates task events.
 const EXECUTION_ACTIVITY_THEATER_ENABLED = true;
 const TEXT_THEATER_SUMMARY_MAX_CHARS = 48;
 const TEXT_THEATER_SHORT_TASK_EVENTS = 2;
@@ -236,6 +291,7 @@ const TEXT_THEATER_ACTION_TIMINGS = Object.freeze({
   collision: [0, 90, 760, 1420, 2050, 3260, 4380],
   assist: [0, 160, 1080, 2060, 2860, 4020, 5080]
 });
+const TEXT_THEATER_FINISHED_HOLD_MS = 1400;
 const TEXT_THEATER_EFFECT_LABELS = Object.freeze({
   smoke: "噗！",
   stars: "✦ 找到啦",
@@ -628,18 +684,14 @@ let foregroundChatPrewarmIdleHandle = null;
 let executionPresenceTimer = null;
 let composerIsComposing = false;
 let composerLastInputAt = 0;
-const foregroundChatPrewarmedSessions = new Set();
 const foregroundChatPrewarmRequests = new Map();
 
 function requestForegroundChatPrewarm(sessionId = state.selectedSessionId) {
   const targetId = String(sessionId || "").trim();
-  if (!targetId || !api?.prewarmChat || foregroundChatPrewarmedSessions.has(targetId)) return Promise.resolve(false);
+  if (!targetId || !api?.prewarmChat) return Promise.resolve(false);
   if (foregroundChatPrewarmRequests.has(targetId)) return foregroundChatPrewarmRequests.get(targetId);
   const request = Promise.resolve(api.prewarmChat(targetId))
-    .then((warmed) => {
-      if (warmed === true) foregroundChatPrewarmedSessions.add(targetId);
-      return warmed === true;
-    })
+    .then((warmed) => warmed === true)
     .catch(() => false)
     .finally(() => foregroundChatPrewarmRequests.delete(targetId));
   foregroundChatPrewarmRequests.set(targetId, request);
@@ -654,7 +706,7 @@ function scheduleForegroundChatPrewarm(sessionId = state.selectedSessionId, dela
     window.cancelIdleCallback(foregroundChatPrewarmIdleHandle);
   }
   foregroundChatPrewarmIdleHandle = null;
-  if (!targetId || foregroundChatPrewarmedSessions.has(targetId)) return;
+  if (!targetId) return;
   foregroundChatPrewarmTimer = setTimeout(() => {
     foregroundChatPrewarmTimer = null;
     const run = () => {
@@ -824,6 +876,26 @@ const taskProgressRail = $("taskProgressRail");
 const taskStagePopover = $("taskStagePopover");
 const sessionSearch = $("sessionSearch");
 const messageList = $("messageList");
+const taskFace = window.BaiqiuTaskFace.create(messageList);
+window.addEventListener("pagehide", () => taskFace.destroy(), { once: true });
+const miniTheatre = window.BaiqiuMiniTheatre.create($("miniTheatreHost"));
+window.addEventListener("pagehide", () => miniTheatre.destroy(), { once: true });
+
+function setChatFontScale(value) {
+  chatFontScale = Math.max(CHAT_FONT_SCALE_MIN, Math.min(CHAT_FONT_SCALE_MAX, Number(value) || 1));
+  document.documentElement.style.setProperty("--chat-font-scale", chatFontScale.toFixed(2));
+  try { localStorage.setItem(CHAT_FONT_SCALE_KEY, String(chatFontScale)); } catch {}
+}
+
+function shortTaskFaceMarkup() {
+  return window.BaiqiuTaskFace.markup();
+}
+
+messageList?.addEventListener("wheel", (event) => {
+  if (!event.ctrlKey || !event.deltaY) return;
+  event.preventDefault();
+  setChatFontScale(chatFontScale + (event.deltaY < 0 ? CHAT_FONT_SCALE_STEP : -CHAT_FONT_SCALE_STEP));
+}, { passive: false });
 const chatForm = $("chatForm");
 const chatInput = $("chatInput");
 const slashCommandMenu = $("slashCommandMenu");
@@ -847,6 +919,7 @@ const composerClarificationAbort = $("composerClarificationAbort");
 const composerClarificationQuestion = $("composerClarificationQuestion");
 const profileOnboardingBtn = $("profileOnboardingBtn");
 const profileOnboardingProgress = $("profileOnboardingProgress");
+const PROFILE_ONBOARDING_DISMISSED_KEY = "baiqiu.profile-onboarding.dismissed";
 const sendBtn = $("sendBtn");
 const voiceBtn = $("voiceBtn");
 const reasoningWaterControl = $("reasoningWaterControl");
@@ -901,7 +974,6 @@ const modelConfigLayer = $("modelConfigLayer");
 const modelConfigCloseBtn = $("modelConfigCloseBtn");
 const modelConfigTitle = $("modelConfigTitle");
 const modelConfigBody = $("modelConfigBody");
-const testModelConnectionBtn = $("testModelConnectionBtn");
 const modelConfigSaveState = $("modelConfigSaveState");
 const modelConfigCancelBtn = $("modelConfigCancelBtn");
 const saveModelConfigBtn = $("saveModelConfigBtn");
@@ -937,6 +1009,10 @@ const contextCompressFill = $("contextCompressFill");
 const contextHeaderBar = $("contextHeaderBar");
 const contextHeaderFill = $("contextHeaderFill");
 const wechatBtn = $("wechatBtn");
+const modelQuickBtn = $("modelQuickBtn");
+const disconnectWechatTopBtn = $("disconnectWechatTopBtn");
+const wechatDialog = $("wechatDialog");
+const wechatDialogCloseBtn = $("wechatDialogCloseBtn");
 const currentChatTitle = $("currentChatTitle");
 const sessionRoleBadge = $("sessionRoleBadge");
 const projectContextStrip = $("projectContextStrip");
@@ -946,6 +1022,7 @@ const projectContextWorkspace = $("projectContextWorkspace");
 const projectContextStatus = $("projectContextStatus");
 const projectContextTools = [...document.querySelectorAll("[data-project-tool]")];
 const currentModelBadge = $("currentModelBadge");
+const wechatConversationUnbindBtn = $("wechatConversationUnbindBtn");
 const growthCenterBtn = $("growthCenterBtn");
 const growthCenterDialog = $("growthCenterDialog");
 const growthCenterCloseBtn = $("growthCenterCloseBtn");
@@ -999,6 +1076,7 @@ const gantzFusionCount = $("gantzFusionCount");
 const gantzRiskLevel = $("gantzRiskLevel");
 const closeKnowledgeEditorBtn = $("closeKnowledgeEditorBtn");
 const updateQuickBtn = $("updateQuickBtn");
+const consciousQuickBtn = $("consciousQuickBtn");
 const updateQuickBadge = $("updateQuickBadge");
 const textColorInput = $("textColorInput");
 const accentColorInput = $("accentColorInput");
@@ -1035,8 +1113,6 @@ const profileAssistantNameInput = $("profileAssistantNameInput");
 const profileStyleInput = $("profileStyleInput");
 const saveProfileSettingsBtn = $("saveProfileSettingsBtn");
 const profileSettingsStatus = $("profileSettingsStatus");
-const openConsciousSettingsBtn = $("openConsciousSettingsBtn");
-const extractConsciousSettingsBtn = $("extractConsciousSettingsBtn");
 const wechatStatusPill = $("wechatStatusPill");
 const wechatQrBox = $("wechatQrBox");
 const wechatQrImage = $("wechatQrImage");
@@ -1047,6 +1123,15 @@ const unbindWechatBtn = $("unbindWechatBtn");
 const openWechatSessionBtn = $("openWechatSessionBtn");
 const wechatLastSync = $("wechatLastSync");
 let wechatQrPollTimer = 0;
+let wechatConversationAutoEntered = false;
+
+async function enterWechatConversation() {
+  const result = await api.wechatEnsureSession?.().catch(() => null);
+  if (result?.db) state.db = ensureClientDb(result.db);
+  if (result?.sessionId) state.selectedSessionId = result.sessionId;
+  wechatDialog?.close?.("wechat-connected");
+  await renderAll();
+}
 const updateCheckBtn = $("updateCheckBtn");
 const updateTabBtn = $("updateTabBtn");
 const applyOnlineUpdateBtn = $("applyOnlineUpdateBtn");
@@ -1339,6 +1424,42 @@ function renderMarkdown(text) {
     }
   });
   return template.innerHTML;
+}
+
+function createAnswerResultDocument(source = "", envelope = {}) {
+  return window.BaiqiuResultAst?.createResultAst?.(source, {
+    target: "answer",
+    envelope,
+    marked: window.marked
+  }) || null;
+}
+
+function setAnswerResultDocument(rendered, source = "", envelope = {}) {
+  if (!rendered) return null;
+  const documentModel = createAnswerResultDocument(source, envelope);
+  rendered._resultAst = documentModel;
+  rendered.classList.toggle("result-document", Boolean(documentModel));
+  if (documentModel) {
+    rendered.dataset.resultTarget = "answer";
+    if (documentModel.turnId) rendered.dataset.turnId = documentModel.turnId;
+    if (documentModel.eventId) rendered.dataset.eventId = documentModel.eventId;
+    if (documentModel.segmentId) rendered.dataset.segmentId = documentModel.segmentId;
+  }
+  return documentModel;
+}
+
+function decorateAnswerResult(rendered, source = "", envelope = {}) {
+  return setAnswerResultDocument(rendered, source, envelope);
+}
+
+function answerResultCopyText(rendered, fallback = "") {
+  const serialized = window.BaiqiuResultAst?.serializeResult?.(rendered?._resultAst, "markdown");
+  const source = String(serialized || fallback || "");
+  const withoutInternalPrefix = source.replace(
+    /^\s*参考知识[\s\S]*?\n\s*\*\*\d+(?:\.\d+)?s\*\*\s*\n+/,
+    ""
+  );
+  return filterAssistantExecutionOutput(withoutInternalPrefix).trim();
 }
 
 function extractClientCodeBlocks(text) {
@@ -1899,7 +2020,8 @@ function mergeAuthoritativeMessageHistory(sessionId, history, offset = 0) {
   let additions = 0;
   for (const [id, message] of authoritative) {
     if (!byId.has(id)) additions += 1;
-    byId.set(id, message);
+    const persisted = byId.get(id);
+    byId.set(id, persisted ? mergeSessionSnapshotMessage(persisted, message) : message);
   }
   if (!additions && !isWindow) return incoming;
   const merged = [...byId.values()].sort((left, right) => Number(left?.createdAt || 0) - Number(right?.createdAt || 0));
@@ -2277,6 +2399,23 @@ function messageHasTerminalExecution(message = {}) {
     || messageExecutionStatusValues(message).some((status) => EXECUTION_TERMINAL_STATUSES.has(status));
 }
 
+function messageRuntimeOutcome(message = {}) {
+  const raw = message?.raw && typeof message.raw === "object" ? message.raw : {};
+  const product = raw.productResult && typeof raw.productResult === "object" ? raw.productResult : {};
+  const statuses = [
+    ...messageExecutionStatusValues(message),
+    product.executionOutcome,
+    product.deliveryStatus,
+    product.presentationStatus
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+  if (product.requiresModelConfiguration === true
+    || product.requiresConfirmation === true
+    || statuses.some((status) => ["waiting", "awaiting_input", "awaiting_confirmation"].includes(status))) return "waiting";
+  if (product.success === false
+    || statuses.some((status) => ["failed", "blocked", "timeout", "timed_out", "aborted", "cancelled", "interrupted"].includes(status))) return "failed";
+  return "completed";
+}
+
 function executionLeaseIsActive(value) {
   if (!value) return false;
   if (typeof value === "string") return Boolean(value.trim());
@@ -2289,19 +2428,46 @@ function executionLeaseIsActive(value) {
   );
 }
 
+function liveChatStreamRuntimePhase(entry) {
+  if (!entry) return "";
+  const turnState = String(entry.turnState || LIVE_TURN_STATES.CREATED);
+  if (entry.timedOut
+    || entry.backendCompleted
+    || entry.terminalType
+    || [
+      LIVE_TURN_STATES.TERMINAL_RECEIVED,
+      LIVE_TURN_STATES.ANSWER_COMMITTED,
+      LIVE_TURN_STATES.VIEW_DRAINED,
+      LIVE_TURN_STATES.CLOSED
+    ].includes(turnState)) return "terminal";
+  if ([LIVE_TURN_STATES.CREATED, LIVE_TURN_STATES.RUNNING].includes(turnState)) return "running";
+  return "";
+}
+
+function localSessionRuntime(sessionId) {
+  const key = String(sessionId || "");
+  if (!key) return { phase: "", entry: null };
+  const ownerId = String(activeSendOwners.get(key) || "");
+  const ownerEntry = ownerId ? liveChatStreams.get(ownerId) : null;
+  if (ownerId && !ownerEntry) return { phase: "running", entry: null };
+  const entry = ownerEntry || activeLiveChatStreamForSession(key);
+  return { phase: liveChatStreamRuntimePhase(entry), entry: entry || null };
+}
+
 function sessionIsRunning(session) {
   if (!session?.id) return false;
-  // The renderer starts the next request before the persisted session status
-  // advances from the previous terminal state. Local activity is therefore
-  // authoritative for the lifetime of the in-flight request.
-  if (activeSendOwners.has(session.id) || activeLiveChatStreamForSession(session.id)) return true;
+  // Local turn state bridges both snapshot races: a new CREATED turn must win
+  // over the previous terminal snapshot, while a terminal frame must stop the
+  // runtime controls even if the durable snapshot still says running.
+  const localRuntime = localSessionRuntime(session.id);
+  if (localRuntime.phase === "running") return true;
+  if (localRuntime.phase === "terminal") return false;
   const status = String(session.status || "").toLowerCase();
   const terminalStatuses = [...EXECUTION_TERMINAL_STATUSES, "waiting", "awaiting_input", "awaiting_confirmation"];
   // A stale lease must not resurrect a completed/failed session while the
   // backend finishes writing the terminal task state.
   if (terminalStatuses.includes(status)) return false;
   if (locallyCompletedSessions.has(session.id)) return false;
-  if (sessionTaskQueue.isActive(session.id)) return true;
   // Project/task runtimes can outlive the first assistant response. Their
   // execution lease is authoritative until the backend clears these fields.
   if (executionLeaseIsActive(session.activeTaskId)
@@ -2313,6 +2479,22 @@ function sessionIsRunning(session) {
   const productStatus = String(latestAssistant?.raw?.productResult?.status || latestAssistant?.raw?.status || "").toLowerCase();
   if (terminalStatuses.includes(productStatus)) return false;
   return status === "running";
+}
+
+function syncSessionRuntimeControls(sessionId) {
+  const key = String(sessionId || "");
+  if (!key) return;
+  const session = state.db?.sessions?.find((item) => item.id === key) || null;
+  const localRuntime = localSessionRuntime(key);
+  const running = sessionIsRunning(session);
+  if (!running) removeSessionExecutionIndicator(key);
+  if (state.selectedSessionId === key) {
+    setBusy(running);
+    stopProgress(running ? session?.status : localRuntime.entry?.terminalType || "idle");
+    renderTaskProgressRail();
+  }
+  updateProjectTreePresentation();
+  renderSessions();
 }
 
 async function selectSessionById(sessionId) {
@@ -2328,11 +2510,17 @@ async function selectSessionById(sessionId) {
   }
   const selectionEpoch = ++sessionSelectionEpoch;
   const previousSessionId = state.selectedSessionId;
+  reportStartupMetric("cross-reply:renderer:session-switch", {
+    sessionId: resolvedSessionId,
+    requestedSessionId: sessionId,
+    selectionEpoch
+  });
   saveSessionDraft(previousSessionId, chatInput?.value || "");
   saveSessionScrollPosition(previousSessionId);
   cacheCurrentSessionMessageDom(previousSessionId);
   clearSessionTransientState();
   state.selectedSessionId = resolvedSessionId;
+  miniTheatre.select(resolvedSessionId);
   restoreSessionDraft(resolvedSessionId);
   markSessionRead(resolvedSessionId);
   acknowledgeSessionNotice(resolvedSessionId);
@@ -2358,14 +2546,22 @@ async function selectSessionById(sessionId) {
   try {
     const restoredCachedDom = restoreSessionMessageDom(resolvedSessionId);
     const cachedHistory = cachedSessionMessageHistory(resolvedSessionId, requestedOffset);
+    const localHistory = Array.isArray(state.db?.messages?.[resolvedSessionId])
+      ? state.db.messages[resolvedSessionId]
+      : Array.isArray(session?.messages) ? session.messages : null;
+    const immediateHistory = cachedHistory || localHistory;
+    const immediateMessages = Array.isArray(immediateHistory)
+      ? immediateHistory
+      : Array.isArray(immediateHistory?.messages) ? immediateHistory.messages : [];
+    immediateMessages.forEach((message) => rememberAuthoritativeMessage(resolvedSessionId, message));
+    // Read and paint the target history before persisting the selection. The
+    // main-process selection handler rewrites the database; starting both IPC
+    // calls together can make the history read observe a transient empty file
+    // and replace the conversation with an empty state.
     const historyRequest = api.messages(resolvedSessionId, { limit: MESSAGE_WINDOW_SIZE, offset: requestedOffset }).catch(() => null);
-    const selectionRequest = api.selectSession(resolvedSessionId).then(
-      (db) => ({ db, error: null }),
-      (error) => ({ db: null, error })
-    );
-    if (cachedHistory && !restoredCachedDom) {
+    if (!restoredCachedDom && immediateHistory) {
       await renderMessages({
-        prefetchedMessages: { sessionId: resolvedSessionId, history: cachedHistory }
+        prefetchedMessages: { sessionId: resolvedSessionId, history: immediateHistory }
       });
     }
     const prefetchedHistory = await historyRequest;
@@ -2375,7 +2571,10 @@ async function selectSessionById(sessionId) {
         prefetchedMessages: { sessionId: resolvedSessionId, history: prefetchedHistory }
       });
     }
-    const selectionResult = await selectionRequest;
+    const selectionResult = await api.selectSession(resolvedSessionId).then(
+      (db) => ({ db, error: null }),
+      (error) => ({ db: null, error })
+    );
     if (selectionResult.error) throw selectionResult.error;
     if (selectionEpoch !== sessionSelectionEpoch) return;
     state.db = selectionResult.db;
@@ -2525,8 +2724,7 @@ function renderTaskCard(experience = {}) {
 }
 
 function renderResultCard(result = {}) {
-  const text = productResultText(result) || (result.success ? "任务完成。" : "任务未完成。");
-  return text;
+  return productResultText(result);
 }
 
 function projectEmployeeResultsFromMessage(message = {}) {
@@ -2843,6 +3041,7 @@ function closeMembershipPayment() {
 }
 
 async function createMembershipOrder(plan, paymentMethod) {
+  if (!TEST_PHASE_MEMBERSHIP_ENABLED) return;
   const planName = MEMBERSHIP_PLAN_NAMES[plan] || "会员";
   pendingPaymentOrder = null;
   if (paymentPanel) paymentPanel.dataset.state = "loading";
@@ -2876,6 +3075,7 @@ async function createMembershipOrder(plan, paymentMethod) {
 }
 
 async function activateMembershipPlan(plan) {
+  if (!TEST_PHASE_MEMBERSHIP_ENABLED) return;
   pendingPaymentPlan = MEMBERSHIP_PLAN_NAMES[plan] ? plan : "monthly";
   if (!settingsDialog?.open) openSettingsTab("invite");
   else switchSettingsTab("invite");
@@ -2890,6 +3090,7 @@ async function activateMembershipPlan(plan) {
 }
 
 async function checkPaymentOrder() {
+  if (!TEST_PHASE_MEMBERSHIP_ENABLED) return;
   const orderId = pendingPaymentOrder?.orderId || "";
   if (!orderId) {
     setPaymentStatus("请先选择会员套餐并创建订单。", "error");
@@ -2953,10 +3154,13 @@ function applyTestPhaseMembershipIsolation() {
   }
   [
     licenseOverlay,
+    paymentPanel,
+    paymentQrPreview,
     document.querySelector('[data-settings-tab="invite"]'),
     document.querySelector('[data-settings-page="invite"]'),
     document.querySelector('[data-debug-check="licenseState"]')
   ].filter(Boolean).forEach((element) => { element.hidden = true; });
+  if (settingsDialog?.dataset.activeTab === "invite") switchSettingsTab("general");
 }
 
 function renderLicenseStatus(status) {
@@ -4170,7 +4374,7 @@ function scrollLongReplyHeadingIntoView(row, heading) {
   const listRect = messageList.getBoundingClientRect();
   const headingRect = heading.getBoundingClientRect();
   messageList.scrollTo({
-    top: Math.max(0, messageList.scrollTop + headingRect.top - listRect.top - 18),
+    top: Math.max(0, messageList.scrollTop + headingRect.top - listRect.top - messageList.clientHeight * 0.3),
     behavior: "smooth"
   });
   requestAnimationFrame(updateReadingControls);
@@ -4741,6 +4945,7 @@ function renderUserProfileOnboardingCard() {
 }
 
 async function openUserProfileOnboarding({ automatic = false } = {}) {
+  if (automatic && localStorage.getItem(PROFILE_ONBOARDING_DISMISSED_KEY) === "1") return false;
   try {
     const profile = await api.userProfile();
     if (profile) state.onboardingProfile = profile;
@@ -5523,6 +5728,7 @@ function applyAppearance() {
   document.body.dataset.skin = skin;
   document.documentElement.style.setProperty("--app-font-size", `${fontSize}px`);
   document.documentElement.style.setProperty("--chat-font-size", `${chatFontSize}px`);
+  setChatFontScale(chatFontScale);
   document.documentElement.style.setProperty("--chat-font-weight", String(chatFontWeight));
   document.documentElement.style.setProperty("--text", colors.textColor);
   document.documentElement.style.setProperty("--accent", colors.accentColor);
@@ -5679,7 +5885,7 @@ function setBusy(value) {
     if (chatForm) chatForm.dataset.stageLabel = "待命";
   }
   sendBtn.classList.toggle("abort", value);
-  sendBtn.title = value ? "终止执行（输入内容可加入后续任务）" : "发送";
+  sendBtn.title = value ? "终止执行" : "发送";
   taskState.textContent = value ? "执行中" : "待命";
   if (monitorMode) monitorMode.textContent = value ? "执行中" : "待命";
   if (value) {
@@ -5704,17 +5910,18 @@ function renderReasoningMode() {
   reasoningWaterControl.title = `${modelName} · ${reasoningLabel(value)} · ${profile.modeLabel}`;
   if (reasoningModelLabel) reasoningModelLabel.textContent = compactModelLabel(modelName, provider.name || providerKey);
   const modelVersions = modelVersionsForProvider(providerKey, provider);
+  const switchingModel = reasoningWaterControl.getAttribute("aria-busy") === "true";
   const view = ["models", "levels"].includes(reasoningModeMenu.dataset.view) ? reasoningModeMenu.dataset.view : "overview";
   const safeIndex = Math.max(0, index);
   const energyState = reasoningEnergyState(safeIndex, levels);
   if (view === "models") {
     reasoningModeMenu.innerHTML = `
       <section class="compact-model-versions" aria-label="模型版本">
-        <header class="compact-model-head"><strong>模型</strong><small>${escapeHtml(provider.name || providerKey)} · ${modelVersions.length} 个型号</small></header>
+        <header class="compact-model-head"><strong>模型</strong><small>${switchingModel ? "正在验证模型，请稍候" : `${escapeHtml(provider.name || providerKey)} · ${modelVersions.length} 个型号`}</small></header>
         <div class="compact-model-version-list">
           ${modelVersions.length ? modelVersions.map((version) => {
             const active = version === modelName;
-            return `<button type="button" class="compact-model-version${active ? " active" : ""}" data-model-version="${escapeHtml(version)}" role="menuitemradio" aria-checked="${active ? "true" : "false"}">
+            return `<button type="button" class="compact-model-version${active ? " active" : ""}" data-model-version="${escapeHtml(version)}" role="menuitemradio" aria-checked="${active ? "true" : "false"}"${switchingModel ? " disabled" : ""}>
               <strong>${escapeHtml(compactModelLabel(version, provider.name || providerKey))}</strong><i>${active ? "✓" : ""}</i>
             </button>`;
           }).join("") : '<div class="compact-model-empty">暂无可用模型</div>'}
@@ -5892,18 +6099,7 @@ function renderReasoningMode() {
   }
   const modelTrigger = reasoningModeMenu.querySelector("[data-open-model-versions]");
   if (modelTrigger) {
-    const openModelVersions = () => {
-      reasoningModeMenu.dataset.view = "models";
-      renderReasoningMode();
-      requestAnimationFrame(positionReasoningMenu);
-    };
-    modelTrigger.addEventListener("pointerenter", () => {
-      clearTimeout(reasoningModeMenu._modelHoverTimer);
-      reasoningModeMenu._modelHoverTimer = window.setTimeout(openModelVersions, 500);
-    });
-    modelTrigger.addEventListener("pointerleave", () => {
-      clearTimeout(reasoningModeMenu._modelHoverTimer);
-    });
+    modelTrigger.setAttribute("aria-haspopup", "menu");
   }
 }
 
@@ -6314,11 +6510,18 @@ function showProtectedDeleteDialog(name) {
 
 function projectSessionStatus(status = "", session = null) {
   const normalized = String(status || "").toUpperCase();
-  if (session?.id && (activeSendOwners.has(session.id) || activeLiveChatStreamForSession(session.id))) return { label: "执行", tone: "running" };
+  const localRuntime = session?.id ? localSessionRuntime(session.id) : { phase: "", entry: null };
+  if (localRuntime.phase === "running") return { label: "执行", tone: "running" };
+  if (localRuntime.phase === "terminal") {
+    const runtimeOutcome = String(localRuntime.entry?.runtimeOutcome || "").toLowerCase();
+    const terminalType = String(localRuntime.entry?.terminalType || "").toLowerCase();
+    if (runtimeOutcome === "waiting") return { label: "准备", tone: "created" };
+    if (runtimeOutcome === "failed" || ["error", "cancelled"].includes(terminalType)) return { label: "失败", tone: "failed" };
+    return { label: "完成", tone: "done" };
+  }
   if (session?.id && locallyCompletedSessions.has(session.id)) return { label: "完成", tone: "done" };
   if (["SUCCESS", "DONE", "COMPLETED"].includes(normalized)) return { label: "完成", tone: "done" };
   if (["FAILED", "TIMEOUT", "ABORTED", "CANCELLED", "INTERRUPTED"].includes(normalized)) return { label: "失败", tone: "failed" };
-  if (session?.id && sessionTaskQueue.isActive(session.id)) return { label: "执行", tone: "running" };
   if (["RUNNING", "EXECUTING", "PLANNING"].includes(normalized)) return { label: "执行", tone: "running" };
   if (["WAITING", "AWAITING_CONFIRMATION"].includes(normalized)) return { label: "准备", tone: "created" };
   if (["CREATED", "IDLE", "READY"].includes(normalized)) return { label: "准备", tone: "created" };
@@ -6795,6 +6998,10 @@ function createProjectSessionNode(session, { batchSelectable = false } = {}) {
     }
   });
   button.addEventListener("click", () => {
+    if (isWechat) {
+      openSettingsTab("wechat", "settings", { userInitiated: true });
+      return;
+    }
     if (!isTrashed) selectSessionById(button.dataset.conversationId);
   });
   button.addEventListener("keydown", (event) => {
@@ -6860,14 +7067,15 @@ async function syncWechatConversation({ button = null } = {}) {
 
 function renderComposerSessionMode(session = selectedSession()) {
   const isWechat = isWechatChatSession(session);
-  chatForm?.classList.toggle("wechat-readonly", isWechat);
-  if (chatForm) chatForm.hidden = isWechat;
+  chatForm?.classList.remove("wechat-readonly");
+  if (chatForm) chatForm.hidden = false;
   if (chatInput) {
-    chatInput.disabled = isWechat;
-    chatInput.placeholder = isWechat
-      ? "微信聊天仅供查看和同步"
-      : session?.projectId ? "告诉黑球下一步要完成什么" : "给 Gantz 发送消息";
+    chatInput.disabled = false;
+    chatInput.readOnly = false;
+    chatInput.tabIndex = 0;
+    chatInput.placeholder = isWechat ? "输入微信消息" : session?.projectId ? "告诉黑球下一步要完成什么" : "给 Gantz 发送消息";
   }
+  if (wechatConversationUnbindBtn) wechatConversationUnbindBtn.hidden = !isWechat;
   if (isWechat) {
     hideSlashCommandMenu();
     hideComposerReplyNav();
@@ -7636,9 +7844,7 @@ function collectTaskProgressStages(session = selectedSession()) {
   const sessionMessages = state.currentMessages || [];
   const lastUser = [...sessionMessages].reverse().find((message) => message?.role === "user");
   const lastAssistant = [...sessionMessages].reverse().find((message) => message?.role === "assistant");
-  const runtimeActive = sessionIsRunning(session)
-    || activeSendOwners.has(session.id)
-    || Boolean(activeLiveChatStreamForSession(session.id));
+  const runtimeActive = sessionIsRunning(session);
   const executionStatus = String(execution.status || execution.deliveryStatus || "").toLowerCase();
   const executionCompleted = ["success", "completed", "complete", "done"].includes(executionStatus)
     || execution.deliveryStatus === "completed";
@@ -7708,13 +7914,15 @@ function collectTaskProgressStages(session = selectedSession()) {
 
 function taskProgressTimelineHtml(stages = []) {
   if (!stages.length) return `<div class="task-board-line">当前暂无任务阶段。</div>`;
-  return `<div class="task-stage-list">${stages.map((stage, index) => `
-    <div class="task-stage-row ${stage.status}${state.taskBoardFocusId === stage.id ? " focused" : ""}">
-      <span class="task-stage-index">${index + 1}</span>
-      <div><strong>${escapeHtml(stage.label)}</strong><small>${escapeHtml(stage.detail || "")}</small></div>
-      <b>${escapeHtml(taskStageStatusLabel(stage.status))}</b>
-    </div>
-  `).join("")}</div>`;
+  const current = [...stages].reverse().find((stage) => ["active", "failed", "cancelled", "timeout"].includes(stage.status))
+    || stages.at(-1);
+  const detail = current?.detail || stages.find((stage) => stage.detail)?.detail || "";
+  const status = current?.status || "queued";
+  return `<div class="task-stage-list"><div class="task-stage-row ${status}${state.taskBoardFocusId === current?.id ? " focused" : ""}">
+    <span class="task-stage-index">1</span>
+    <div><strong>执行任务</strong><small>${escapeHtml(detail)}</small></div>
+    <b>${escapeHtml(taskStageStatusLabel(status))}</b>
+  </div></div>`;
 }
 
 function showTaskStagePopover(button, stage) {
@@ -8270,7 +8478,13 @@ function activeAssistantTypingForSession(sessionId) {
   if (!key) return null;
   const entry = activeAssistantTypings.get(key);
   if (!entry) return null;
-  if (entry.row?.isConnected && entry.rendered?.isConnected) return entry;
+  const ownsVisibleRow = Boolean(
+    entry.row?.isConnected
+    && entry.rendered?.isConnected
+    && messageList?.contains(entry.row)
+    && entry.rendered.classList.contains("typing-response")
+  );
+  if (ownsVisibleRow) return entry;
   activeAssistantTypings.delete(key);
   entry.cancel?.();
   return null;
@@ -8283,6 +8497,33 @@ function activeLiveChatStreamForSession(sessionId) {
     entry.sessionId === key
     && !entry.timedOut
   )) || null;
+}
+
+function liveChatStreamOwnsVisibleRow(entry) {
+  if (!entry || !messageList) return false;
+  const streamId = String(entry.streamId || "");
+  const messageId = String(entry.responseMessageId || "");
+  return [entry.row, entry.thinkingRow].some((row) => {
+    if (!row?.isConnected || !messageList.contains(row) || row.hidden) return false;
+    const rowStreamId = String(row.dataset?.streamId || "");
+    const rowMessageId = String(row.dataset?.messageId || "");
+    return Boolean(
+      (streamId && rowStreamId === streamId)
+      || (messageId && rowMessageId === messageId)
+    );
+  });
+}
+
+function activeSendOwnerMatches(sessionId, runId) {
+  const sessionKey = String(sessionId || "");
+  const runKey = String(runId || "");
+  return Boolean(sessionKey && runKey && activeSendOwners.get(sessionKey) === runKey);
+}
+
+function releaseActiveSendOwner(sessionId, runId) {
+  if (!activeSendOwnerMatches(sessionId, runId)) return false;
+  activeSendOwners.delete(String(sessionId));
+  return true;
 }
 
 function renderedMessageWindowMatches(messages = []) {
@@ -8348,7 +8589,7 @@ function progressiveMarkdownStableBoundary(text = "") {
   return boundary;
 }
 
-function renderProgressiveMarkdown(rendered, text = "", { final = false } = {}) {
+function renderProgressiveMarkdown(rendered, text = "", { final = false, envelope = {} } = {}) {
   if (!rendered) return;
   const source = String(text || "");
   if (final) {
@@ -8358,6 +8599,7 @@ function renderProgressiveMarkdown(rendered, text = "", { final = false } = {}) 
     if (!alreadyRendered) rendered.innerHTML = renderMarkdown(source);
     bindRenderedLinks(rendered);
     classifyRenderedDataLayout(rendered, { preserveWide: true, source });
+    decorateAnswerResult(rendered, source, envelope);
     rendered._progressiveMarkdownStableSource = null;
     rendered._progressiveMarkdownSource = null;
     rendered._progressiveMarkdownEnhancedAt = null;
@@ -8384,6 +8626,7 @@ function renderProgressiveMarkdown(rendered, text = "", { final = false } = {}) 
     rendered._progressiveMarkdownStableSource = stableSource;
   }
   tail.innerHTML = renderMarkdown(tailSource);
+  setAnswerResultDocument(rendered, source, envelope);
   // Link binding and table classification scan the whole rendered subtree.
   // They do not need to run for every paint of the unstable tail.
   const now = performance.now();
@@ -8583,6 +8826,40 @@ function knowledgeReferencesFromMessage(message = {}) {
   return candidates.find((items) => Array.isArray(items) && items.length) || [];
 }
 
+function createMessageKnowledgeReferences(message = {}) {
+  const items = knowledgeReferencesFromMessage(message)
+    .filter((item) => item?.id && item?.title)
+    .slice(0, 4);
+  if (!items.length) return null;
+  const references = document.createElement("div");
+  references.className = "message-knowledge-references";
+  const label = document.createElement("span");
+  label.textContent = "参考知识";
+  references.appendChild(label);
+  for (const item of items) {
+    const reference = document.createElement("button");
+    reference.type = "button";
+    reference.title = [item.type, item.project, item.source].filter(Boolean).join(" · ") || "打开知识";
+    reference.textContent = item.title;
+    reference.addEventListener("click", () => {
+      void openGrowthCenter().then(() => loadKnowledgeNote(item.id)).catch((error) => showCopyToast(`打开知识失败：${error?.message || error}`));
+    });
+    references.appendChild(reference);
+  }
+  return references;
+}
+
+function placeKnowledgeReferencesInExecutionHeader(root, references) {
+  const head = root?.querySelector?.(".execution-activity-head");
+  if (!head || !references) return false;
+  references.classList.add("execution-activity-head-references");
+  const elapsed = head.querySelector(".streaming-elapsed");
+  head.insertBefore(references, elapsed || null);
+  const title = head.querySelector(".execution-activity-title");
+  if (title) title.hidden = true;
+  return true;
+}
+
 function structuredPresentationItems(value = [], limit = 12) {
   return (Array.isArray(value) ? value : [])
     .map((item) => typeof item === "string" ? { label: item } : item)
@@ -8721,12 +8998,6 @@ function mergeStructuredEventLists(...lists) {
     const turnId = String(event.turnId || event.runId || "legacy-turn").trim();
     const type = String(event.type || event.kind || "public_progress").trim();
     const eventId = String(event.eventId || `${turnId}:structured:${sequence}:${type}`).trim();
-    if (eventId && seen.has(eventId)) {
-      if (JSON.stringify(seen.get(eventId)) !== JSON.stringify(event)) {
-        console.error("[StructuredEvent] conflicting duplicate eventId", eventId);
-      }
-      continue;
-    }
     const normalized = {
       ...event,
       turnId,
@@ -8736,21 +9007,42 @@ function mergeStructuredEventLists(...lists) {
       type,
       __arrival: events.length
     };
-    if (eventId) seen.set(eventId, event);
+    if (eventId && seen.has(eventId)) {
+      if (seen.get(eventId) !== liveTurnEventFingerprint(normalized)) {
+        console.error("[StructuredEvent] conflicting duplicate eventId", eventId);
+      }
+      continue;
+    }
+    if (eventId) seen.set(eventId, liveTurnEventFingerprint(normalized));
     events.push(normalized);
   }
   return events
-    .sort((a, b) => (Number(a.sequence || 0) - Number(b.sequence || 0)) || (a.__arrival - b.__arrival))
+    .sort((a, b) => (Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0)) || (a.__arrival - b.__arrival))
     .map(({ __arrival, ...event }) => event);
 }
 
 function structuredEventsFromMessage(message = {}) {
-  return mergeStructuredEventLists(
-    message.structuredEvents,
-    message.raw?.structuredEvents,
-    message.raw?.productResult?.structuredEvents,
-    message.raw?.productResult?.raw?.structuredEvents
-  );
+  return persistedReplay.structuredEventsFromMessage(message);
+}
+
+function isCrossStructuredEvent(event = {}) {
+  return String(event.semanticType ?? event.semantic_type ?? "").trim().toLowerCase() === "cross";
+}
+
+function isStageResultStructuredEvent(event = {}) {
+  return String(event.semanticType ?? event.semantic_type ?? "").trim().toLowerCase() === "stage_result";
+}
+
+function isPrimaryExecutionSummaryEvent(event = {}) {
+  if (isCrossStructuredEvent(event) || isStageResultStructuredEvent(event)) return true;
+  const semanticType = String(event.semanticType ?? event.semantic_type ?? "").trim().toLowerCase();
+  const target = String(event.target ?? event.outputType ?? "").trim().toLowerCase();
+  const provenance = String(event.provenance || "").trim().toLowerCase();
+  const text = String(event.message ?? event.text ?? "").trim();
+  return ["thinking", "action"].includes(semanticType)
+    && ["structured", "structured_result"].includes(target)
+    && provenance === "blackball_public"
+    && Boolean(text);
 }
 
 function mergeAnswerSegmentLists(...lists) {
@@ -8781,79 +9073,88 @@ function mergeAnswerSegmentLists(...lists) {
       continue;
     }
     const current = output[position];
-    if (text.startsWith(current.text)) output[position] = normalized;
-    else if (!current.text.startsWith(text) && current.text !== text) {
+    if (liveTurnEventFingerprint(current) !== liveTurnEventFingerprint(normalized)) {
       console.error("[AnswerEvent] conflicting duplicate eventId", eventId);
     }
   }
-  return output.sort((a, b) => a.sequence - b.sequence);
+  return output.sort((a, b) => (
+    Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0)
+  ) || (a.sequence - b.sequence));
 }
 
 function answerSegmentsFromMessage(message = {}) {
-  return mergeAnswerSegmentLists(
-    message.answerSegments,
-    message.raw?.answerSegments,
-    message.raw?.productResult?.answerSegments,
-    message.raw?.productResult?.raw?.answerSegments
-  );
+  return persistedReplay.answerSegmentsFromMessage(message);
 }
 
 function renderPersistedSegmentPairs(message, rendered) {
-  const answerSegments = answerSegmentsFromMessage(message);
-  const structuredEvents = structuredEventsFromMessage(message);
-  if (!answerSegments.length && !structuredEvents.length) return false;
-  const fallbackAnswer = answerSegments.length
-    ? []
-    : [{
-        turnId: String(message.raw?.productResult?.turnId || message.id || "legacy-turn"),
-        eventId: `${message.id || "message"}:answer:fallback`,
-        sequence: Number.MAX_SAFE_INTEGER,
-        segmentId: "__default",
-        target: "answer",
-        type: "answer_segment",
-        text: filterAssistantExecutionOutput(blackBallBrandText(message.text || ""))
-      }].filter((segment) => segment.text);
-  const answers = [...answerSegments, ...fallbackAnswer];
-  const visibleStructuredEvents = structuredEvents.slice(-STRUCTURED_RESULT_VISIBLE_LIMIT);
-  const structuredBySegment = new Map();
-  visibleStructuredEvents.forEach((event) => {
-    const segmentId = String(event.segmentId || event.segment_id || "").trim()
-      || `__structured_${event.eventId}`;
-    const list = structuredBySegment.get(segmentId) || [];
-    list.push(event);
-    structuredBySegment.set(segmentId, list);
-  });
-  const answerBySegment = new Map(answers.map((segment) => [String(segment.segmentId || "__default"), segment]));
-  const segmentIds = new Set([...structuredBySegment.keys(), ...answerBySegment.keys()]);
-  const segmentSequence = (segmentId) => Math.min(
-    Number(answerBySegment.get(segmentId)?.sequence || Number.MAX_SAFE_INTEGER),
-    ...(structuredBySegment.get(segmentId) || []).map((event) => Number(event.sequence || Number.MAX_SAFE_INTEGER))
+  const processDetails = publicExecutionDetailsFromMessage(message);
+  const replay = persistedReplay.replaySegmentModel(message, processDetails);
+  const answerSegments = replay.answerSegments;
+  const structuredEvents = replay.structuredEvents;
+  const answerBySegment = new Map(
+    answerSegments.map((segment) => [String(segment.segmentId || "__default"), segment])
   );
+  const orderedSegments = replay.orderedSegments;
+  const segmentIds = new Set(answerBySegment.keys());
+  if (!segmentIds.size) return false;
+  const segmentSequence = (segmentId) => Number(
+    answerBySegment.get(segmentId)?.turnSequence
+      || answerBySegment.get(segmentId)?.sequence
+      || Number.MAX_SAFE_INTEGER
+  );
+  const processBySegment = replay.processBySegment;
+  const structuredBySegment = replay.structuredBySegment;
+  const segmentForEvent = (event) => {
+    const explicitSegmentId = String(event.segmentId || event.segment_id || "").trim();
+    if (explicitSegmentId && segmentIds.has(explicitSegmentId)) return explicitSegmentId;
+    const eventSequence = Number(event.turnSequence || event.sequence || 0);
+    const candidate = orderedSegments.find((segment) => (
+      eventSequence > 0
+        && Number(segment.turnSequence || segment.sequence || 0) >= eventSequence
+    )) || orderedSegments.at(-1);
+    return candidate ? String(candidate.segmentId || "__default") : "";
+  };
   rendered.replaceChildren();
   rendered.classList.add("segmented-stream-rendered");
   for (const segmentId of [...segmentIds].sort((a, b) => segmentSequence(a) - segmentSequence(b))) {
+    const segmentStructuredEvents = structuredBySegment.get(segmentId) || [];
     const block = document.createElement("section");
     block.className = "stream-segment-block";
     block.dataset.segmentId = segmentId;
-    const structured = structuredBySegment.get(segmentId) || [];
-    if (structured.length) {
-      const panel = document.createElement("section");
-      panel.className = "streaming-structured-result";
-      panel.setAttribute("aria-live", "polite");
-      structured.forEach((event) => {
-        const text = String(event.delta ?? event.message ?? event.text ?? "");
-        if (!text) return;
-        const kind = String(event.kind || event.type || "public_progress").trim().toLowerCase();
-        const progressType = String(event.type || event.displayKind || "").trim().toLowerCase();
-        const node = document.createElement("div");
-        node.className = `structured-result-entry${isPublicStructuredThought(event, kind, progressType) ? " structured-result-entry-thinking" : ""}`;
-        node.dataset.eventId = String(event.eventId || "");
-        node.dataset.kind = kind;
-        node.textContent = text;
-        panel.appendChild(node);
-      });
-      if (panel.children.length) block.appendChild(panel);
-    }
+    const process = document.createElement("div");
+    process.className = "stream-segment-process execution-activity-details";
+    process.dataset.segmentId = segmentId;
+    process.hidden = true;
+    const processFlow = document.createElement("span");
+    processFlow.className = "execution-activity-flow";
+    process.appendChild(processFlow);
+    const processItems = [
+      ...(processBySegment.get(segmentId) || []),
+      ...segmentStructuredEvents.filter(isStageResultStructuredEvent)
+    ].sort((a, b) => Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0));
+    replaceExecutionActivityLines(processFlow, processItems, {
+      detailCount: processItems.length
+    });
+    const structured = document.createElement("section");
+    structured.className = "stream-segment-structured streaming-structured-result";
+    structured.setAttribute("aria-live", "polite");
+    const structuredItems = segmentStructuredEvents
+      .filter((event) => !isPrimaryExecutionSummaryEvent(event));
+    structuredItems.forEach((event) => {
+      const text = persistedReplay.eventDisplayText(event);
+      if (!text) return;
+      const kind = String(event.kind || event.type || "public_progress").trim().toLowerCase();
+      const progressType = String(event.type || event.displayKind || "").trim().toLowerCase();
+      const node = document.createElement("div");
+      node.className = `structured-result-entry${isPublicStructuredThought(event, kind, progressType) ? " structured-result-entry-thinking" : ""}`;
+      node.dataset.eventId = String(event.eventId || "");
+      node.dataset.segmentId = segmentId;
+      node.dataset.kind = kind;
+      node.textContent = text;
+      structured.appendChild(node);
+    });
+    // Keep real structured summaries visible; only an empty lane stays hidden.
+    structured.hidden = structuredItems.length === 0;
     const answer = document.createElement("div");
     answer.className = "rendered stream-segment-answer";
     const answerText = String(answerBySegment.get(segmentId)?.text || "");
@@ -8861,8 +9162,10 @@ function renderPersistedSegmentPairs(message, rendered) {
       answer.innerHTML = renderMarkdown(answerText);
       bindRenderedLinks(answer);
       classifyRenderedDataLayout(answer);
+      decorateAnswerResult(answer, answerText, answerBySegment.get(segmentId));
     }
-    block.appendChild(answer);
+    process.hidden = true;
+    block.append(process, structured, answer);
     rendered.appendChild(block);
   }
   return true;
@@ -8880,62 +9183,29 @@ function snapshotMessageIdentity(message = {}) {
 }
 
 function mergeSessionSnapshotMessage(current = {}, incoming = {}) {
-  const currentRaw = current.raw && typeof current.raw === "object" ? current.raw : {};
-  const incomingRaw = incoming.raw && typeof incoming.raw === "object" ? incoming.raw : {};
-  const currentResult = currentRaw.productResult && typeof currentRaw.productResult === "object" ? currentRaw.productResult : {};
-  const incomingResult = incomingRaw.productResult && typeof incomingRaw.productResult === "object" ? incomingRaw.productResult : {};
-  const structuredEvents = mergeStructuredEventLists(
-    currentResult.structuredEvents,
-    currentRaw.structuredEvents,
-    incomingResult.structuredEvents,
-    incomingRaw.structuredEvents
-  );
-  const answerSegments = mergeAnswerSegmentLists(
-    current.answerSegments,
-    currentRaw.answerSegments,
-    currentResult.answerSegments,
-    incoming.answerSegments,
-    incomingRaw.answerSegments,
-    incomingResult.answerSegments
-  );
-  const currentText = String(current.text || "");
-  const incomingText = String(incoming.text || "");
-  let text = incomingText || currentText;
-  let preserveCurrentResult = false;
-  if (current.role === "assistant" && currentText) {
-    if (!incomingText || currentText.startsWith(incomingText)) {
-      text = currentText;
-      preserveCurrentResult = true;
+  const merged = persistedReplay.mergeSessionSnapshotMessage(current, incoming);
+  const executionLog = [];
+  const seen = new Map();
+  for (const event of [
+    ...persistedReplay.executionLogFromMessage(current),
+    ...persistedReplay.executionLogFromMessage(incoming)
+  ]) {
+    const eventId = String(event?.eventId || "");
+    if (eventId && seen.has(eventId)) {
+      if (liveTurnEventFingerprint(seen.get(eventId)) !== liveTurnEventFingerprint(event)) {
+        console.error("[SessionSnapshot] conflicting duplicate eventId", eventId);
+      }
+      continue;
     }
-    else if (!incomingText.startsWith(currentText) && incomingText !== currentText) {
-      console.error("[SessionSnapshot] refused to overwrite committed answer", snapshotMessageIdentity(current));
-      text = currentText;
-      preserveCurrentResult = true;
-    }
+    if (eventId) seen.set(eventId, event);
+    executionLog.push(event);
   }
-  const currentOutcome = String(currentResult.executionOutcome || currentResult.requestRun?.executionOutcome || currentResult.status || "").toLowerCase();
-  const incomingOutcome = String(incomingResult.executionOutcome || incomingResult.requestRun?.executionOutcome || incomingResult.status || "").toLowerCase();
-  if (["succeeded", "completed", "failed", "cancelled", "timed_out"].includes(currentOutcome)
-    && ["", "none", "unknown", "running", "starting", "partial"].includes(incomingOutcome)) {
-    preserveCurrentResult = true;
+  if (executionLog.length) {
+    executionLog.sort((left, right) => Number(left?.turnSequence || left?.sequence || 0)
+      - Number(right?.turnSequence || right?.sequence || 0));
+    merged.raw = { ...merged.raw, executionLog };
   }
-  return {
-    ...current,
-    ...incoming,
-    text,
-    raw: {
-      ...currentRaw,
-      ...incomingRaw,
-      ...(Object.keys(currentResult).length || Object.keys(incomingResult).length || structuredEvents.length || answerSegments.length ? {
-        productResult: {
-          ...(preserveCurrentResult ? incomingResult : currentResult),
-          ...(preserveCurrentResult ? currentResult : incomingResult),
-          ...(structuredEvents.length ? { structuredEvents } : {}),
-          ...(answerSegments.length ? { answerSegments } : {})
-        }
-      } : {})
-    }
-  };
+  return merged;
 }
 
 function mergeSessionChangedDb(currentDb = {}, incomingDb = {}, options = {}) {
@@ -8990,7 +9260,7 @@ function addMessage(message, target = messageList, options = {}) {
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   const rendered = document.createElement("div");
-  rendered.className = "rendered";
+  rendered.className = message.role === "assistant" ? "rendered result-region" : "rendered";
   const nativeBlackBallText = isNativeBlackBallMessage(message);
   const sourceText = nativeBlackBallText
     ? String(message.text || "")
@@ -9026,11 +9296,13 @@ function addMessage(message, target = messageList, options = {}) {
       rendered.innerHTML = renderMarkdown(displayText);
       bindRenderedLinks(rendered);
       classifyRenderedDataLayout(rendered);
+      decorateAnswerResult(rendered, displayText, message);
     } else {
       rendered.innerHTML = renderMarkdown(displayText);
       bindRenderedLinks(rendered);
       enhanceHiddenCodeBlocks(rendered, codeBlocks);
       classifyRenderedDataLayout(rendered);
+      decorateAnswerResult(rendered, displayText, message);
     }
   }
   if (message.role === "assistant" && (messageImages.length || deliveredFiles.length)) {
@@ -9048,31 +9320,18 @@ function addMessage(message, target = messageList, options = {}) {
     bubble.appendChild(reference);
   }
   const knowledgeReferences = message.role === "assistant"
-    ? knowledgeReferencesFromMessage(message).filter((item) => item?.id && item?.title).slice(0, 4)
-    : [];
-  if (knowledgeReferences.length) {
-    const references = document.createElement("div");
-    references.className = "message-knowledge-references";
-    const label = document.createElement("span");
-    label.textContent = "参考知识";
-    references.appendChild(label);
-    for (const item of knowledgeReferences) {
-      const reference = document.createElement("button");
-      reference.type = "button";
-      reference.title = [item.type, item.project, item.source].filter(Boolean).join(" · ") || "打开知识";
-      reference.textContent = item.title;
-      reference.addEventListener("click", () => {
-        void openGrowthCenter().then(() => loadKnowledgeNote(item.id)).catch((error) => showCopyToast(`打开知识失败：${error?.message || error}`));
-      });
-      references.appendChild(reference);
-    }
-    bubble.appendChild(references);
-  }
+    ? createMessageKnowledgeReferences(message)
+    : null;
+  if (knowledgeReferences) bubble.appendChild(knowledgeReferences);
   bubble.appendChild(rendered);
   if (message.role === "assistant") {
     const persistedExecution = renderPersistedExecutionTimeline(message);
-    if (persistedExecution) bubble.insertBefore(persistedExecution, rendered);
+    setAnswerResultDocument(rendered, displayText, message);
     renderPersistedSegmentPairs(message, rendered);
+    if (persistedExecution) {
+      placeKnowledgeReferencesInExecutionHeader(persistedExecution, knowledgeReferences);
+      bubble.insertBefore(persistedExecution, rendered);
+    }
   }
   const employeeResults = message.role === "assistant" ? createProjectEmployeeResults(message) : null;
   if (employeeResults) bubble.appendChild(employeeResults);
@@ -9123,12 +9382,22 @@ function addMessage(message, target = messageList, options = {}) {
   }
   const suggestionEligible = options.suggestionEligible === true;
   if (message.role === "assistant") {
-    ensureAssistantCopyAction(bubble, () => filteredText || rendered.textContent || "");
+    ensureAssistantCopyAction(bubble, () => answerResultCopyText(rendered, filteredText || rendered.textContent || ""));
   }
   // 沉淀已移入右键菜单（messageContextMenu），不再显示在消息悬浮按钮上，
   // 避免"复制/沉淀"挤在一起。
   row.appendChild(bubble);
   target.appendChild(row);
+  if (message.role === "assistant") {
+    reportStartupMetric("cross-reply:renderer:add-message", {
+      sessionId: state.selectedSessionId,
+      messageId: message.id || "",
+      target: target === messageList ? "message-list" : "fragment",
+      rowConnected: row.isConnected,
+      hasAnswerText: Boolean(String(displayText || "").trim()),
+      hasStructuredEvents: structuredEventsFromMessage(message).length > 0
+    });
+  }
   if (useTypingAnimation) {
     const typingSessionId = target === messageList ? String(options.typingSessionId || state.selectedSessionId || "") : "";
     const typingEntry = typingSessionId ? { row, rendered, cancel: null } : null;
@@ -9170,20 +9439,14 @@ function addMessage(message, target = messageList, options = {}) {
 
 function activityDetailText(activity = "") {
   const progress = activity && typeof activity === "object" ? activity : null;
-  if (String(progress?.kind || "").toLowerCase() === "reasoning_delta") {
-    return String(progress.delta || progress.message || progress.text || "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(-20000);
-  }
-  if (progress && typeof progress.text === "string" && !progress.message) return progress.text.trim().slice(0, 20000);
-  const value = String(progress?.message || (typeof activity === "string" ? activity : ""))
-    .replace(/\s+/g, " ")
+  const value = String(progress?.delta || progress?.message || progress?.text || progress?.payload?.text
+    || (typeof progress?.payload === "string" ? progress.payload : "")
+    || (typeof activity === "string" ? activity : ""))
     .trim();
   if (!value || value === "正在输入") return "";
   // The backend has already separated protocol envelopes. Render the event
   // supplied by the model instead of applying another local content filter.
-  return value.slice(0, 20000);
+  return value;
 }
 
 function executionActivityTimestamp(value = 0, fallback = Date.now()) {
@@ -9193,38 +9456,192 @@ function executionActivityTimestamp(value = 0, fallback = Date.now()) {
 
 function executionActivityEntry(activity = "", fallbackTimestamp = Date.now()) {
   const text = activityDetailText(activity);
-  if (!text) return null;
   const progress = activity && typeof activity === "object" ? activity : {};
+  if (!text && !(progress.eventId && progress.status
+    && ["tool", "stage_result"].includes(String(progress.semanticType || progress.kind || "")))) return null;
   const kind = String(progress.kind || "progress").toLowerCase();
   return {
+    ...progress,
     source: String(progress.source || "hms").toLowerCase(),
     kind,
+    type: String(progress.type || progress.eventType || kind).toLowerCase(),
+    semanticType: String(progress.semanticType || progress.semantic_type || "").trim().toLowerCase(),
     action: String(progress.action || progress.stage || (kind === "runtime_status" ? "wait" : "execute")).toLowerCase(),
-    status: String(progress.status || "running").toLowerCase(),
+    actionId: String(progress.actionId || progress.publicActionId || progress.toolCallId || "").trim(),
+    category: String(progress.category || progress.toolCategory || progress.tool || "").trim().toLowerCase(),
+    stage: String(progress.stage || progress.stageId || "").trim().toLowerCase(),
+    stageId: String(progress.stageId || progress.stage || "").trim(),
+    status: String(progress.status || "").toLowerCase(),
     track: String(progress.track || "").toLowerCase(),
     displayKind: String(progress.displayKind || "").toLowerCase(),
-    timestamp: executionActivityTimestamp(progress.timestamp || progress.createdAt || progress.receivedAt, fallbackTimestamp),
+    resultKind: String(progress.resultKind || "").toLowerCase(),
+    timestamp: progress.eventId && !(progress.timestamp || progress.createdAt || progress.receivedAt)
+      ? 0
+      : executionActivityTimestamp(progress.timestamp || progress.createdAt || progress.receivedAt, fallbackTimestamp),
     sequence: Number(progress.sequence || 0),
+    turnSequence: Number(progress.turnSequence || progress.seq || progress.sequence || 0),
+    turnId: String(progress.turnId || progress.runId || "").trim(),
     eventId: String(progress.eventId || ""),
     toolCallId: String(progress.toolCallId || progress.tool_call_id || "").trim().slice(0, 160),
     runId: String(progress.runId || ""),
     blockIndex: Math.max(0, Number(progress.blockIndex || 0) || 0),
     segmentId: String(progress.segmentId || progress.segment_id || "").trim().slice(0, 160),
+    title: String(progress.title || progress.name || "").trim().slice(0, 160),
+    sourceText: String(progress.sourceText || "").trim(),
+    inputPreview: String(progress.inputPreview || "").trim(),
+    resultPreview: String(progress.resultPreview || "").trim(),
+    errorPreview: String(progress.errorPreview || "").trim(),
+    publicSummary: String(progress.publicSummary || "").trim().slice(0, 240),
+    publicSummaryKind: String(progress.publicSummaryKind || "").trim().toLowerCase().slice(0, 32),
+    publicActionId: String(progress.publicActionId || "").trim().slice(0, 160),
+    publicSummarySalient: progress.publicSummarySalient === true,
+    provenance: String(progress.provenance || "").trim().toLowerCase(),
+    target: String(progress.target || "").trim().slice(0, 160),
+    afterEventId: String(progress.afterEventId || "").trim(),
+    evidenceEventIds: Array.isArray(progress.evidenceEventIds) ? [...progress.evidenceEventIds] : [],
+    payloadText: String(progress.payloadText ?? progress.payload?.text ?? "").trim(),
     delta: kind === "reasoning_delta" ? String(progress.delta || progress.message || "") : "",
     text
   };
 }
 
+function executionSummaryEntry(activity = "", fallbackTimestamp = Date.now()) {
+  const entry = executionActivityEntry(activity, fallbackTimestamp);
+  if (!entry) return null;
+  const answerKinds = ["answer", "answer_delta", "answer_segment", "final", "result", "public_result", "turn_complete"];
+  if (answerKinds.includes(entry.kind) || answerKinds.includes(entry.type)) return null;
+  if (answerKinds.includes(entry.semanticType)) return null;
+  if (["answer", "result", "public_result"].includes(entry.target)) return null;
+  return entry.semanticType === "cross" && activity && typeof activity === "object"
+    ? { ...entry, ...activity }
+    : entry;
+}
+
 function executionActivityEntryKey(activity = "") {
   const entry = executionActivityEntry(activity);
   if (!entry) return "";
-  // Lifecycle/public progress events can be emitted once at request accept
-  // and once again when ACP attaches. Their event ids differ, but they belong
-  // to the same reply owner and must never create a second visible line.
-  const identity = ["lifecycle", "public_progress", "progress", "execution"].includes(entry.kind)
-    ? ""
-    : (entry.toolCallId || entry.eventId || "");
-  return [entry.source, entry.kind, identity, entry.action, entry.status, entry.track, entry.segmentId, entry.text].join(":");
+  if (entry.eventId) return `event:${entry.turnId}:${entry.eventId}`;
+  return `legacy:${JSON.stringify([
+    entry.source,
+    entry.kind,
+    entry.toolCallId,
+    entry.sequence,
+    entry.turnSequence,
+    entry.action,
+    entry.status,
+    entry.track,
+    entry.segmentId,
+    entry.timestamp,
+    entry.text
+  ])}`;
+}
+
+function uniqueExecutionActivityEntries(details = [], fallbackTimestamp = Date.now()) {
+  const entries = [];
+  const seen = new Map();
+  for (const detail of Array.isArray(details) ? details : []) {
+    const entry = executionActivityEntry(detail, fallbackTimestamp);
+    if (!entry) continue;
+    const key = executionActivityEntryKey(entry);
+    const fingerprint = JSON.stringify(Object.fromEntries(Object.entries(entry)
+      .filter(([key]) => !["__turnEventAccepted", "__shownAt", "__arrival"].includes(key))));
+    if (seen.has(key)) {
+      if (seen.get(key) !== fingerprint && entry.eventId) {
+        console.error("[ExecutionEvent] conflicting duplicate eventId", entry.eventId);
+      }
+      continue;
+    }
+    seen.set(key, fingerprint);
+    entries.push(entry);
+  }
+  return entries;
+}
+
+function mergeExecutionNarrativeEntries(details = []) {
+  const merged = [];
+  for (const detail of uniqueExecutionActivityEntries(details)) {
+    const entry = executionActivityEntry(detail);
+    if (!String(entry?.publicSummary || "").trim()) continue;
+    const actionId = String(entry.publicActionId || entry.toolCallId || "").trim();
+    const existingIndex = actionId
+      ? merged.findIndex((item) => String(item.publicActionId || item.toolCallId || "").trim() === actionId)
+      : -1;
+    if (existingIndex >= 0) merged[existingIndex] = entry;
+    else merged.push(entry);
+  }
+  return merged.sort((a, b) => (Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0))
+    || (Number(a.timestamp || 0) - Number(b.timestamp || 0)));
+}
+
+function structuredEvidenceToolCallIds(events = []) {
+  return new Set((Array.isArray(events) ? events : [])
+    .flatMap((event) => Array.isArray(event?.evidenceToolCallIds) ? event.evidenceToolCallIds : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean));
+}
+
+function completedExecutionNarrativeEntries(details = []) {
+  const history = uniqueExecutionActivityEntries(details);
+  const evidenceToolCallIds = structuredEvidenceToolCallIds(history);
+  const execution = mergeExecutionNarrativeEntries(history)
+    .filter((item) => !evidenceToolCallIds.has(String(item.publicActionId || item.toolCallId || "")));
+  const structured = history
+    .filter((item) => ["structured", "structured_result"].includes(String(item.target || "")))
+    .map((item) => ({ ...item, publicSummary: item.text, publicSummaryKind: "structured" }));
+  return [...execution, ...structured]
+    .sort((a, b) => (Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0))
+      || (Number(a.timestamp || 0) - Number(b.timestamp || 0)));
+}
+
+function paintCompletedExecutionNarrative(root, details = []) {
+  const panel = root?.querySelector?.(".execution-completed-narrative");
+  if (!panel) return;
+  const summaries = completedExecutionNarrativeEntries(details);
+  panel.replaceChildren(...summaries.map((item) => {
+    const node = document.createElement("div");
+    node.className = "execution-event-narrative-entry";
+    node.dataset.eventId = item.eventId;
+    node.dataset.evidenceEventId = item.eventId;
+    node.dataset.actionId = item.publicActionId || item.toolCallId || "";
+    node.dataset.kind = item.publicSummaryKind;
+    node.dataset.status = item.status;
+    node.textContent = item.publicSummary;
+    return node;
+  }));
+  panel.hidden = root.dataset.activityExpanded !== "1" || summaries.length === 0;
+}
+
+function executionNarrativeMustStayVisible(entry, summaries = []) {
+  if (!entry || !summaries.length) return false;
+  const actionIds = new Set(summaries
+    .map((item) => String(item.publicActionId || item.toolCallId || item.eventId || "").trim())
+    .filter(Boolean));
+  return entry.executionNarrativeShown === true
+    || actionIds.size >= 2
+    || summaries.some((item) => item.publicSummarySalient === true)
+    || (summaries.some((item) => item.status === "running")
+      && Date.now() - Number(entry.executionStartedAt || entry.startedAt || Date.now()) >= EXECUTION_NARRATIVE_LONG_ACTION_MS);
+}
+
+function paintLiveExecutionNarrative(entry) {
+  const root = entry?.activity;
+  const panel = root?.querySelector?.(".execution-event-narrative");
+  if (!entry || !panel || entry.finalized) return;
+  // Tool-derived narratives belong to the expandable detail lane. The main
+  // stage view is owned exclusively by explicit public semantic events.
+  panel.replaceChildren();
+  panel.hidden = true;
+}
+
+function scheduleExecutionNarrativeReveal(entry, activityEntry) {
+  if (!entry || !String(activityEntry?.publicSummary || "").trim()) return;
+  if (entry.executionNarrativeTimer) clearTimeout(entry.executionNarrativeTimer);
+  entry.executionNarrativeTimer = null;
+  if (activityEntry.status !== "running" || activityEntry.publicSummarySalient === true) return;
+  entry.executionNarrativeTimer = setTimeout(() => {
+    entry.executionNarrativeTimer = null;
+    paintLiveExecutionNarrative(entry);
+  }, EXECUTION_NARRATIVE_LONG_ACTION_MS);
 }
 
 function executionActivityProtocolText(activity = "") {
@@ -9260,25 +9677,10 @@ function executionClockText(value = Date.now()) {
 function activityDetailDisplayText(activity = "") {
   const entry = executionActivityEntry(activity);
   if (!entry) return "";
-  if (["lifecycle", "runtime_status", "progress", "public_progress", "plan", "tool", "thought"].includes(entry.kind)) return entry.text;
-  if (["reasoning_note", "reasoning_delta", "public_reasoning"].includes(entry.kind)) return entry.text;
-  if (/^(?:已完成|判断|下一步|计划|当前计划|后续计划|计划已完成|工具|命令|代码|结果|状态|进度)[：:]/.test(entry.text)) {
-    return entry.text;
-  }
-  const label = {
-    plan: "计划",
-    thought: "公开判断",
-    tool: "工具",
-    code: "代码",
-    command: "命令",
-    result: "结果",
-    runtime_status: "状态",
-    progress: "进度",
-    public_progress: "判断",
-    reasoning_delta: "思考",
-    public_reasoning: "思考"
-  }[entry.kind] || "进度";
-  return entry.text.startsWith(`${label}：`) ? entry.text : `${label}：${entry.text}`;
+  return [entry.sourceText, entry.text, entry.inputPreview, entry.resultPreview, entry.errorPreview]
+    .map((value) => String(value || "").trim())
+    .filter((value, index, values) => value && values.indexOf(value) === index)
+    .join("\n");
 }
 
 function activityIsTransient(activity = "") {
@@ -9324,7 +9726,7 @@ function setLiveStreamStage(entry, stage = "understanding", options = {}) {
 }
 
 function executionActivityDetailsHtml(details = [], options = {}) {
-  const history = details.map(executionActivityEntry).filter(Boolean).slice(-EXECUTION_ACTIVITY_HISTORY_LIMIT);
+  const history = uniqueExecutionActivityEntries(details);
   const visible = options.expanded === true ? history : history.slice(-EXECUTION_ACTIVITY_VISIBLE_LIMIT);
   const toggle = options.includeToggle === false ? "" : executionActivityToggleHtml(history.length, options.expanded === true);
   const hidden = visible.length && options.hidden !== true ? "" : " hidden";
@@ -9336,7 +9738,7 @@ function executionActivityLineHtml(activity = "", index = 0) {
   const entry = executionActivityEntry(activity);
   if (!entry) return "";
   const reasoningClass = entry.kind === "reasoning_delta" ? " execution-activity-line-reasoning" : "";
-  return `<span class="execution-activity-line${index ? " execution-activity-line-child" : ""}${reasoningClass}"><time class="execution-activity-line-time" datetime="${escapeHtml(new Date(entry.timestamp).toISOString())}">${escapeHtml(executionActivityTimeText(entry))}</time><span class="execution-activity-line-protocol">${escapeHtml(executionActivityProtocolText(entry))}</span><span class="execution-activity-line-text">${escapeHtml(activityDetailDisplayText(entry))}</span></span>`;
+  return `<span class="execution-activity-line${index ? " execution-activity-line-child" : ""}${reasoningClass}" data-event-id="${escapeHtml(entry.eventId)}" data-turn-id="${escapeHtml(entry.turnId)}" data-semantic-type="${escapeHtml(entry.semanticType)}" data-kind="${escapeHtml(entry.kind)}" data-status="${escapeHtml(entry.status)}" data-target="${escapeHtml(entry.target || "execution")}"><span class="execution-activity-line-text">${escapeHtml(activityDetailDisplayText(entry))}</span></span>`;
 }
 
 function executionActivityLineNode(activity = "", index = 0) {
@@ -9344,17 +9746,16 @@ function executionActivityLineNode(activity = "", index = 0) {
   if (!entry) return document.createDocumentFragment();
   const line = document.createElement("span");
   line.className = `execution-activity-line${index ? " execution-activity-line-child" : ""}${entry.kind === "reasoning_delta" ? " execution-activity-line-reasoning" : ""}`;
-  const time = document.createElement("time");
-  time.className = "execution-activity-line-time";
-  time.dateTime = new Date(entry.timestamp).toISOString();
-  time.textContent = executionActivityTimeText(entry);
-  const protocol = document.createElement("span");
-  protocol.className = "execution-activity-line-protocol";
-  protocol.textContent = executionActivityProtocolText(entry);
+  line.dataset.eventId = entry.eventId;
+  line.dataset.turnId = entry.turnId;
+  line.dataset.semanticType = entry.semanticType;
+  line.dataset.kind = entry.kind;
+  line.dataset.status = entry.status;
+  line.dataset.target = entry.target || "execution";
   const text = document.createElement("span");
   text.className = "execution-activity-line-text";
   text.textContent = activityDetailDisplayText(entry);
-  line.append(time, protocol, text);
+  line.append(text);
   return line;
 }
 
@@ -9363,20 +9764,320 @@ function replaceExecutionActivityLines(rendered, details = [], options = {}) {
   rendered.replaceChildren(...details.map(executionActivityEntry).filter(Boolean).map((detail, index) => executionActivityLineNode(detail, index)));
 }
 
-function executionActivityToggleHtml(detailCount = 0, expanded = false) {
-  const hidden = Number(detailCount || 0) > 0 ? "" : " hidden";
-  const label = expanded ? "收回执行过程" : "查看完整执行过程";
-  return `<button class="execution-activity-toggle" type="button" aria-expanded="${expanded ? "true" : "false"}" aria-label="${label}" title="${label}"${hidden}><span aria-hidden="true"></span></button>`;
+function executionActivityToggleHtml(detailCount = 0, expanded = false, options = {}) {
+  const alwaysVisible = options.alwaysVisible === true;
+  const hidden = alwaysVisible || Number(detailCount || 0) > 0 ? "" : " hidden";
+  const label = expanded ? "收回执行过程" : `查看完整执行过程，共 ${Number(detailCount || 0)} 条`;
+  return `<button class="execution-activity-toggle" type="button" aria-expanded="${expanded ? "true" : "false"}" aria-label="${label}" title="${label}"${alwaysVisible ? ' data-always-visible="1"' : ""}${hidden}>${shortTaskFaceMarkup()}</button>`;
 }
 
 function executionActivityRenderLimit(root) {
   return root?.dataset?.activityExpanded === "1"
-    ? EXECUTION_ACTIVITY_HISTORY_LIMIT
+    ? Number.POSITIVE_INFINITY
     : EXECUTION_ACTIVITY_VISIBLE_LIMIT;
 }
 
 function executionActivityRenderedDetails(root, details = []) {
-  return details.map(executionActivityEntry).filter(Boolean).slice(-executionActivityRenderLimit(root));
+  const history = uniqueExecutionActivityEntries(details);
+  if (root?.dataset?.lifecycle === "completed" && root?.dataset?.activityExpanded !== "1") return [];
+  return root?.dataset?.activityExpanded === "1"
+    ? history
+    : history.slice(-EXECUTION_ACTIVITY_VISIBLE_LIMIT);
+}
+
+function executionViewModelFromDetails(details = [], turnId = "") {
+  const aggregator = typeof eventAggregator !== "undefined"
+    ? eventAggregator
+    : globalThis?.BaiqiuEventAggregator;
+  if (!aggregator?.aggregateExecutionEvents) return null;
+  return aggregator.aggregateExecutionEvents(details, { turnId });
+}
+
+function crossConclusionText(event = {}) {
+  const eventText = persistedReplay.eventDisplayText(event);
+  return String(eventText || event.publicSummary || event.conclusion || "").trim();
+}
+
+function executionThreeRowViewModel(viewModel = null) {
+  const events = Array.isArray(viewModel?.events) ? viewModel.events : [];
+  const phases = [];
+  const stages = new Map();
+  const owners = new Map();
+  const eventsById = new Map();
+  const visited = new Set();
+  for (const event of events) {
+    if (event.eventId) eventsById.set(String(event.eventId), event);
+    if (event.sourceEventId && !eventsById.has(String(event.sourceEventId))) {
+      eventsById.set(String(event.sourceEventId), event);
+    }
+  }
+  let current = null;
+  const eventSequence = (event) => Number(event?.turnSequence || event?.sequence || 0);
+  const eventText = (event) => String(event?.message || event?.text || event?.payload?.text
+    || (typeof event?.payload === "string" ? event.payload : ""));
+  const toolRowText = (event) => {
+    const title = String(event?.title || "").trim();
+    const source = String(event?.sourceText || event?.inputPreview || "").trim();
+    const output = String(event?.errorPreview || event?.resultPreview || "").trim();
+    const details = [source, output ? "结果：" + output : ""].filter(Boolean).join("\n");
+    if (title && details) return title + "\n" + details;
+    return details || title || String(event?.publicSummary || eventText(event)).trim();
+  };
+  const publicRow = (event) => {
+    const semanticType = String(event?.semanticType || "");
+    const target = String(event?.target || "");
+    const provenance = String(event?.provenance || "");
+    if (["thinking", "action"].includes(semanticType)
+      && ["structured", "structured_result"].includes(target)
+      && provenance === "blackball_public"
+      && eventText(event).trim()) {
+      return { semanticType, text: eventText(event) };
+    }
+    if (semanticType === "tool"
+      && ["execution", "execution_activity"].includes(target)
+      && provenance === "blackball_tool"
+      && (toolRowText(event) || event.status)) {
+      return { semanticType, text: toolRowText(event) };
+    }
+    return null;
+  };
+  const createPhase = (event, inheritedStageId = "") => {
+    const stageId = String(event?.stageId || event?.stage || inheritedStageId);
+    const phase = {
+      id: stageId && !stages.has(stageId) ? "stage:" + stageId : "phase:" + String(event?.eventId || eventSequence(event)),
+      stageId,
+      sourceEventIds: [],
+      progressEvents: [],
+      resultEvents: []
+    };
+    phases.push(phase);
+    if (stageId) stages.set(stageId, phase);
+    return phase;
+  };
+  const addSource = (phase, event) => {
+    for (const id of [event?.eventId, event?.sourceEventId].filter(Boolean).map(String)) {
+      if (!phase.sourceEventIds.includes(id)) phase.sourceEventIds.push(id);
+      owners.set(id, phase);
+    }
+  };
+  const phaseForEvent = (event) => {
+    const stageId = String(event?.stageId || event?.stage || "");
+    const anchored = owners.get(String(event?.afterEventId || ""));
+    return anchored || stages.get(stageId) || null;
+  };
+  const answerTypes = ["answer", "answer_delta", "answer_segment", "final", "result", "public_result", "turn_complete"];
+  const visit = (event) => {
+    if (visited.has(event)) return;
+    visited.add(event);
+    const anchor = eventsById.get(String(event.afterEventId || ""));
+    if (anchor && anchor !== event) visit(anchor);
+    const semanticType = String(event?.semanticType || "");
+    if (answerTypes.includes(semanticType) || answerTypes.includes(String(event?.type || ""))
+      || answerTypes.includes(String(event?.kind || ""))
+      || ["answer", "result", "public_result"].includes(String(event?.target || ""))) return;
+    if (!["thinking", "action", "tool", "stage_result", "cross"].includes(semanticType)) return;
+    const stageId = String(event?.stageId || event?.stage || "");
+    const isResult = ["stage_result", "cross"].includes(semanticType);
+    let owner = phaseForEvent(event)
+      || (!stageId && !event.afterEventId ? current : null)
+      || createPhase(event);
+    if (!isResult && owner.resultEvents.length) {
+      owner = current && current !== owner && current.stageId === owner.stageId
+        && !current.resultEvents.length
+        ? current : createPhase(event, owner.stageId);
+    }
+    addSource(owner, event);
+    const row = isResult ? { semanticType, text: eventText(event) } : publicRow(event);
+    if (row && (row.text.trim() || event.status)) {
+      const item = {
+        eventId: String(event.eventId || ""),
+        sourceEventId: String(event.sourceEventId || event.eventId || ""),
+        semanticType: row.semanticType,
+        sequence: eventSequence(event),
+        turnId: String(event.turnId || ""),
+        target: String(event.target || ""),
+        status: String(event.status || ""),
+        text: row.text
+      };
+      if (!isResult) item.payloadText = String(event.payloadText ?? event.payload?.text ?? "").trim();
+      (isResult ? owner.resultEvents : owner.progressEvents).push(item);
+    }
+    if (!isResult) current = owner;
+    else if (owner === current) current = null;
+  };
+  [...events].sort((left, right) => eventSequence(left) - eventSequence(right)).forEach(visit);
+  for (const phase of phases) {
+    phase.progressEvents.sort((left, right) => left.sequence - right.sequence);
+    phase.resultEvents.sort((left, right) => left.sequence - right.sequence);
+  }
+  return phases.filter((phase) => phase.progressEvents.length || phase.resultEvents.length);
+}
+
+function completedExecutionHeaderText(phases = []) {
+  const lastAction = (Array.isArray(phases) ? phases : [])
+    .flatMap((phase) => phase.progressEvents)
+    .reverse()
+    .filter((event) => event.semanticType === "action")
+    .sort((left, right) => Number(right.sequence || 0) - Number(left.sequence || 0))[0];
+  return String(lastAction?.payloadText ?? "").trim();
+}
+
+function paintExecutionPhaseResult(root, node, result = {}) {
+  const text = String(result.text || "");
+  const identity = `${String(result.eventId || "")}:${text}`;
+  const completed = root?.dataset?.lifecycle === "completed";
+  const finish = () => {
+    delete node.dataset.typing;
+    root?.__reportFirstProcessPaint?.(node, result);
+    node.__executionResultComplete?.();
+  };
+  if (node.__executionResultIdentity === identity) {
+    if (completed && node.dataset.typing === "1") {
+      if (node.__executionResultFrame) cancelAnimationFrame(node.__executionResultFrame);
+      node.__executionResultFrame = null;
+      node.textContent = text;
+      finish();
+    }
+    return;
+  }
+  if (node.__executionResultFrame) cancelAnimationFrame(node.__executionResultFrame);
+  node.__executionResultFrame = null;
+  node.__executionResultIdentity = identity;
+  const currentText = String(node.textContent || "");
+  if (completed || !text) {
+    node.textContent = text;
+    finish();
+    return;
+  }
+  const chars = Array.from(text);
+  let visible = text.startsWith(currentText) ? Array.from(currentText).length : 0;
+  let carry = 1;
+  let lastPaintAt = performance.now();
+  node.textContent = visible ? currentText : "";
+  node.dataset.typing = "1";
+  const paint = (now) => {
+    node.__executionResultFrame = null;
+    if (!node.isConnected || root?.dataset?.lifecycle === "completed") {
+      node.textContent = text;
+      finish();
+      return;
+    }
+    carry += Math.max(0, now - lastPaintAt) * assistantTypingCharsPerSecond(chars.length) / 1000;
+    lastPaintAt = now;
+    const count = Math.min(chars.length - visible, Math.floor(carry));
+    if (count > 0) {
+      visible += count;
+      carry -= count;
+      node.textContent = chars.slice(0, visible).join("");
+      root?.__reportFirstProcessPaint?.(node, result);
+      updateExecutionPhaseOverflow(node);
+      if (!node.closest(".execution-phase-event")) scheduleStreamingScroll();
+    }
+    if (visible < chars.length) node.__executionResultFrame = requestAnimationFrame(paint);
+    else finish();
+  };
+  node.__executionResultFrame = requestAnimationFrame(paint);
+}
+
+function updateExecutionPhaseOverflow(node) {
+  const windowNode = node?.closest?.(".execution-phase-event-window");
+  const list = windowNode?.querySelector?.(".execution-phase-event-list");
+  if (!windowNode || !list) return;
+  windowNode.dataset.overflow = list.children.length > EXECUTION_ACTIVITY_VISIBLE_LIMIT
+    || list.scrollHeight > windowNode.clientHeight + 1 ? "1" : "0";
+}
+
+function paintExecutionStageView(root, details = [], turnId = "") {
+  const panel = root?.querySelector?.(".execution-stage-summary");
+  if (!panel) return null;
+  const history = uniqueExecutionActivityEntries([...(root.__executionStageDetails || []), ...details]);
+  const viewModel = executionViewModelFromDetails(history, turnId);
+  root.__executionStageDetails = history;
+  root.__executionViewModel = viewModel;
+  const phases = executionThreeRowViewModel(viewModel);
+  const completedCollapsed = root.dataset.lifecycle === "completed"
+    && root.dataset.activityExpanded !== "1";
+  panel.setAttribute("aria-hidden", completedCollapsed ? "true" : "false");
+  panel.hidden = completedCollapsed || !phases.length;
+  const completedTitle = root.querySelector?.(".execution-activity-title");
+  if (completedTitle) completedTitle.textContent = completedExecutionHeaderText(phases);
+  const directLegacyCross = panel.parentElement?.querySelector?.(":scope > .execution-cross-summary");
+  directLegacyCross?.remove?.();
+  const existingPhases = new Map([...panel.children].map((node) => [node.dataset.phaseId, node]));
+  const paintRow = (item, existingRows, result = false) => {
+    const node = existingRows.get(item.eventId) || document.createElement("div");
+    node.className = result && item.semanticType === "stage_result"
+      ? "execution-phase-result"
+      : "execution-stage-summary-row execution-phase-event";
+    node.dataset.eventId = item.eventId;
+    node.dataset.sourceEventId = item.sourceEventId || item.eventId;
+    node.dataset.semanticType = item.semanticType;
+    node.dataset.sequence = String(item.sequence);
+    node.dataset.turnId = item.turnId;
+    node.dataset.target = item.target;
+    node.dataset.status = item.status;
+    if (item.semanticType === "cross") {
+      paintExecutionPhaseResult(root, node, item);
+    } else {
+      let textNode = node.querySelector(".execution-event-text");
+      if (!textNode) {
+        textNode = document.createElement("span");
+        textNode.className = "execution-event-text";
+        const statusNode = document.createElement("span");
+        statusNode.className = "execution-event-status";
+        node.replaceChildren(textNode, statusNode);
+      }
+      const statusNode = node.querySelector(".execution-event-status");
+      const status = String(item.status || "").toLowerCase();
+      const isSuccess = ["completed", "success", "succeeded", "done"].includes(status);
+      const isFailure = ["failed", "failure", "error", "cancelled", "timeout", "timed_out"].includes(status);
+      statusNode.textContent = isSuccess ? "✅" : isFailure ? "❌" : "";
+      statusNode.className = `execution-event-status${isSuccess ? " success" : isFailure ? " failure" : ""}`;
+      statusNode.hidden = !isSuccess && !isFailure;
+      statusNode.setAttribute("aria-label", isSuccess ? "已完成" : isFailure ? "失败" : "");
+      paintExecutionPhaseResult(root, textNode, item);
+    }
+    return node;
+  };
+  const nodes = phases.map((phase) => {
+    let phaseNode = existingPhases.get(phase.id);
+    if (!phaseNode) {
+      phaseNode = document.createElement("section");
+      phaseNode.className = "execution-phase-group";
+      phaseNode.innerHTML = '<div class="execution-phase-process"><div class="execution-phase-event-window"><div class="execution-phase-event-list"></div></div></div><div class="execution-phase-results"></div>';
+    }
+    phaseNode.dataset.expanded = root.dataset.activityExpanded === "1" ? "1" : "0";
+    phaseNode.dataset.phaseId = phase.id;
+    phaseNode.dataset.stageId = phase.stageId;
+    phaseNode.dataset.sourceEventIds = phase.sourceEventIds.join(",");
+    const process = phaseNode.querySelector(".execution-phase-process");
+    process.hidden = phase.progressEvents.length === 0;
+    const list = phaseNode.querySelector(".execution-phase-event-list");
+    const existingRows = new Map([...list.children].map((node) => [node.dataset.eventId, node]));
+    const rows = phase.progressEvents.map((item, index) => {
+      const node = paintRow(item, existingRows);
+      node.dataset.collapsedHidden = index < phase.progressEvents.length - EXECUTION_ACTIVITY_VISIBLE_LIMIT ? "1" : "0";
+      return node;
+    });
+    list.replaceChildren(...rows);
+    phaseNode.querySelector(".execution-phase-event-window").dataset.overflow = phase.progressEvents.length > EXECUTION_ACTIVITY_VISIBLE_LIMIT ? "1" : "0";
+    const results = phaseNode.querySelector(".execution-phase-results");
+    const existingResults = new Map([...results.children].map((node) => [node.dataset.eventId, node]));
+    results.replaceChildren(...phase.resultEvents.map((item) => paintRow(item, existingResults, true)));
+    results.hidden = phase.resultEvents.length === 0;
+    const resultTexts = [...results.children].map((node) => node.querySelector(".execution-event-text") || node);
+    const updateProcessVisibility = () => {
+      const replyFinished = resultTexts.some((node) => node.textContent.length > 0)
+        && resultTexts.every((node) => node.dataset.typing !== "1");
+      process.hidden = phase.progressEvents.length === 0
+        || (phaseNode.dataset.expanded !== "1" && replyFinished);
+    };
+    resultTexts.forEach((node) => { node.__executionResultComplete = updateProcessVisibility; });
+    updateProcessVisibility();
+    return phaseNode;
+  });
+  panel.replaceChildren(...nodes);
+  return viewModel;
 }
 
 function executionActivityViewportIsAtBottom(viewport, threshold = 2) {
@@ -9403,6 +10104,7 @@ function bindExecutionActivityViewport(root) {
 }
 
 function bindExecutionActivityToggle(root) {
+  taskFace.sync();
   bindExecutionActivityViewport(root);
   if (!root || root.dataset.activityToggleBound === "1") return;
   root.dataset.activityToggleBound = "1";
@@ -9415,60 +10117,29 @@ function bindExecutionActivityToggle(root) {
       root.__executionCompletionTimer = null;
       root.removeAttribute("data-completion-collapsing");
       const viewport = root.querySelector?.(".execution-activity-details");
+      const completedNarrative = root.querySelector?.(".execution-completed-narrative");
       const expanded = root.dataset.activityExpanded !== "1";
       root.dataset.activityFollowLatest = "1";
-      const details = Array.isArray(root.__executionActivityDetails) ? root.__executionActivityDetails : [];
+      const details = root.__executionStageDetails || root.__executionActivityDetails || [];
       const { rendered } = executionActivityNodes(root);
-      const completed = root.classList.contains("execution-activity-completed");
-      if (completed && viewport) {
-        viewport.hidden = details.length === 0;
-        if (expanded) {
-          root.dataset.activityExpanded = "1";
-          replaceExecutionActivityLines(rendered, details, { detailCount: details.length });
-          viewport.style.maxHeight = "0px";
-          viewport.style.opacity = "0";
-          void viewport.offsetHeight;
-          requestAnimationFrame(() => {
-            if (!root.isConnected || root.dataset.activityExpanded !== "1") return;
-            viewport.style.removeProperty("max-height");
-            viewport.style.removeProperty("opacity");
-          });
-        } else {
-          const currentHeight = viewport.getBoundingClientRect().height;
-          viewport.style.maxHeight = `${Math.ceil(currentHeight)}px`;
-          viewport.style.opacity = "1";
-          root.dataset.activityExpanded = "0";
-          void viewport.offsetHeight;
-          requestAnimationFrame(() => {
-            if (!root.isConnected || root.dataset.activityExpanded !== "0") return;
-            viewport.style.maxHeight = "0px";
-            viewport.style.opacity = "0";
-          });
-          root.__executionCompletionTimer = setTimeout(() => {
-            root.__executionCompletionTimer = null;
-            if (root.dataset.activityExpanded !== "0") return;
-            viewport.hidden = true;
-            viewport.style.removeProperty("max-height");
-            viewport.style.removeProperty("opacity");
-          }, 190);
-        }
-        root.__executionActivityRenderedDetails = [...details];
-        updateExecutionActivityToggle(root, details.length);
-        if (expanded) scrollExecutionActivityToLatest(viewport, { force: true });
-        return;
-      }
       if (viewport) {
         viewport.style.removeProperty("max-height");
         viewport.style.removeProperty("opacity");
       }
       root.dataset.activityExpanded = expanded ? "1" : "0";
-      const visible = executionActivityRenderedDetails(root, details);
-      replaceExecutionActivityLines(rendered, visible, { detailCount: details.length });
-      if (viewport) viewport.hidden = details.length === 0;
+      root.querySelectorAll?.(".execution-phase-group").forEach((phase) => {
+        phase.dataset.expanded = expanded ? "1" : "0";
+      });
+      replaceExecutionActivityLines(rendered, []);
+      if (viewport) viewport.hidden = true;
+      if (completedNarrative) completedNarrative.hidden = true;
+      const stagePanel = root.querySelector?.(".execution-stage-summary");
+      if (stagePanel) stagePanel.setAttribute("aria-hidden", root.dataset.lifecycle === "completed" && !expanded ? "true" : "false");
+      paintExecutionStageView(root, details, root.__executionViewModel?.turnId || "");
       updateExecutionActivityToggle(root, details.length);
       const flow = root.__executionActivityFlow;
-      if (flow) flow.renderedDetails = [...visible];
-      scrollExecutionActivityToLatest(root.querySelector?.(".execution-activity-details"), { force: true });
+      if (flow) flow.renderedDetails = [];
+      if (expanded && viewport) viewport.scrollTop = 0;
     });
   });
 }
@@ -9476,19 +10147,27 @@ function bindExecutionActivityToggle(root) {
 function updateExecutionActivityToggle(root, detailCount = 0) {
   const toggle = root?.querySelector?.(".execution-activity-toggle");
   if (!toggle) return;
-  const expandable = Number(detailCount || 0) > 0;
-  if (root.dataset.activityExpanded === "1") {
-    toggle.hidden = !expandable;
+  const processCount = Array.isArray(root.__executionViewModel?.events)
+    ? executionThreeRowViewModel(root.__executionViewModel)
+      .reduce((count, phase) => count + phase.progressEvents.length + phase.resultEvents.length, 0)
+    : Number(detailCount || 0);
+  const expandable = processCount > 0;
+  const alwaysVisible = toggle.dataset.alwaysVisible === "1";
+  const expanded = root.dataset.activityExpanded === "1";
+  const count = Math.max(0, processCount);
+  if (expanded) {
+    toggle.hidden = !alwaysVisible && !expandable;
     toggle.setAttribute("aria-expanded", "true");
     toggle.setAttribute("aria-label", "收回执行过程");
     toggle.title = "收回执行过程";
     return;
   }
-  toggle.hidden = !expandable;
-  if (!expandable) root.dataset.activityExpanded = "0";
+  toggle.hidden = !alwaysVisible && !expandable;
+  if (!alwaysVisible && !expandable) root.dataset.activityExpanded = "0";
   toggle.setAttribute("aria-expanded", "false");
-  toggle.setAttribute("aria-label", "查看完整执行过程");
-  toggle.title = "查看完整执行过程";
+  const label = `查看完整执行过程，共 ${count} 条`;
+  toggle.setAttribute("aria-label", label);
+  toggle.title = label;
 }
 
 function publicExecutionDetailsFromMessage(message = {}, fallback = []) {
@@ -9497,66 +10176,67 @@ function publicExecutionDetailsFromMessage(message = {}, fallback = []) {
     : {};
   const sources = [
     ...(Array.isArray(fallback) ? fallback : []),
-    ...(Array.isArray(message.raw?.executionLog) ? message.raw.executionLog : []),
-    ...(Array.isArray(message.raw?.requestRun?.evidence?.executionLog) ? message.raw.requestRun.evidence.executionLog : []),
-    ...(Array.isArray(productResult.executionLog) ? productResult.executionLog : []),
-    ...(Array.isArray(productResult.raw?.executionLog) ? productResult.raw.executionLog : []),
-    ...(Array.isArray(productResult.requestRun?.evidence?.executionLog) ? productResult.requestRun.evidence.executionLog : []),
-    ...(Array.isArray(productResult.raw?.requestRun?.evidence?.executionLog) ? productResult.raw.requestRun.evidence.executionLog : []),
-    ...(Array.isArray(productResult.taskBrain?.execution_log) ? productResult.taskBrain.execution_log : [])
+    ...structuredEventsFromMessage(message),
+    ...persistedReplay.executionLogFromMessage(message)
   ];
   const entries = sources
-    .map((item) => executionActivityEntry(item, message.createdAt || message.timestamp || Date.now()))
-    .filter((entry) => entry && !["reasoning_delta", "reasoning_note", "public_reasoning"].includes(entry.kind));
-  const assembled = [];
-  for (const entry of entries) {
-    const previous = assembled.at(-1);
-    const continuesReasoning = entry.kind === "reasoning_delta"
-      && previous?.kind === "reasoning_delta"
-      && entry.blockIndex === previous.blockIndex
-      && entry.runId === previous.runId;
-    if (!continuesReasoning) {
-      assembled.push(entry);
-      continue;
-    }
-    const delta = `${previous.delta || previous.text || ""}${entry.delta || entry.text || ""}`.slice(-4000);
-    assembled[assembled.length - 1] = executionActivityEntry({
-      ...entry,
-      timestamp: previous.timestamp,
-      delta,
-      message: delta
-    }, previous.timestamp);
-  }
-  return assembled
-    .filter((item, index, list) => list.findIndex((candidate) => executionActivityEntryKey(candidate) === executionActivityEntryKey(item)) === index)
-    .slice(-EXECUTION_ACTIVITY_HISTORY_LIMIT);
+    .map((item) => executionSummaryEntry(item, message.createdAt || message.timestamp || Date.now()))
+    .filter(Boolean);
+  return uniqueExecutionActivityEntries(entries, message.createdAt || message.timestamp || Date.now())
+    .sort((a, b) => (Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0))
+      || (Number(a.timestamp || 0) - Number(b.timestamp || 0)));
 }
 
 function renderPersistedExecutionTimeline(message = {}) {
   const details = publicExecutionDetailsFromMessage(message);
-  if (!details.length) return null;
+  const duration = messageDurationMs(message);
+  if (!details.length) {
+    if (!(duration > 0)) return null;
+    const holder = document.createElement("div");
+    holder.innerHTML = completedActivityHtml(duration);
+    const root = holder.firstElementChild || null;
+    if (root) {
+      root.dataset.faceTaskId = message.turnId || message.raw?.turnId || message.id || "";
+      root.__executionActivityDetails = [];
+      bindExecutionActivityToggle(root);
+      updateExecutionActivityToggle(root, 0);
+    }
+    return root;
+  }
   const root = document.createElement("div");
   root.className = "streaming-activity execution-activity-completed";
+  root.dataset.faceTaskId = message.turnId || message.raw?.turnId || message.id || "";
+  root.dataset.lifecycle = "completed";
   root.dataset.activityExpanded = "0";
   root.dataset.activityFollowLatest = "1";
-  const duration = messageDurationMs(message);
+  root.dataset.segmentedDetailsOwner = answerSegmentsFromMessage(message).length ? "1" : "0";
+  const durationLabel = formatTaskDuration(duration);
   root.innerHTML = `
     <div class="execution-activity-head execution-completion-head">
-      ${executionActivityToggleHtml(details.length, false)}
-      <span class="execution-completion-label">执行时间线</span>
-      <span class="streaming-elapsed">${escapeHtml(duration > 0 ? formatTaskDuration(duration) : "")}</span>
+      ${executionActivityToggleHtml(details.length, false, { alwaysVisible: true })}
+      <span class="execution-activity-title"></span>
+      <span class="streaming-elapsed">${escapeHtml(durationLabel)}</span>
     </div>
     <div class="execution-activity-shell">
-      <div class="execution-activity-details">
-        <span class="execution-activity-flow"></span>
+      <div class="execution-process-region">
+        <div class="execution-process-head">
+          <span class="execution-process-label">执行过程</span>
+        </div>
+        <div class="execution-stage-summary" aria-live="polite" hidden></div>
+        <div class="execution-completed-narrative" hidden></div>
+        <div class="execution-activity-details">
+          <span class="execution-activity-flow"></span>
+        </div>
       </div>
     </div>
   `;
   const { viewport, rendered } = executionActivityNodes(root);
   const visible = executionActivityRenderedDetails(root, details);
   replaceExecutionActivityLines(rendered, visible, { detailCount: details.length });
+  paintExecutionStageView(root, details, message.turnId || message.raw?.turnId || "");
   root.__executionActivityDetails = [...details];
   root.__executionActivityRenderedDetails = [...visible];
+  paintCompletedExecutionNarrative(root, details);
   if (viewport) viewport.hidden = visible.length === 0;
   bindExecutionActivityToggle(root);
   updateExecutionActivityToggle(root, details.length);
@@ -9596,6 +10276,7 @@ function stopExecutionActivityFlow(root, options = {}) {
     flow.rendered?.removeAttribute?.("data-activity-state");
     return;
   }
+  if (flow.whimsyScheduleTimer) clearTimeout(flow.whimsyScheduleTimer);
   if (flow.whimsyTimer) clearTimeout(flow.whimsyTimer);
   stopTextTheaterStateMachine(flow.whimsyNode);
   flow.whimsyNode?.remove?.();
@@ -9610,6 +10291,7 @@ function stopExecutionActivityFlow(root, options = {}) {
   flow.transitionTimer = null;
   flow.transitionNode = null;
   flow.whimsyTimer = null;
+  flow.whimsyScheduleTimer = null;
   flow.rendered?.removeAttribute?.("data-activity-state");
   root.__executionActivityFlow = null;
 }
@@ -9618,7 +10300,9 @@ function clearExecutionActivityWhimsy(root) {
   const flow = root?.__executionActivityFlow;
   if (!flow) return;
   if (flow.whimsyTimer) clearTimeout(flow.whimsyTimer);
+  if (flow.whimsyScheduleTimer) clearTimeout(flow.whimsyScheduleTimer);
   flow.whimsyTimer = null;
+  flow.whimsyScheduleTimer = null;
   stopTextTheaterStateMachine(flow.whimsyNode);
   flow.whimsyNode?.remove?.();
   flow.theater?.removeAttribute?.("data-theater-active");
@@ -9667,8 +10351,11 @@ function rememberExecutionWhimsy(scene, context) {
     const profile = executionWhimsyProfile();
     profile.seen = { ...(profile.seen || {}) };
     profile.contexts = { ...(profile.contexts || {}) };
+    profile.contextScenes = { ...(profile.contextScenes || {}) };
+    profile.contextScenes[context] = { ...(profile.contextScenes[context] || {}) };
     profile.seen[scene.id] = Math.min(100, Number(profile.seen[scene.id] || 0) + 1);
     profile.contexts[context] = Math.min(100, Number(profile.contexts[context] || 0) + 1);
+    profile.contextScenes[context][scene.id] = Math.min(100, Number(profile.contextScenes[context][scene.id] || 0) + 1);
     profile.lastSceneId = scene.id;
     profile.recent = [
       ...(Array.isArray(profile.recent) ? profile.recent : []),
@@ -9694,7 +10381,8 @@ function chooseWeightedWhimsyScene(candidates, profile, context) {
   const weights = candidates.map((scene) => {
     const seen = Math.max(
       Number(profile.seen?.[scene.id] || 0),
-      Number(knowledge.scenes?.[scene.kind] || 0)
+      Number(knowledge.scenes?.[scene.kind] || 0),
+      Number(profile.contextScenes?.[context]?.[scene.id] || 0)
     );
     const contextBoost = scene.contexts.includes(context) ? 4 : 1;
     const recentCount = recent.filter((item) => item?.sceneId === scene.id).length;
@@ -9878,56 +10566,59 @@ function textTheaterContextAction(context = "execute") {
 }
 
 function textTheaterInlineParts(event) {
-  const contextAction = textTheaterContextAction(event.storyContext);
+  const narrative = event.narrative || {};
+  const scene = narrative.scene || "文字深处";
+  const action = narrative.action || "沿着字缝向前走";
+  const turn = narrative.turn || "前方忽然有了动静";
+  const result = narrative.result || "它拍拍尘土，继续赶路";
   const familiar = event.continuity?.kind && event.continuity.kind !== "first-meeting";
-  const targetArrival = familiar ? "又从字缝里探头，" : "从字间探头，";
   if (event.relationship.behavior === "request-help") {
     return [
       { kind: "actor", entity: event.actor },
-      { kind: "text", text: `${contextAction}，` },
+      { kind: "text", text: `走进${scene}，` },
       { kind: "target", entity: event.target },
-      { kind: "text", text: `${targetArrival}举起求助牌——` },
+      { kind: "text", text: `${familiar ? "又" : "忽然"}举起求助牌——` },
       { kind: "effect", text: event.effectLabel },
-      { kind: "text", text: "，修好后继续。" }
+      { kind: "text", text: `，${result}。` }
     ];
   }
   if (event.action === "chase") {
     return [
       { kind: "actor", entity: event.actor },
-      { kind: "text", text: `${contextAction}，` },
+      { kind: "text", text: `${action}，` },
       { kind: "target", entity: event.target },
-      { kind: "text", text: `${familiar ? "又" : "突然"}转身逃跑——` },
+      { kind: "text", text: `${familiar ? "又" : "突然"}${turn}——` },
       { kind: "effect", text: event.effectLabel },
-      { kind: "text", text: "，又钻回文字里。" }
+      { kind: "text", text: `，${result}。` }
     ];
   }
   if (event.action === "collision") {
     return [
       { kind: "actor", entity: event.actor },
-      { kind: "text", text: `${contextAction}，` },
+      { kind: "text", text: `穿过${scene}，` },
       { kind: "target", entity: event.target },
-      { kind: "text", text: `${familiar ? "认出黑球，又" : "突然从文字间"}撞来——` },
+      { kind: "text", text: `${familiar ? "认出黑球，又" : "忽然"}${turn}——` },
       { kind: "effect", text: event.effectLabel },
-      { kind: "text", text: "散开。" }
+      { kind: "text", text: `，${result}。` }
     ];
   }
   if (event.action === "assist") {
     return [
       { kind: "actor", entity: event.actor },
-      { kind: "text", text: `${contextAction}，` },
+      { kind: "text", text: `走到${scene}，` },
       { kind: "target", entity: event.target },
-      { kind: "text", text: `${familiar ? "又" : "从字缝"}递来线索——` },
+      { kind: "text", text: `${familiar ? "又" : "从字缝里"}递来线索——` },
       { kind: "effect", text: event.effectLabel },
-      { kind: "text", text: "，一起继续。" }
+      { kind: "text", text: `，${result}。` }
     ];
   }
   return [
     { kind: "actor", entity: event.actor },
-    { kind: "text", text: `${contextAction}，` },
+    { kind: "text", text: `${action}，` },
     { kind: "target", entity: event.target },
-    { kind: "text", text: "突然从资料文字间钻出——" },
+    { kind: "text", text: `${turn}——` },
     { kind: "effect", text: event.effectLabel },
-    { kind: "text", text: "，随后继续前进。" }
+    { kind: "text", text: `，${result}。` }
   ];
 }
 
@@ -10088,7 +10779,8 @@ function buildTextTheaterPlot(context = "execute", target = "文字", memory = [
     effectLabel: TEXT_THEATER_EFFECT_LABELS[eventEffect] || "闪！",
     result: "continue",
     state: "idle",
-    phases: buildTextTheaterPhases(eventAction, relationship, mode.id)
+    phases: buildTextTheaterPhases(eventAction, relationship, mode.id),
+    narrative: { scene, action: actionText, turn, effect: effectText, result: resultText }
   };
   event.inlineParts = textTheaterInlineParts(event);
   event.summary = textTheaterEventSummary(event);
@@ -10099,13 +10791,7 @@ function buildTextTheaterPlot(context = "execute", target = "文字", memory = [
     easterEgg: useEasterEgg,
     modeId: mode.id,
     storyContext,
-    narrative: {
-      scene,
-      action: actionText,
-      turn,
-      effect: effectText,
-      result: resultText
-    },
+    narrative: event.narrative,
     turn,
     beats,
     summary: event.summary
@@ -10154,7 +10840,9 @@ function executionWhimsyPhase(flow) {
 function nextExecutionActivityWhimsy(root) {
   const flow = root?.__executionActivityFlow;
   if (!flow || !EXECUTION_ACTIVITY_WHIMSY_SCENES.length) return null;
-  const context = executionWhimsyContext(flow.lastActivityLabel);
+  // The theater is an independent randomized layer. Real execution details
+  // stay in the execution stream and must never become theater narration.
+  const context = "execute";
   const profile = executionWhimsyProfile();
   const phase = executionWhimsyPhase(flow);
   const eligible = EXECUTION_ACTIVITY_WHIMSY_SCENES.filter((scene) => Number(scene.minPhase || 0) <= phase);
@@ -10185,7 +10873,6 @@ function nextExecutionActivityWhimsy(root) {
     continuityKind: scene.theater?.event?.continuity?.kind || "",
     action: scene.theater?.event?.action || ""
   }].slice(-20);
-  flow.lastActivityLabel = "";
   lastExecutionActivityWhimsyIndex = index;
   rememberExecutionWhimsy(scene, context);
   recordTextTheaterEvent(scene, context);
@@ -10197,7 +10884,25 @@ function renderTextTheaterScene(node, scene) {
 }
 
 function renderCompactTextTheaterScene(node, scene) {
-  renderAnimatedTextTheaterScene(node, scene);
+  const event = scene.theater?.event || scene;
+  const availableWidth = node.parentElement?.clientWidth || 0;
+  const parts = selectTextTheaterInlineParts(event, availableWidth);
+  const text = parts.map((part) => (
+    part.kind === "actor" || part.kind === "target"
+      ? textTheaterEntityLabel(part.entity)
+      : String(part.text || "")
+  )).join("");
+  const summary = compactTextTheaterEvent(
+    text || event.summary || scene.theater?.story || scene.label || "黑球正在处理任务。",
+    TEXT_THEATER_SUMMARY_MAX_CHARS
+  );
+  stopTextTheaterStateMachine(node);
+  node.className = "execution-activity-whimsy text-theater-compact";
+  node.dataset.whimsyScene = scene.id;
+  node.dataset.theaterStory = scene.storyId || scene.id;
+  node.dataset.theaterContext = scene.theaterContext || "execute";
+  node.textContent = text || summary;
+  node.setAttribute("aria-label", summary);
 }
 
 function stopTextTheaterStateMachine(node) {
@@ -10340,6 +11045,30 @@ function applyTextTheaterPhase(node, phase) {
   });
   if (effect) effect.dataset.state = phase.effectState;
   applyTextTheaterMotionPhase(node, phase);
+  const updateInlinePositions = () => {
+    const lineRect = line?.getBoundingClientRect?.();
+    const actorRect = actor?.getBoundingClientRect?.();
+    const targetRect = target?.getBoundingClientRect?.();
+    if (!lineRect || !actorRect || !targetRect) return;
+    const distance = targetRect.left - actorRect.left;
+    const positionFor = (role, state) => {
+      const path = String(state?.path || "hold");
+      if (["hidden", "emerge", "hold", "return"].includes(path)) return 0;
+      if (path === "cross") return distance * 0.62;
+      if (path === "collision" || path === "meet") return role === "actor" ? distance * 0.92 : -distance * 0.08;
+      if (path === "recoil") return role === "actor" ? distance * 0.68 : distance * 0.08;
+      if (path === "escape") return distance * 0.18;
+      if (path === "drift") return distance * -0.06;
+      return Number(state?.offsetX || 0);
+    };
+    [["actor", actor, phase.actor], ["target", target, phase.target]].forEach(([role, entity, state]) => {
+      if (!entity || !state) return;
+      entity.style.setProperty("--inline-x", `${positionFor(role, state)}px`);
+      entity.style.setProperty("--inline-y", `${Math.max(-2, Math.min(2, Number(state.offsetY || 0)))}px`);
+    });
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(updateInlinePositions);
+  else updateInlinePositions();
 }
 
 function startTextTheaterStateMachine(node, event) {
@@ -10385,6 +11114,7 @@ function renderAnimatedTextTheaterScene(node, scene) {
   const line = document.createElement("span");
   line.className = "text-theater-live-line";
   line.setAttribute("aria-hidden", "true");
+  line.appendChild(document.createTextNode("→ "));
   const availableWidth = node.parentElement?.clientWidth || 0;
   const parts = selectTextTheaterInlineParts(event, availableWidth);
   let eventFragmentStarted = false;
@@ -10434,99 +11164,8 @@ function textTheaterEventLimit(flow) {
 function textTheaterBreathingRoom(event = {}) {
   const modeId = String(event.modeId || "");
   const action = String(event.action || "");
-  const base = modeId === "rest" ? 1500 : action === "chase" ? 720 : action === "collision" ? 900 : 1120;
-  return base + Math.round(Math.random() * 760);
-}
-
-function executionTheaterSceneFromActivity(activity, flow = null) {
-  const entry = executionActivityEntry(activity);
-  if (!entry || ["reasoning_delta", "public_reasoning"].includes(entry.kind)) return null;
-  const text = entry.text;
-  const lower = text.toLowerCase();
-  const status = `${entry.status} ${lower}`;
-  const succeeded = /success|completed|complete|done|已完成|完成|成功|通过|修复完成/.test(status);
-  const failed = /failed|failure|error|timeout|失败|错误|异常|超时|阻塞/.test(status);
-  const waiting = /wait|waiting|等待|准备|连接|排队/.test(status);
-  const context = /读取|文件|文档|资料|搜索|查找/.test(text)
-    ? "read"
-    : /计划|规划|拆分/.test(text)
-      ? "plan"
-      : /分析|推理|判断/.test(text)
-        ? "analyze"
-        : /验证|检查|核对|测试/.test(text)
-          ? "verify"
-          : /写入|修改|修复|代码|生成/.test(text) ? "write" : "execute";
-  const targetSource = /bug|错误|异常|报错|问题|失败/i.test(text)
-    ? { id: "bug-monster", name: "BUG怪兽", type: "enemy", kind: "obstacle" }
-    : /文件|文档|表格|数据/.test(text)
-      ? { id: "file-box", name: "文件箱", type: "partner", kind: "clue" }
-      : /验证|检查|测试/.test(text)
-        ? { id: "verify-scanner", name: "验证扫描器", type: "partner", kind: "scanner" }
-        : /工具|命令|调用/.test(text)
-          ? { id: "tool-gate", name: "工具闸门", type: "obstacle", kind: "gate" }
-          : { id: "clue-orb", name: "线索球", type: "partner", kind: "clue" };
-  const action = succeeded || failed ? "collision" : waiting ? "assist" : /读取|查找|定位|分析/.test(text) ? "chase" : "approach";
-  const behavior = succeeded ? "defeat" : failed ? "challenge" : waiting ? "request-help" : action === "chase" ? "escape" : "help";
-  const effect = succeeded ? "flash" : failed ? "impact-lines" : waiting ? "stars" : "smoke";
-  // The live theater owns the single top status row, so its animated actor
-  // carries the Black Ball identity without a separate fixed heading.
-  const actor = { id: "lead", name: "黑球", kind: "hero", type: "assistant", position: "inline", state: "idle", action: "wait" };
-  const target = { ...targetSource, position: "inline", state: "idle", action: "wait" };
-  const detail = compactTextTheaterEvent(text, 18);
-  const prefix = succeeded ? "击败" : failed ? "挡住" : waiting ? "守着" : action === "chase" ? "追踪" : "处理";
-  const relationship = {
-    id: `live-${behavior}`,
-    kind: target.type === "enemy" || target.type === "obstacle" ? "hostile" : "cooperate",
-    behavior
-  };
-  const modeId = succeeded || failed ? "battle" : waiting ? "rest" : action === "chase" ? "chase" : "explore";
-  const event = {
-    id: `live:${entry.eventId || entry.sequence || entry.timestamp}:${entry.kind}`,
-    actor,
-    target,
-    relationship,
-    continuity: flow?.whimsyHistory?.some((item) => item?.targetId === target.id) ? { kind: "returning-rival" } : { kind: "first-meeting" },
-    action,
-    effect,
-    effectLabel: TEXT_THEATER_EFFECT_LABELS[effect] || (succeeded ? "击破！" : "闪！"),
-    modeId,
-    storyContext: context,
-    phases: buildTextTheaterPhases(action, relationship, modeId),
-    inlineParts: [
-      { kind: "actor", entity: actor },
-      { kind: "text", text: `${prefix} ` },
-      { kind: "target", entity: target },
-      { kind: "text", text: ` · ${detail}` },
-      { kind: "effect", text: TEXT_THEATER_EFFECT_LABELS[effect] || "闪！" }
-    ]
-  };
-  const summary = succeeded
-    ? `击败${target.name}：${detail}`
-    : failed
-      ? `${target.name}挡住了行动：${detail}`
-      : waiting
-        ? `守着${target.name}，等待真实结果：${detail}`
-        : `${prefix}${target.name}：${detail}`;
-  return {
-    ...event,
-    storyId: event.id,
-    theaterContext: context,
-    label: summary,
-    summary,
-    theater: { event, story: summary }
-  };
-}
-
-function enqueueExecutionActivityTheater(root, activity) {
-  if (!EXECUTION_ACTIVITY_THEATER_ENABLED) return;
-  const flow = root?.__executionActivityFlow;
-  const entry = executionActivityEntry(activity);
-  if (!flow || !entry || entry.kind === "reasoning_delta" || !root.isConnected) return;
-  const key = executionActivityEntryKey(entry);
-  if (key === flow.whimsyActiveKey || flow.whimsyQueue.some((item) => executionActivityEntryKey(item) === key)) return;
-  flow.whimsyQueue.push(entry);
-  if (flow.whimsyQueue.length > 8) flow.whimsyQueue.shift();
-  scheduleExecutionActivityWhimsy(root);
+  const base = modeId === "rest" ? 12800 : action === "chase" ? 14200 : action === "collision" ? 15000 : 13600;
+  return base + Math.round(Math.random() * 2600);
 }
 
 function renderExecutionActivityWhimsyScene(root, scene, activeKey = "") {
@@ -10556,38 +11195,8 @@ function renderExecutionActivityWhimsyScene(root, scene, activeKey = "") {
   flow.whimsyTimer = setTimeout(() => {
     flow.whimsyTimer = null;
     flow.whimsyActiveKey = "";
-    scheduleExecutionActivityWhimsy(root);
-  }, Math.max(900, sceneDuration));
+  }, Math.max(900, sceneDuration + TEXT_THEATER_FINISHED_HOLD_MS));
   return true;
-}
-
-function scheduleExecutionActivityWhimsy(root) {
-  if (!EXECUTION_ACTIVITY_THEATER_ENABLED) return;
-  const flow = root?.__executionActivityFlow;
-  if (!flow || flow.whimsyTimer || !root.isConnected || !flow.inlineTheater) return;
-  const detail = flow.whimsyQueue.shift();
-  if (!detail) {
-    const wait = flow.whimsyShownCount > 0
-      ? EXECUTION_ACTIVITY_WHIMSY_INTERVAL_MS
-      : EXECUTION_ACTIVITY_WHIMSY_DELAY_MS;
-    flow.whimsyTimer = setTimeout(() => {
-      flow.whimsyTimer = null;
-      if (!root.isConnected) return;
-      const scene = nextExecutionActivityWhimsy(root);
-      if (!scene) {
-        scheduleExecutionActivityWhimsy(root);
-        return;
-      }
-      renderExecutionActivityWhimsyScene(root, scene, `offline:${scene.id}:${Date.now()}`);
-    }, wait);
-    return;
-  }
-  const scene = executionTheaterSceneFromActivity(detail, flow);
-  if (!scene) {
-    scheduleExecutionActivityWhimsy(root);
-    return;
-  }
-  renderExecutionActivityWhimsyScene(root, scene, executionActivityEntryKey(detail));
 }
 
 function scrollExecutionActivityToLatest(viewport, options = {}) {
@@ -10604,9 +11213,8 @@ function paintExecutionActivityDetails(root, details = []) {
   const { viewport, rendered } = executionActivityNodes(root);
   if (!viewport || !rendered) return;
   stopExecutionActivityFlow(root, { preserveWhimsy: true });
-  const history = details.map(executionActivityEntry).filter(Boolean)
-    .filter((item, index, list) => list.findIndex((candidate) => executionActivityEntryKey(candidate) === executionActivityEntryKey(item)) === index)
-    .slice(-EXECUTION_ACTIVITY_HISTORY_LIMIT);
+  const history = uniqueExecutionActivityEntries(details);
+  paintExecutionStageView(root, history);
   const visible = executionActivityRenderedDetails(root, history);
   const flow = root.__executionActivityFlow;
   if (flow) flow.renderedDetails = [...visible];
@@ -10658,6 +11266,7 @@ function ensureExecutionActivityFlow(root) {
     transitionTimer: null,
     transitionNode: null,
     whimsyTimer: null,
+    whimsyScheduleTimer: null,
     whimsyNode: null,
     whimsyQueue: [],
     whimsyActiveKey: "",
@@ -10666,12 +11275,24 @@ function ensureExecutionActivityFlow(root) {
     whimsyHistory: [],
     whimsyStartedAt: Date.now(),
     lastRealActivityAt: 0,
-    lastActivityLabel: activityDetailText(Array.isArray(root.__executionActivityDetails) ? root.__executionActivityDetails.at(-1) : ""),
     renderedDetails: Array.isArray(root.__executionActivityRenderedDetails)
       ? [...root.__executionActivityRenderedDetails]
       : []
   };
   root.__executionActivityFlow = flow;
+  const firstScene = nextExecutionActivityWhimsy(root);
+  if (firstScene) renderExecutionActivityWhimsyScene(root, firstScene, `initial-${Date.now()}`);
+  const rotate = () => {
+    if (!root.isConnected || root.dataset.lifecycle === "completed") return;
+    const scene = nextExecutionActivityWhimsy(root);
+    if (scene) renderExecutionActivityWhimsyScene(root, scene, `rotate-${Date.now()}`);
+    flow.whimsyScheduleTimer = setTimeout(rotate, textTheaterBreathingRoom(scene?.theater?.event || scene || {}));
+  };
+  const firstSceneWait = Math.max(
+    14000,
+    Number(firstScene?.phases?.at(-1)?.at || 0) + TEXT_THEATER_FINISHED_HOLD_MS + 8200
+  );
+  flow.whimsyScheduleTimer = setTimeout(rotate, firstSceneWait);
   return flow;
 }
 
@@ -10692,8 +11313,10 @@ function beginNextExecutionActivity(flow, root, now) {
   const next = flow.queue.shift();
   if (!next) return false;
   const renderLimit = executionActivityRenderLimit(root);
-  flow.renderedDetails = flow.renderedDetails.slice(-(Math.max(0, renderLimit - 1)));
-  flow.rendered.replaceChildren();
+  while (flow.renderedDetails.length >= renderLimit) {
+    flow.renderedDetails.shift();
+    flow.rendered.firstElementChild?.remove?.();
+  }
   flow.activeLabel = next;
   flow.activeChars = Array.from(activityDetailDisplayText(next));
   flow.revealedLength = 0;
@@ -10713,6 +11336,28 @@ function beginNextExecutionActivity(flow, root, now) {
   return true;
 }
 
+function retireOldestExecutionActivityLine(flow, root) {
+  if (!flow || !root || flow.transitionTimer || !flow.queue.length) return false;
+  const renderLimit = executionActivityRenderLimit(root);
+  if (flow.renderedDetails.length < renderLimit) return false;
+  const oldest = flow.rendered.firstElementChild;
+  if (!oldest) {
+    flow.renderedDetails.shift();
+    return false;
+  }
+  oldest.classList.add("execution-activity-line-exiting");
+  flow.transitionNode = oldest;
+  flow.transitionTimer = setTimeout(() => {
+    flow.transitionTimer = null;
+    flow.transitionNode?.remove?.();
+    flow.transitionNode = null;
+    flow.renderedDetails.shift();
+    root.__executionActivityRenderedDetails = [...flow.renderedDetails];
+    scheduleExecutionActivityFlow(root);
+  }, EXECUTION_ACTIVITY_LINE_TRANSITION_MS);
+  return true;
+}
+
 function paintExecutionActivityFrame(root, now = performance.now()) {
   const flow = root?.__executionActivityFlow;
   if (!flow) return;
@@ -10722,27 +11367,8 @@ function paintExecutionActivityFrame(root, now = performance.now()) {
     scheduleExecutionActivityFlow(root, 32);
     return;
   }
-  if (flow.activeLabel && flow.queue.length && !flow.transitionTimer) {
-    const currentNode = flow.rendered?.lastElementChild;
-    if (currentNode) {
-      currentNode.classList.add("execution-activity-line-exiting");
-      flow.transitionNode = currentNode;
-    }
-    flow.activeLabel = "";
-    flow.activeTextNode = null;
-    flow.activeChars = [];
-    flow.revealedLength = 0;
-    flow.transitionTimer = setTimeout(() => {
-      flow.transitionTimer = null;
-      flow.transitionNode?.remove?.();
-      flow.transitionNode = null;
-      flow.renderedDetails = [];
-      root.__executionActivityRenderedDetails = [];
-      scheduleExecutionActivityFlow(root);
-    }, EXECUTION_ACTIVITY_TRANSITION_MS);
-    return;
-  }
   if (flow.transitionTimer) return;
+  if (!flow.activeLabel && retireOldestExecutionActivityLine(flow, root)) return;
   if (!flow.activeLabel && !beginNextExecutionActivity(flow, root, now)) return;
   if (flow.activeChars.length && now >= flow.revealPauseUntil) {
     const elapsed = Math.min(120, Math.max(0, now - flow.revealLastAt));
@@ -10766,7 +11392,7 @@ function paintExecutionActivityFrame(root, now = performance.now()) {
   }
   flow.revealLastAt = now;
   if (flow.revealedLength >= flow.activeChars.length) {
-    flow.renderedDetails = [flow.activeLabel].slice(-EXECUTION_ACTIVITY_RENDERED_LIMIT);
+    flow.renderedDetails = executionActivityRenderedDetails(root, [...flow.renderedDetails, flow.activeLabel]);
     root.__executionActivityRenderedDetails = [...flow.renderedDetails];
     root.__executionActivityActiveLabel = "";
     flow.activeLabel = "";
@@ -10776,7 +11402,6 @@ function paintExecutionActivityFrame(root, now = performance.now()) {
     flow.rendered.dataset.activityState = "waiting";
     updateExecutionActivityToggle(root, root.__executionActivityDetails?.length || flow.renderedDetails.length);
     scrollExecutionActivityToLatest(flow.viewport);
-    scheduleExecutionActivityWhimsy(root);
   }
   if (flow.activeLabel || flow.queue.length) scheduleExecutionActivityFlow(root);
 }
@@ -10784,21 +11409,25 @@ function paintExecutionActivityFrame(root, now = performance.now()) {
 function pushExecutionActivityDetail(root, label = "", options = {}) {
   if (!root) return [];
   root.__executionActivityUpdatedAt = Date.now();
-  const detail = executionActivityEntry(label);
+  const detail = executionSummaryEntry(label);
   const current = Array.isArray(root.__executionActivityDetails) ? root.__executionActivityDetails : [];
-  if (!detail || executionActivityEntryKey(current.at(-1)) === executionActivityEntryKey(detail)) return current.slice(-EXECUTION_ACTIVITY_HISTORY_LIMIT);
+  if (!detail) return current;
+  taskFace.progress(root, detail);
   const flow = ensureExecutionActivityFlow(root);
-  const next = [...current, detail]
-    .filter((item, index, list) => list.findIndex((candidate) => executionActivityEntryKey(candidate) === executionActivityEntryKey(item)) === index)
-    .slice(-EXECUTION_ACTIVITY_HISTORY_LIMIT);
+  const next = uniqueExecutionActivityEntries([...current, detail])
+    .sort((a, b) => (Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0))
+      || (Number(a.timestamp || 0) - Number(b.timestamp || 0)));
   root.__executionActivityDetails = next;
   if (!flow) return next;
-  if (options.real === true && EXECUTION_ACTIVITY_THEATER_ENABLED) enqueueExecutionActivityTheater(root, detail);
   if (options.real === true) flow.lastRealActivityAt = Date.now();
-  flow.lastActivityLabel = detail.text;
+  if (root.dataset.lifecycle === "completed" && root.dataset.activityExpanded !== "1") {
+    paintExecutionActivityDetails(root, next);
+    updateExecutionActivityToggle(root, next.length);
+    return next;
+  }
   if (executionActivityEntryKey(flow.activeLabel) === executionActivityEntryKey(detail)
     || executionActivityEntryKey(flow.queue.at(-1)) === executionActivityEntryKey(detail)) return next;
-  flow.queue = [detail].slice(-EXECUTION_ACTIVITY_QUEUE_LIMIT);
+  flow.queue = [...flow.queue, detail].slice(-EXECUTION_ACTIVITY_QUEUE_LIMIT);
   scheduleExecutionActivityFlow(root);
   return next;
 }
@@ -10834,7 +11463,6 @@ function createThinkingMessage(_label = "", options = {}) {
   row.__executionActivityUpdatedAt = Date.now();
   ensureExecutionActivityFlow(row);
   setExecutionCurrentThinking(row, initialThinkingText);
-  if (EXECUTION_ACTIVITY_THEATER_ENABLED && options.waiting !== true) scheduleExecutionActivityWhimsy(row);
   const paintElapsed = () => {
     const elapsedText = formatLiveElapsed(Math.max(0, Date.now() - startedAt));
     row.querySelectorAll(".execution-current-thinking-time").forEach((node) => { node.textContent = elapsedText; });
@@ -10867,8 +11495,11 @@ function removeThinkingMessage(row) {
 
 function removeStaleExecutionRows(keepRow = null) {
   if (!messageList) return;
+  const drainingRows = new Set([...liveChatStreams.values()]
+    .filter((entry) => entry.finalizing && entry.row?.isConnected)
+    .map((entry) => entry.row));
   messageList.querySelectorAll(".message.thinking-message, .message.streaming-response").forEach((row) => {
-    if (row !== keepRow) removeThinkingMessage(row);
+    if (row !== keepRow && !drainingRows.has(row)) removeThinkingMessage(row);
   });
   for (const [sessionId, row] of sessionExecutionIndicators) {
     if (!row?.isConnected || row !== keepRow) sessionExecutionIndicators.delete(sessionId);
@@ -10880,17 +11511,148 @@ function createChatStreamId(sessionId = "") {
   return `chat-${String(sessionId || "session").slice(0, 48)}-${id}`;
 }
 
+function transitionLiveTurn(entry, nextState, options = {}) {
+  if (!entry) return false;
+  const current = String(entry.turnState || LIVE_TURN_STATES.CREATED);
+  const next = String(nextState || "");
+  if (!next || current === next) return true;
+  if (options.force !== true && !LIVE_TURN_TRANSITIONS[current]?.has(next)) {
+    console.error("[ChatStream] 非法回合状态迁移", {
+      streamId: entry.streamId,
+      turnId: entry.turnId,
+      current,
+      next
+    });
+    return false;
+  }
+  entry.turnState = next;
+  return true;
+}
+
+function canonicalLiveEventTarget(value = "") {
+  const target = String(value || "").trim().toLowerCase();
+  if (["execution", "execution_activity", "activity"].includes(target)) return "execution";
+  if (["structured", "structured_result", "reasoning"].includes(target)) return "structured";
+  if (["answer", "result", "prose"].includes(target)) return "answer";
+  return "";
+}
+
+function liveTurnEventFingerprint(event = {}) {
+  return JSON.stringify([
+    String(event.turnId || ""),
+    String(event.eventId || ""),
+    String(event.sourceEventId || ""),
+    String(event.semanticType || event.semantic_type || ""),
+    String(event.stageId || event.stage || ""),
+    JSON.stringify(event.payload ?? null),
+    String(event.sourceText || ""),
+    String(event.inputPreview || ""),
+    Number(event.sequence || 0),
+    String(event.target || ""),
+    String(event.type || ""),
+    String(event.segmentId || ""),
+    String(event.delta ?? event.message ?? event.text ?? ""),
+    String(event.status || ""),
+    String(event.toolCallId || ""),
+    String(event.resultKind || ""),
+    String(event.publicSummary || ""),
+    String(event.publicSummaryKind || ""),
+    String(event.publicActionId || ""),
+    event.publicSummarySalient === true,
+    String(event.afterEventId || ""),
+    JSON.stringify(Array.isArray(event.evidenceEventIds) ? event.evidenceEventIds : []),
+    JSON.stringify(Array.isArray(event.evidenceToolCallIds) ? event.evidenceToolCallIds : []),
+    String(event.resultPreview || ""),
+    String(event.errorPreview || "")
+  ]);
+}
+
+function reportLiveTurnProtocolError(entry, reason, event = {}) {
+  if (!entry) return;
+  entry.protocolErrors ||= [];
+  const error = {
+    reason: String(reason || "invalid_event"),
+    turnId: String(event.turnId || entry.turnId || ""),
+    eventId: String(event.eventId || ""),
+    sequence: Number(event.sequence || 0),
+    target: String(event.target || ""),
+    type: String(event.type || "")
+  };
+  entry.protocolErrors.push(error);
+  console.error("[ChatStream] 黑球事件协议错误", error);
+}
+
+function acceptLiveTurnEvent(entry, source = {}, defaults = {}) {
+  if (!entry || !source || typeof source !== "object") return null;
+  const turnId = String(source.turnId || defaults.turnId || entry.turnId || entry.streamId || "").trim();
+  const eventId = String(source.eventId || defaults.eventId || "").trim();
+  const sequence = Number(source.sequence || defaults.sequence || 0);
+  const turnSequence = Number(source.turnSequence || defaults.turnSequence || 0);
+  const target = canonicalLiveEventTarget(source.target || source.outputType || defaults.target);
+  const type = String(source.eventType || source.type || source.kind || defaults.type || "").trim().toLowerCase();
+  const segmentId = String(source.segmentId || source.segment_id || defaults.segmentId || "").trim().slice(0, 160);
+  const expectedTurnId = String(entry.turnId || entry.streamId || "").trim();
+  const event = {
+    ...source,
+    turnId,
+    eventId,
+    sequence,
+    turnSequence,
+    target,
+    type,
+    segmentId
+  };
+  if (!turnId || turnId !== expectedTurnId || !eventId || sequence <= 0 || !target || !type) {
+    reportLiveTurnProtocolError(entry, "invalid_event_envelope", event);
+    return null;
+  }
+  const declaredSemanticType = source.semanticType ?? source.semantic_type ?? defaults.semanticType;
+  if (declaredSemanticType !== undefined && declaredSemanticType !== null && String(declaredSemanticType).trim()) {
+    event.semanticType = blackBallPublicEvents.normalizeSemanticType(declaredSemanticType);
+  }
+  const previousViolationCount = Number(entry.publicEventState?.violations?.length || 0);
+  const nextPublicEventState = blackBallPublicEvents.reduceEventState(entry.publicEventState, event);
+  if (nextPublicEventState.violations.length > previousViolationCount) {
+    const violation = nextPublicEventState.violations.at(-1);
+    entry.publicEventState = nextPublicEventState;
+    reportLiveTurnProtocolError(entry, violation?.code || "invalid_semantic_event", event);
+    return null;
+  }
+  entry.publicEventState = nextPublicEventState;
+  entry.eventLedger ||= new Map();
+  const fingerprint = liveTurnEventFingerprint(event);
+  const existing = entry.eventLedger.get(eventId);
+  if (existing) {
+    if (existing.fingerprint !== fingerprint) {
+      reportLiveTurnProtocolError(entry, "conflicting_event_id", event);
+    }
+    return null;
+  }
+  event.__turnEventAccepted = true;
+  entry.eventLedger.set(eventId, { fingerprint, event });
+  entry.eventsByTarget ||= new Map();
+  const orderedTargetEvents = entry.eventsByTarget.get(target) || [];
+  orderedTargetEvents.push(event);
+  orderedTargetEvents.sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0)
+    || Number(a.turnSequence || 0) - Number(b.turnSequence || 0));
+  entry.eventsByTarget.set(target, orderedTargetEvents);
+  entry.lastTurnSequence = Math.max(Number(entry.lastTurnSequence || 0), turnSequence);
+  return event;
+}
+
 function registerLiveChatStream(streamId, sessionId, thinkingRow, options = {}) {
   discardSupersededLiveChatStreams(sessionId, streamId);
   removeSessionExecutionIndicator(sessionId);
   removeStaleExecutionRows(thinkingRow);
+  if (thinkingRow) thinkingRow.dataset.streamId = String(streamId || "");
   const initialActivityDetails = Array.isArray(thinkingRow?.__executionActivityDetails)
-    ? thinkingRow.__executionActivityDetails.map(executionActivityEntry).filter(Boolean).slice(-EXECUTION_ACTIVITY_HISTORY_LIMIT)
+    ? uniqueExecutionActivityEntries(thinkingRow.__executionActivityDetails)
     : [];
   const entry = {
     streamId,
     sessionId,
     turnId: String(options.turnId || streamId || ""),
+    turnState: LIVE_TURN_STATES.CREATED,
     clientMessageId: String(options.clientMessageId || ""),
     responseMessageId: String(options.responseMessageId || ""),
     thinkingRow,
@@ -10902,6 +11664,7 @@ function registerLiveChatStream(streamId, sessionId, thinkingRow, options = {}) 
     currentThoughtText: String(thinkingRow?.__executionCurrentThoughtText || ""),
     currentThoughtBlockIndex: -1,
     currentThoughtSegmentId: "",
+    reasoningCompletionPendingSegmentId: "",
     completedSegments: new Set(),
     segmentEndLengths: new Map(),
     segmentOrder: [],
@@ -10916,16 +11679,24 @@ function registerLiveChatStream(streamId, sessionId, thinkingRow, options = {}) 
     startedAt: Number(options.startedAt || Date.now()),
     requestStartedAt: Number(options.startedAt || Date.now()),
     executionStartedAt: Number(options.executionStartedAt || 0),
+    completedAt: 0,
+    completedDurationMs: 0,
     text: "",
     paintTimer: null,
     paintFrame: null,
     elapsedTimer: null,
     activityUpdatedAt: Date.now(),
     lastActivitySequence: 0,
+    lastActivitySequences: new Map(),
     lastFrameSequence: 0,
-    seenEventIds: new Set(),
-    seenActivityEventIds: new Set(),
+    lastTurnSequence: 0,
+    eventLedger: new Map(),
+    eventsByTarget: new Map(),
+    protocolErrors: [],
+    publicEventState: blackBallPublicEvents.createEventState(String(options.turnId || streamId || "")),
     activityPaintFrame: null,
+    executionNarrativeShown: false,
+    executionNarrativeTimer: null,
     lastPaintAt: 0,
     targetText: "",
     targetChars: [],
@@ -10944,23 +11715,25 @@ function registerLiveChatStream(streamId, sessionId, thinkingRow, options = {}) 
     modelPublicProgressStarted: false,
     completionTimer: null,
     reasoningSegments: [],
+    reasoningDetails: [],
     reasoningBlockCounter: 0,
     pendingReasoningBlockId: "",
     queuedReasoningDeltas: [],
     structuredPanel: null,
     structuredEvents: [],
     structuredNodes: new Map(),
-    seenStructuredEventIds: new Set(),
     answerStartedSegments: new Set(),
     segmentBlocks: new Map(),
     segmentCharsById: new Map(),
     firstEventReceived: false,
     firstEventTimer: null,
+    modelRequestDispatchedAt: 0,
     requestTimeoutTimer: null,
     noProgressTimer: null,
     lastMeaningfulEventAt: Date.now(),
     noProgress: false,
     noProgressNoticeNode: null,
+    timedOut: false,
     timeoutMessage: "",
     toolEventCount: 0,
     toolEventsSinceAnswer: 0,
@@ -10970,8 +11743,12 @@ function registerLiveChatStream(streamId, sessionId, thinkingRow, options = {}) 
     finalized: false
   };
   liveChatStreams.set(streamId, entry);
+  miniTheatre.start({ taskId: streamId, sessionId, startedAt: entry.startedAt });
+  miniTheatre.select(state.selectedSessionId);
   updateLiveStreamElapsed(entry);
   entry.elapsedTimer = setInterval(() => updateLiveStreamElapsed(entry), 1000);
+  entry.noProgressTimer = setInterval(() => checkLiveStreamProgress(entry), LIVE_STREAM_PROGRESS_CHECK_MS);
+  entry.noProgressTimer?.unref?.();
   ensureLiveStreamRow(entry);
   return entry;
 }
@@ -10999,7 +11776,7 @@ function ensureLiveSegmentBlock(entry, segmentId = "") {
   root.className = "stream-segment-block";
   root.dataset.segmentId = key;
   const structured = document.createElement("section");
-  structured.className = "stream-segment-structured";
+  structured.className = "stream-segment-structured streaming-structured-result";
   structured.hidden = true;
   structured.setAttribute("aria-live", "polite");
   const reasoning = document.createElement("div");
@@ -11052,38 +11829,33 @@ function placeLiveActivityBeforeBlock(entry, _block = null) {
 }
 
 function progressTarget(progress = {}) {
+  const kind = String(progress.kind || progress.type || "").trim().toLowerCase();
   const explicit = String(progress.target || progress.outputType || "").trim().toLowerCase();
   if (["structured_result", "structured", "reasoning"].includes(explicit)) return "structured_result";
   if (["result", "answer", "prose"].includes(explicit)) return "result";
   if (["execution", "execution_activity", "activity"].includes(explicit)) return "execution_activity";
-  const kind = String(progress.kind || "").trim().toLowerCase();
   return ["reasoning_delta", "reasoning_note", "public_reasoning", "public_progress", "plan", "thought"].includes(kind)
     ? "structured_result"
     : "execution_activity";
 }
 
-function ensureLiveStructuredResultPanel(entry) {
-  if (!entry?.rendered) return null;
-  if (entry.structuredPanel?.isConnected) return entry.structuredPanel;
-  const panel = document.createElement("section");
-  panel.className = "streaming-structured-result";
-  panel.hidden = true;
+function ensureLiveStructuredResultPanel(entry, segmentId = "") {
+  if (!entry) return null;
+  ensureLiveStreamRow(entry);
+  const key = String(segmentId || entry.activeSegmentId || "__default").trim() || "__default";
+  const block = ensureLiveSegmentBlock(entry, key);
+  const panel = block?.structured || null;
+  if (!panel) return null;
+  panel.classList.add("streaming-structured-result");
   panel.setAttribute("aria-live", "polite");
+  entry.activity.hidden = false;
   entry.structuredPanel = panel;
   return panel;
 }
 
 function placeLiveStructuredResultPanel(entry, segmentId = "") {
-  const panel = ensureLiveStructuredResultPanel(entry);
-  if (!panel) return null;
   const key = String(segmentId || entry.activeSegmentId || "__default").trim() || "__default";
-  const block = ensureLiveSegmentBlock(entry, key);
-  if (block?.root) {
-    const answer = block.answer?.isConnected ? block.answer : block.root.lastElementChild;
-    if (answer && answer !== panel) block.root.insertBefore(panel, answer);
-    else if (block.root.lastElementChild !== panel) block.root.appendChild(panel);
-  }
-  return panel;
+  return ensureLiveStructuredResultPanel(entry, key);
 }
 
 function scheduleLiveStructuredEntryPaint(entry, node) {
@@ -11104,8 +11876,13 @@ function scheduleLiveStructuredEntryPaint(entry, node) {
       node.textContent = targetChars.slice(0, nextLength).join("");
       node.__structuredVisibleLength = nextLength;
       node.__structuredCarry -= count;
-      scheduleLiveStructuredResultScroll(entry);
+      scheduleLiveStructuredResultScroll(entry, node.parentElement);
       scheduleStreamingScroll();
+      if (nextLength >= targetChars.length && node.__structuredRetireWhenPainted) {
+        node.__structuredRetireWhenPainted = false;
+        removeLiveStructuredNode(entry, node);
+        return;
+      }
     }
     if (Number(node.__structuredVisibleLength || 0) < targetChars.length) {
       node.__structuredPaintFrame = requestAnimationFrame(paint);
@@ -11116,68 +11893,111 @@ function scheduleLiveStructuredEntryPaint(entry, node) {
   node.__structuredPaintFrame = requestAnimationFrame(paint);
 }
 
+function structuredEventDisplayText(progress = {}, text = "", continuation = false) {
+  const value = String(text || "");
+  return value;
+}
+
 function appendLiveStructuredResult(entry, progress = {}) {
   if (!entry) return null;
-  const text = String(progress.delta ?? progress.message ?? progress.text ?? "");
-  if (!text) return null;
+  const accepted = progress.__turnEventAccepted === true
+    ? progress
+    : acceptLiveTurnEvent(entry, progress, {
+        target: "structured",
+        type: progress.type || progress.kind || "public_progress"
+      });
+  if (!accepted) return null;
+  progress = accepted;
+  const text = persistedReplay.eventDisplayText(progress)
+    || (isStageResultStructuredEvent(progress) ? activityDetailText(progress) : "");
+  if (!text && !(isStageResultStructuredEvent(progress) && progress.status)) return null;
+  const semanticKind = String(progress.kind || progress.type || "").trim().toLowerCase();
+  const semanticTarget = String(progress.target || progress.outputType || "").trim().toLowerCase();
+  if (["answer", "result", "public_result"].includes(semanticKind)
+    || ["answer", "result", "public_result"].includes(semanticTarget)) return null;
   const eventId = String(progress.eventId || "").trim();
-  if (eventId) {
-    entry.seenStructuredEventIds ||= new Set();
-    if (entry.seenStructuredEventIds.has(eventId)) return null;
-    entry.seenStructuredEventIds.add(eventId);
-  }
   entry.structuredEvents ||= [];
-  const structuredSequence = Number(progress.sequence || progress.seq || 0) || entry.structuredEvents.length + 1;
-  const structuredEventId = eventId || `${entry.turnId}:structured:${structuredSequence}:${String(progress.type || progress.kind || "public_progress")}`;
+  if (eventId && entry.structuredEvents.some((event) => String(event?.eventId || "") === eventId)) return null;
   entry.structuredEvents.push({
     ...progress,
-    turnId: String(progress.turnId || entry.turnId || entry.streamId || "").trim(),
-    eventId: structuredEventId,
-    sequence: structuredSequence,
     target: "structured",
     __shownAt: Date.now()
   });
+  entry.structuredEvents.sort((a, b) => Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0));
+  ensureLiveStreamRow(entry);
+  if (isPrimaryExecutionSummaryEvent(progress)) {
+    if (entry.activity) entry.activity.hidden = false;
+    return null;
+  }
   const segmentId = String(progress.segmentId || progress.segment_id || "").trim() || "__default";
+  const sequence = Number(progress.turnSequence || progress.sequence || 0);
+  const kind = String(progress.kind || progress.type || "public_progress").trim().toLowerCase();
+  const progressType = String(progress.type || progress.displayKind || "").trim().toLowerCase();
+  const isDelta = ["reasoning_delta", "reasoning_note", "public_reasoning"].includes(kind);
+  const isThinking = isPublicStructuredThought(progress, kind, progressType);
   const block = ensureLiveSegmentBlock(entry, segmentId);
   const panel = placeLiveStructuredResultPanel(entry, segmentId);
   if (!block || !panel) return null;
-  orderLiveSegmentBlocks(entry, segmentId, progress.sequence);
-  const kind = String(progress.kind || "public_progress").trim().toLowerCase();
-  const isDelta = ["reasoning_delta", "reasoning_note", "public_reasoning"].includes(kind);
-  const progressType = String(progress.type || progress.displayKind || "").trim().toLowerCase();
-  const isThinking = isPublicStructuredThought(progress, kind, progressType);
+  orderLiveSegmentBlocks(entry, segmentId, sequence);
   const blockIndex = Number(progress.blockIndex || 0) || 0;
   const key = isDelta
     ? `${blockIndex}:${segmentId}`
-    : `event:${eventId || `${segmentId}:${panel.childElementCount}`}`;
-  let node = entry.structuredNodes?.get(key);
+    : `event:${eventId || `${segmentId}:${sequence}:${panel.childElementCount}`}`;
+  entry.structuredNodes ||= new Map();
+  let node = entry.structuredNodes.get(key);
   if (!node?.isConnected || node.__structuredRecycling) {
     node = document.createElement("div");
     node.className = `structured-result-entry${isDelta ? " structured-result-entry-delta" : ""}${isThinking ? " structured-result-entry-thinking" : ""}`;
     node.dataset.segmentId = segmentId;
     node.dataset.kind = kind;
+    node.dataset.sequence = String(sequence);
     node.dataset.transient = progress.transient === true ? "1" : "0";
+    node.dataset.afterEventId = String(progress.afterEventId || "");
+    node.dataset.evidenceEventIds = JSON.stringify(Array.isArray(progress.evidenceEventIds) ? progress.evidenceEventIds : []);
+    node.dataset.evidenceToolCallIds = JSON.stringify(Array.isArray(progress.evidenceToolCallIds) ? progress.evidenceToolCallIds : []);
+    node.dataset.source = "black-ball-structured";
     node.dataset.thinking = isThinking ? "1" : "0";
-    node.__structuredShownAt = Date.now();
+    node.__structuredTurnSequence = sequence;
+    node.__structuredEventIds = new Set();
     node.__structuredTargetText = "";
     node.__structuredVisibleLength = 0;
     panel.appendChild(node);
     entry.structuredNodes.set(key, node);
   }
+  if (eventId) node.__structuredEventIds.add(eventId);
   node.classList.toggle("structured-result-entry-thinking", isThinking);
   node.dataset.thinking = isThinking ? "1" : "0";
   node.dataset.lifecycle = "";
   node.__structuredShownAt = Date.now();
   node.__structuredTargetText = `${node.__structuredTargetText || ""}${text}`;
+  if (node.__structuredPaintFrame) cancelAnimationFrame(node.__structuredPaintFrame);
+  node.__structuredPaintFrame = null;
+  node.textContent = node.__structuredTargetText;
+  node.__structuredVisibleLength = Array.from(node.__structuredTargetText).length;
+  [...panel.children]
+    .sort((a, b) => Number(a.__structuredTurnSequence || a.dataset.sequence || 0)
+      - Number(b.__structuredTurnSequence || b.dataset.sequence || 0))
+    .forEach((child) => panel.appendChild(child));
   panel.hidden = false;
+  // Keep one concise, authoritative public-progress summary in the activity
+  // header so the user can see the cross-reply before answer text arrives.
+  const liveSummary = entry.activity?.querySelector?.(
+    ".execution-activity-narrative.streaming-structured-result"
+  );
+  if (liveSummary) {
+    liveSummary.textContent = text;
+    liveSummary.hidden = false;
+  }
   entry.activityUpdatedAt = Date.now();
-  scheduleLiveStructuredEntryPaint(entry, node);
+  scheduleLiveStructuredResultScroll(entry, panel);
+  scheduleStreamingScroll();
   if (isThinking) scheduleLiveStructuredEntryFade(entry, node);
   else if (node.__structuredFadeTimer) {
     clearTimeout(node.__structuredFadeTimer);
     node.__structuredFadeTimer = null;
   }
   trimLiveStructuredResultWindow(entry);
+  paintLiveExecutionNarrative(entry);
   return node;
 }
 
@@ -11190,6 +12010,11 @@ function isPublicStructuredThought(progress = {}, kind = "", progressType = "") 
 
 function removeLiveStructuredNode(entry, node, { respectMinimum = true } = {}) {
   if (!entry || !node || node.__structuredRecycling) return;
+  if (respectMinimum
+    && Number(node.__structuredVisibleLength || 0) < Array.from(String(node.__structuredTargetText || "")).length) {
+    node.__structuredRetireWhenPainted = true;
+    return;
+  }
   node.__structuredRecycling = true;
   if (node.__structuredFadeTimer) clearTimeout(node.__structuredFadeTimer);
   node.__structuredFadeTimer = null;
@@ -11211,25 +12036,28 @@ function removeLiveStructuredNode(entry, node, { respectMinimum = true } = {}) {
       node.style.marginTop = "0px";
     });
     setTimeout(() => {
+      const panel = node.parentElement;
+      for (const event of entry.structuredEvents || []) {
+        if (node.__structuredEventIds?.has?.(String(event.eventId || ""))) event.__retired = true;
+      }
       for (const [key, value] of entry.structuredNodes || []) {
         if (value === node) entry.structuredNodes.delete(key);
       }
       node.remove();
-      const panel = entry.structuredPanel;
       if (panel && !panel.children.length) {
         panel.hidden = true;
         // No fabricated fallback text: the real execution surface remains the
         // only visible owner until another Black Ball event arrives.
         if (!entry.finalized && entry.activity?.isConnected) entry.activity.hidden = false;
       }
-    }, EXECUTION_ACTIVITY_TRANSITION_MS);
+    }, STRUCTURED_RESULT_TRANSITION_MS);
   };
   if (remainingVisibleMs > 0) setTimeout(beginExit, remainingVisibleMs);
   else beginExit();
 }
 
 function scheduleLiveStructuredEntryFade(entry, node) {
-  if (!entry || !node || node.dataset.thinking !== "1") return;
+  if (!entry || !node) return;
   if (node.__structuredFadeTimer) clearTimeout(node.__structuredFadeTimer);
   node.__structuredFadeTimer = setTimeout(() => {
     node.__structuredFadeTimer = null;
@@ -11238,29 +12066,30 @@ function scheduleLiveStructuredEntryFade(entry, node) {
 }
 
 function trimLiveStructuredResultWindow(entry) {
-  const panel = entry?.structuredPanel;
-  if (!panel) return;
-  const nodes = [...panel.children].filter((node) => !node.__structuredRecycling);
+  const nodes = [...(entry?.structuredNodes?.values?.() || [])]
+    .filter((node) => node?.isConnected && !node.__structuredRecycling)
+    .sort((a, b) => Number(a.__structuredTurnSequence || a.dataset.sequence || 0)
+      - Number(b.__structuredTurnSequence || b.dataset.sequence || 0));
   const overflow = nodes.length - STRUCTURED_RESULT_VISIBLE_LIMIT;
   if (overflow <= 0) return;
   nodes.slice(0, overflow).forEach((node) => removeLiveStructuredNode(entry, node, { respectMinimum: false }));
 }
 
 function recycleLiveStructuredProcess(entry, segmentId = "", options = {}) {
-  const panel = entry?.structuredPanel;
-  if (!panel) return;
   const targetId = String(segmentId || "").trim();
   const transientOnly = options.transientOnly === true;
   const respectMinimum = options.respectMinimum !== false;
-  const nodes = [...panel.children].filter((node) => (
+  const nodes = [...(entry?.structuredNodes?.values?.() || [])].filter((node) => (
+    node?.isConnected
+    &&
     (!targetId || node.dataset.segmentId === targetId)
     && (!transientOnly || node.dataset.transient === "1" || node.dataset.thinking === "1")
   ));
   nodes.forEach((node) => removeLiveStructuredNode(entry, node, { respectMinimum }));
 }
 
-function scheduleLiveStructuredResultScroll(entry) {
-  const panel = entry?.structuredPanel || entry?.structured;
+function scheduleLiveStructuredResultScroll(entry, explicitPanel = null) {
+  const panel = explicitPanel || entry?.structuredPanel || entry?.structured;
   if (!panel || entry.structuredScrollFrame) return;
   entry.structuredScrollFrame = requestAnimationFrame(() => {
     entry.structuredScrollFrame = null;
@@ -11309,7 +12138,7 @@ function retireLiveExecutionPhase(entry, segmentId = "") {
   root.__executionActivityDetails = Array.isArray(entry.activityDetails)
     ? [...entry.activityDetails]
     : [];
-  root.__executionActivityRenderedDetails = [...root.__executionActivityDetails].slice(-6);
+  root.__executionActivityRenderedDetails = executionActivityRenderedDetails(root, root.__executionActivityDetails);
   const details = executionActivityNodes(root).viewport;
   if (details && root.__executionActivityRenderedDetails.length) details.hidden = false;
 }
@@ -11370,6 +12199,8 @@ function scheduleLiveReasoningScroll(block) {
 function liveAnswerSegmentIsVisible(entry, segmentId = "") {
   const key = String(segmentId || "").trim();
   if (!entry || !key) return true;
+  const segmentEnd = Number(entry.segmentEndLengths?.get(key));
+  if (Number.isFinite(segmentEnd) && Number(entry.revealedLength || 0) >= segmentEnd) return true;
   const block = entry.segmentBlocks?.get(key);
   const targetLength = entry.segmentCharsById?.get(key)?.length || 0;
   return !targetLength || Number(block?.renderedVisibleCount || 0) >= targetLength;
@@ -11378,6 +12209,7 @@ function liveAnswerSegmentIsVisible(entry, segmentId = "") {
 function queueReasoningUntilAnswerVisible(entry, progress, explicitSegmentId = "") {
   const activeSegmentId = String(entry?.activeSegmentId || "").trim();
   if (!entry || !activeSegmentId || (explicitSegmentId && explicitSegmentId === activeSegmentId)) return false;
+  if (Number(entry.revealedLength || 0) >= Number(entry.targetChars?.length || 0)) return false;
   const activeTargetLength = entry.segmentCharsById?.get(activeSegmentId)?.length || 0;
   if (!activeTargetLength || liveAnswerSegmentIsVisible(entry, activeSegmentId)) return false;
   entry.queuedReasoningDeltas ||= [];
@@ -11410,6 +12242,7 @@ function renderSegmentedLiveAnswer(entry) {
       renderProgressiveMarkdown(block.answer, visibleChars.join(""));
       block.renderedVisibleCount = visibleChars.length;
     }
+    if (block) entry.__reportFirstAnswerPaint?.(block.answer);
     return;
   }
   let sourceOffset = 0;
@@ -11432,6 +12265,7 @@ function renderSegmentedLiveAnswer(entry) {
         flushQueuedReasoning(entry);
       }
     }
+    if (block) entry.__reportFirstAnswerPaint?.(block.answer);
     sourceOffset += targetChars.length;
   }
 }
@@ -11514,11 +12348,25 @@ function revealLiveChatStreamText(entry) {
   return true;
 }
 
-function completedActivityHtml(elapsedMs = 0, details = [], expanded = true) {
+function completedActivityHtml(elapsedMs = 0, details = [], expanded = false) {
   const duration = formatTaskDuration(elapsedMs);
+  const history = uniqueExecutionActivityEntries(details);
+  const label = `总用时 ${duration}`;
   return `
-    <div class="streaming-activity execution-activity-completed execution-activity-duration-only" role="status" aria-label="${escapeHtml(duration)}">
-      <div class="execution-activity-duration">${escapeHtml(duration)}</div>
+    <div class="streaming-activity execution-activity-completed" data-lifecycle="completed" data-activity-expanded="${expanded ? "1" : "0"}" role="status" aria-label="${escapeHtml(label)}">
+      <div class="execution-activity-head execution-completion-head">
+        ${executionActivityToggleHtml(history.length, expanded, { alwaysVisible: true })}
+        <span class="execution-activity-title"></span>
+        <span class="streaming-elapsed">${escapeHtml(duration)}</span>
+      </div>
+      <div class="execution-activity-shell">
+        <div class="execution-process-region">
+          <div class="execution-process-head">
+            <span class="execution-process-label">执行过程</span>
+          </div>
+          <div class="execution-activity-details" hidden><span class="execution-activity-flow"></span></div>
+        </div>
+      </div>
     </div>
   `;
 }
@@ -11599,11 +12447,42 @@ function setLiveCurrentThinking(entry, text = "", options = {}) {
     ? Number(options.blockIndex)
     : -1;
   entry.currentThoughtSegmentId = segmentId;
+  if (entry.reasoningRevealTimer) clearTimeout(entry.reasoningRevealTimer);
+  entry.reasoningRevealTimer = null;
   if (!entry.currentThoughtText) {
+    entry.currentThoughtVisibleText = "";
     entry.segmentBlocks?.forEach?.((block) => {
       if (block?.currentThinking) setExecutionCurrentThinking(block.root, "");
     });
   }
+  const previousVisibleText = String(entry.currentThoughtVisibleText || "");
+  entry.currentThoughtVisibleText = entry.currentThoughtText.startsWith(previousVisibleText)
+    ? previousVisibleText
+    : "";
+  const scheduleReasoningReveal = () => {
+    const target = String(entry.currentThoughtText || "");
+    const visible = String(entry.currentThoughtVisibleText || "");
+    if (!target || visible.length >= target.length) return;
+    const targetChars = Array.from(target);
+    const visibleChars = Array.from(visible);
+    const nextLength = Math.min(
+      targetChars.length,
+      visibleChars.length + Math.max(1, Math.ceil(assistantTypingCharsPerSecond(targetChars.length) / 30))
+    );
+    entry.currentThoughtVisibleText = targetChars.slice(0, nextLength).join("");
+    const roots = [entry.thinkingRow, entry.activity, entry.row]
+      .filter((root, index, list) => root?.isConnected && list.indexOf(root) === index);
+    roots.forEach((root) => setExecutionCurrentThinking(root, entry.currentThoughtVisibleText));
+    if (nextLength >= targetChars.length
+      && String(entry.reasoningCompletionPendingSegmentId || "") === String(entry.currentThoughtSegmentId || "")) {
+      const completedSegmentId = entry.reasoningCompletionPendingSegmentId;
+      entry.reasoningCompletionPendingSegmentId = "";
+      completeLiveReasoningSegment(entry, completedSegmentId, { force: true });
+      return;
+    }
+    entry.reasoningRevealTimer = setTimeout(scheduleReasoningReveal, 30);
+  };
+  if (entry.currentThoughtText) entry.reasoningRevealTimer = setTimeout(scheduleReasoningReveal, 0);
   if (entry.currentThoughtText && segmentId && entry.rendered) {
     const block = ensureLiveSegmentBlock(entry, segmentId);
     const currentNode = ensureLiveSegmentCurrentThinking(block);
@@ -11619,7 +12498,7 @@ function setLiveCurrentThinking(entry, text = "", options = {}) {
       setExecutionCurrentThinking(root, "");
     });
     if (currentNode) {
-      setExecutionCurrentThinking({ querySelector: () => currentNode }, entry.currentThoughtText);
+      setExecutionCurrentThinking({ querySelector: () => currentNode }, entry.currentThoughtVisibleText);
       updateLiveStreamElapsed(entry);
     }
     return;
@@ -11636,7 +12515,7 @@ function setLiveCurrentThinking(entry, text = "", options = {}) {
     root.__executionCurrentThoughtText = entry.currentThoughtText;
     root.__executionCurrentThoughtBlockIndex = entry.currentThoughtBlockIndex;
     root.__executionCurrentThoughtSegmentId = entry.currentThoughtSegmentId;
-    setExecutionCurrentThinking(root, entry.currentThoughtText);
+    setExecutionCurrentThinking(root, entry.currentThoughtVisibleText);
   });
 }
 
@@ -11650,9 +12529,9 @@ function settleLiveSegmentTransition(entry) {
     if (entry.currentThoughtSegmentId === activeSegmentId) {
       setLiveCurrentThinking(entry, "", { segmentId: "" });
     }
-    const nextSegmentId = entry.segmentOrder.find((segmentId) => segmentId !== activeSegmentId
-      && Number.isFinite(Number(entry.segmentEndLengths?.get(segmentId)))
-      && Number(entry.revealedLength || 0) < Number(entry.segmentEndLengths.get(segmentId)));
+    const activeIndex = entry.segmentOrder.indexOf(activeSegmentId);
+    const nextSegmentId = entry.segmentOrder.slice(Math.max(0, activeIndex + 1))
+      .find((segmentId) => (entry.segmentCharsById?.get(segmentId)?.length || 0) > 0);
     entry.activeSegmentId = nextSegmentId || "";
     entry.pendingSegmentThought = pending;
   }
@@ -11665,12 +12544,16 @@ function settleLiveSegmentTransition(entry) {
   }
 }
 
-function hideLiveThinkingLayer(entry) {
+function hideLiveThinkingLayer(entry, options = {}) {
   if (!entry) return;
-  // Only transient/thinking structured entries fade. Factual Black Ball
-  // structured results belong to the permanent answer presentation.
-  recycleLiveStructuredProcess(entry, "", { transientOnly: true });
-  completeLiveReasoningSegment(entry);
+  if (entry.reasoningRevealTimer) clearTimeout(entry.reasoningRevealTimer);
+  entry.reasoningRevealTimer = null;
+  entry.currentThoughtVisibleText = "";
+  recycleLiveStructuredProcess(entry, "", {
+    transientOnly: options.allStructured !== true,
+    respectMinimum: options.respectMinimum !== false
+  });
+  completeLiveReasoningSegment(entry, "", { force: true });
   [entry.thinkingRow, entry.activity]
     .filter((root, index, list) => root?.isConnected && list.indexOf(root) === index)
     .forEach((root) => clearExecutionCurrentThinking(root));
@@ -11690,7 +12573,9 @@ function hideLiveThinkingLayer(entry) {
 
 function finishLiveExecutionSurface(entry) {
   if (!entry) return;
-  completeLiveReasoningSegment(entry);
+  if (entry.executionNarrativeTimer) clearTimeout(entry.executionNarrativeTimer);
+  entry.executionNarrativeTimer = null;
+  completeLiveReasoningSegment(entry, "", { force: true });
   const activity = entry.activity?.isConnected ? entry.activity : null;
   if (activity?.__executionPhaseRetireTimer) clearTimeout(activity.__executionPhaseRetireTimer);
   if (activity) {
@@ -11711,26 +12596,80 @@ function collapseCompletedExecutionActivity(root, elapsedMs = 0, details = []) {
   if (!root) return null;
   if (root.__executionPhaseRetireTimer) clearTimeout(root.__executionPhaseRetireTimer);
   root.__executionPhaseRetireTimer = null;
-  stopExecutionActivityFlow(root, { preserveWhimsy: true });
-  root.classList.add("execution-activity-completed");
+  stopExecutionActivityFlow(root);
+  const history = uniqueExecutionActivityEntries([...(root.__executionStageDetails || []), ...details]);
+  const durationLabel = formatTaskDuration(elapsedMs);
+  root.className = "streaming-activity execution-activity-completed";
+  root.dataset.lifecycle = "completed";
   root.dataset.activityExpanded = "0";
-  paintExecutionActivityDetails(root, details.length ? details : root.__executionActivityDetails || []);
+  root.dataset.activityFollowLatest = "1";
+  root.setAttribute("role", "status");
+  root.setAttribute("aria-label", `执行过程，共 ${history.length} 条，总用时 ${durationLabel}`);
+  root.removeAttribute("aria-hidden");
+  root.style.height = "";
+  root.style.minHeight = "";
+  root.style.marginBottom = "";
+  root.style.overflow = "";
+  const completedTemplate = document.createElement("template");
+  completedTemplate.innerHTML = `
+      <div class="execution-activity-head execution-completion-head">
+        ${executionActivityToggleHtml(history.length, false, { alwaysVisible: true })}
+        <span class="execution-activity-title"></span>
+        <span class="streaming-elapsed">${escapeHtml(durationLabel)}</span>
+      </div>
+      <div class="execution-activity-shell">
+      <div class="execution-process-region">
+        <div class="execution-process-head">
+          <span class="execution-process-label">执行过程</span>
+        </div>
+        <div class="execution-stage-summary" aria-live="polite" hidden></div>
+        <div class="execution-completed-narrative" hidden></div>
+        <div class="execution-activity-details"><span class="execution-activity-flow"></span></div>
+      </div>
+    </div>
+  `;
+  const currentHead = root.querySelector(":scope > .execution-activity-head");
+  if (currentHead && root.querySelector(".execution-stage-summary")) {
+    currentHead.replaceWith(completedTemplate.content.firstElementChild);
+  } else {
+    root.replaceChildren(...completedTemplate.content.children);
+  }
+  root.querySelectorAll(".execution-phase-group").forEach((phase) => { phase.dataset.expanded = "0"; });
+  const { viewport, rendered } = executionActivityNodes(root);
+  const visible = executionActivityRenderedDetails(root, history);
+  replaceExecutionActivityLines(rendered, visible, { detailCount: history.length });
+  paintExecutionStageView(root, history);
+  root.__executionActivityDetails = history;
+  root.__executionActivityRenderedDetails = visible;
+  paintCompletedExecutionNarrative(root, history);
+  if (viewport) viewport.hidden = visible.length === 0;
+  bindExecutionActivityToggle(root);
+  updateExecutionActivityToggle(root, history.length);
   return root;
 }
 
 function streamActivityHtml(stage = "understanding", elapsedMs = 0, details = []) {
-  const visibleDetails = details.map(executionActivityEntry).filter(Boolean)
-    .filter((item, index, list) => list.findIndex((candidate) => executionActivityEntryKey(candidate) === executionActivityEntryKey(item)) === index)
-    .slice(-EXECUTION_ACTIVITY_RENDERED_LIMIT);
+  const visibleDetails = uniqueExecutionActivityEntries(details);
   return `
-      <div class="streaming-activity" role="status" aria-live="polite" data-activity-expanded="0"${visibleDetails.length ? "" : " hidden"}>
-        <div class="execution-activity-head">
-          <div class="execution-activity-inline-theater" data-theater-visible="0" aria-hidden="true"></div>
+      <div class="streaming-activity" role="status" aria-live="polite" data-activity-expanded="0" data-lifecycle="running">
+    <div class="execution-activity-head">
+          ${executionActivityToggleHtml(visibleDetails.length, false, { alwaysVisible: true })}
+          <span class="execution-activity-inline-theater" aria-live="polite" aria-label="黑球动态旁白"></span>
           <span class="streaming-elapsed">${escapeHtml(formatLiveElapsed(elapsedMs))}</span>
         </div>
         <div class="execution-activity-shell">
-          <div class="execution-reasoning-flow" aria-live="polite"></div>
-          ${executionActivityDetailsHtml(visibleDetails, { includeToggle: false, currentOnly: false, expanded: false, hidden: false })}
+          <div class="execution-process-region">
+            <div class="execution-process-head">
+              <span class="execution-process-label">执行过程</span>
+            </div>
+            <div class="execution-activity-narratives">
+              <div class="execution-stage-summary" aria-live="polite" hidden></div>
+              <div class="execution-activity-narrative streaming-structured-result" aria-live="polite" hidden></div>
+              <div class="execution-event-narrative" aria-live="polite" hidden></div>
+            </div>
+            <div class="execution-reasoning-flow" aria-live="polite"></div>
+            ${executionActivityDetailsHtml(visibleDetails, { includeToggle: false, currentOnly: false, expanded: false, hidden: true })}
+          </div>
         </div>
       </div>
     `;
@@ -11739,16 +12678,17 @@ function streamActivityHtml(stage = "understanding", elapsedMs = 0, details = []
 function updateLiveStreamElapsed(entry) {
   if (!entry) return;
   const now = Date.now();
-  const elapsed = formatLiveElapsed(Number(entry.startedAt) > 0 ? now - entry.startedAt : 0);
+  const clockNow = Number(entry.completedAt) > 0 ? Number(entry.completedAt) : now;
+  const elapsed = formatLiveElapsed(Number(entry.startedAt) > 0 ? clockNow - entry.startedAt : 0);
   const latest = executionActivityEntry(entry.activityDetails?.at(-1));
-  const timestamp = latest?.timestamp || now;
+  const timestamp = latest?.timestamp || clockNow;
   const labels = [
     entry.activity?.querySelector?.(".streaming-elapsed"),
     entry.row?.querySelector?.(".streaming-elapsed")
   ].filter(Boolean);
   labels.forEach((node) => { node.textContent = elapsed; });
   const thoughtElapsed = formatLiveElapsed(Number(entry.executionStartedAt) > 0
-    ? Math.max(0, now - entry.executionStartedAt)
+    ? Math.max(0, clockNow - entry.executionStartedAt)
     : 0);
   const rootsForThought = [entry.activity, entry.row, entry.thinkingRow, entry.rendered].filter(Boolean);
   rootsForThought.flatMap((root) => Array.from(root.querySelectorAll?.(".execution-current-thinking-time") || []))
@@ -11761,6 +12701,30 @@ function updateLiveStreamElapsed(entry) {
     node.textContent = executionClockText(timestamp);
     node.dateTime = new Date(timestamp).toISOString();
   });
+}
+
+function freezeLiveStreamElapsed(entry, completedAt = Date.now()) {
+  if (!entry) return;
+  if (!Number(entry.completedAt)) {
+    entry.completedAt = Math.max(Number(entry.startedAt || 0), Number(completedAt) || Date.now());
+    entry.completedDurationMs = Math.max(0, entry.completedAt - Number(entry.startedAt || entry.completedAt));
+  }
+  if (entry.elapsedTimer) clearInterval(entry.elapsedTimer);
+  entry.elapsedTimer = null;
+  updateLiveStreamElapsed(entry);
+  const theatreOutcome = entry.timedOut || entry.terminalType === "error"
+    ? "failure"
+    : entry.terminalType === "cancelled" ? "cancelled"
+      : entry.runtimeOutcome === "failed" ? "failure"
+        : entry.runtimeOutcome === "waiting" ? "waiting"
+          : entry.runtimeOutcome === "completed" ? "success" : "";
+  if (theatreOutcome) miniTheatre.finish(entry.streamId, theatreOutcome, entry.completedAt);
+  for (const root of [entry.thinkingRow, entry.activity]) {
+    if (theatreOutcome) {
+      const mood = theatreOutcome === "failure" ? "worried" : theatreOutcome;
+      if (!entry.persistedRowAdopted) taskFace.complete(root, mood, entry.completedAt, entry.turnId || entry.responseMessageId || entry.streamId);
+    }
+  }
 }
 
 function flushLiveActivityPaint(entry) {
@@ -11791,6 +12755,27 @@ function markLiveStreamEventReceived(entry) {
   entry.firstEventTimer = null;
 }
 
+function markLiveStreamTransportActivity(entry, frame) {
+  if (!entry || entry.timedOut || entry.backendCompleted || entry.terminalType
+    || entry.finalized || entry.finalizing
+    || !["response_data", "model_data", "tool_event"].includes(frame.kind)) return;
+  entry.firstTransportAt ||= Date.now();
+  entry.lastTransportAt = Date.now();
+  if (entry.firstEventTimer) clearTimeout(entry.firstEventTimer);
+  entry.firstEventTimer = null;
+}
+
+function armLiveStreamFirstEventTimeout(entry, dispatchedAt = Date.now()) {
+  if (!entry || entry.firstEventReceived || entry.firstTransportAt || entry.firstEventTimer
+    || entry.finalized || entry.finalizing || entry.backendCompleted || entry.timedOut) return;
+  entry.modelRequestDispatchedAt = Number(dispatchedAt || 0) > 0 ? Number(dispatchedAt) : Date.now();
+  entry.lastMeaningfulEventAt = Date.now();
+  entry.firstEventTimer = setTimeout(() => {
+    if (!entry.firstTransportAt && !entry.firstEventReceived) handleLiveStreamTimeout(entry, "请求发出后 30 秒内未收到模型响应数据。", "connection");
+  }, LIVE_STREAM_FIRST_EVENT_TIMEOUT_MS);
+  entry.firstEventTimer?.unref?.();
+}
+
 function appendLiveStreamNotice(entry, message = "") {
   const text = String(message || "").trim();
   if (!entry || !text) return;
@@ -11803,6 +12788,36 @@ function appendLiveStreamNotice(entry, message = "") {
   notice.textContent = text;
   flow.appendChild(notice);
   scrollExecutionActivityToLatest(flow);
+}
+
+function checkLiveStreamProgress(entry) {
+  if (!entry || entry.finalized || entry.finalizing || entry.backendCompleted || entry.timedOut) return;
+  if (!Number(entry.modelRequestDispatchedAt) && !entry.firstEventReceived) return;
+  const now = Date.now();
+  if (now - Number(entry.startedAt || now) >= LIVE_STREAM_TOTAL_TIMEOUT_MS) {
+    handleLiveStreamTimeout(entry, "本次任务已达到 30 分钟执行时限。", "total");
+    return;
+  }
+  if (!entry.firstEventReceived && entry.firstTransportAt
+    && now - entry.modelRequestDispatchedAt >= LIVE_STREAM_FIRST_PUBLIC_TIMEOUT_MS) {
+    handleLiveStreamTimeout(entry, "模型已响应，但 2 分钟内仍未产生正文或公开执行事件。", "first_public");
+    return;
+  }
+  if (now - Math.max(Number(entry.lastTransportAt || 0), Number(entry.lastMeaningfulEventAt || entry.startedAt || now)) < LIVE_STREAM_NO_PROGRESS_TIMEOUT_MS) return;
+  handleLiveStreamTimeout(entry, "连续 2 分钟没有收到模型、工具或正文事件。");
+}
+
+function handleLiveStreamTimeout(entry, message = "", timeoutKind = "") {
+  if (!entry || entry.finalized || entry.finalizing || entry.backendCompleted || entry.timedOut) return;
+  entry.timedOut = true;
+  entry.timeoutMessage = String(message || "模型响应超时。").trim();
+  appendLiveStreamNotice(entry, entry.timeoutMessage);
+  api.signalAbortChat?.({
+    sessionId: entry.sessionId,
+    runId: entry.streamId,
+    reason: "timeout",
+    timeoutKind: timeoutKind || (entry.firstEventReceived || entry.firstTransportAt ? "no_progress" : "connection")
+  });
 }
 
 function reasoningSegmentKey(progress = {}) {
@@ -11843,7 +12858,7 @@ function appendLiveReasoningDelta(entry, progress = {}) {
   const segmentId = block.key;
   const key = reasoningSegmentKey({ ...progress, segmentId });
   showLiveExecutionPhase(entry, block);
-  const current = Array.isArray(entry.activityDetails) ? entry.activityDetails : [];
+  const current = Array.isArray(entry.reasoningDetails) ? entry.reasoningDetails : [];
   const previous = executionActivityEntry(current.at(-1));
   const continuesCurrentReasoning = previous
     && ["reasoning_delta", "reasoning_note", "public_reasoning"].includes(previous.kind)
@@ -11861,10 +12876,13 @@ function appendLiveReasoningDelta(entry, progress = {}) {
   }, entry.activityUpdatedAt);
   if (!detail) return null;
   entry.activityLabel = detail;
-  entry.activityDetails = [
-    ...(continuesCurrentReasoning ? current.slice(0, -1) : current),
+  // Reasoning is a transient content lane. It must never become a durable
+  // execution timeline item or be replayed as structured output.
+  entry.reasoningDetails ||= [];
+  entry.reasoningDetails = [
+    ...(continuesCurrentReasoning ? entry.reasoningDetails.slice(0, -1) : entry.reasoningDetails),
     detail
-  ].slice(-EXECUTION_ACTIVITY_HISTORY_LIMIT);
+  ].slice(-REASONING_SEGMENT_HISTORY_LIMIT);
   setLiveCurrentThinking(entry, combinedText, {
     segmentId,
     blockIndex: progress.blockIndex
@@ -11872,9 +12890,22 @@ function appendLiveReasoningDelta(entry, progress = {}) {
   return detail;
 }
 
-function completeLiveReasoningSegment(entry, segmentId = "") {
+function completeLiveReasoningSegment(entry, segmentId = "", options = {}) {
   if (!entry) return;
   const targetId = String(segmentId || "").trim();
+  const currentSegmentId = String(entry.currentThoughtSegmentId || "").trim();
+  const currentText = String(entry.currentThoughtText || "");
+  const currentVisibleText = String(entry.currentThoughtVisibleText || "");
+  if (options.force !== true
+    && targetId
+    && currentSegmentId === targetId
+    && Array.from(currentVisibleText).length < Array.from(currentText).length) {
+    entry.reasoningCompletionPendingSegmentId = targetId;
+    return;
+  }
+  if (!targetId || entry.reasoningCompletionPendingSegmentId === targetId) {
+    entry.reasoningCompletionPendingSegmentId = "";
+  }
   const segments = Array.isArray(entry.reasoningSegments) ? entry.reasoningSegments : [];
   const candidates = segments.filter((segment) => {
     if (!segment?.node?.isConnected || segment.node.__executionReasoningCompleting) return false;
@@ -11923,6 +12954,14 @@ function completeLiveReasoningSegment(entry, segmentId = "") {
     if (remainingVisibleMs > 0) setTimeout(beginExit, remainingVisibleMs);
     else beginExit();
   });
+  if (!targetId || String(entry.currentThoughtSegmentId || "") === targetId) {
+    if (entry.reasoningRevealTimer) clearTimeout(entry.reasoningRevealTimer);
+    entry.reasoningRevealTimer = null;
+    entry.currentThoughtText = "";
+    entry.currentThoughtVisibleText = "";
+    entry.currentThoughtBlockIndex = -1;
+    entry.currentThoughtSegmentId = "";
+  }
 }
 
 function setLiveStreamActivity(entry, activity = "正在生成回复") {
@@ -11934,47 +12973,71 @@ function setLiveStreamActivity(entry, activity = "正在生成回复") {
       : null;
   if (!progress) return;
   const sequence = Number(progress?.sequence || 0);
-  const eventId = String(progress?.eventId || "");
   if (progress?.runId && String(progress.runId) !== String(entry.streamId)) return;
-  if (eventId && entry.seenActivityEventIds?.has(eventId)) return;
-  if (sequence > 0 && sequence <= Number(entry.lastActivitySequence || 0)) return;
-  if (eventId) entry.seenActivityEventIds?.add(eventId);
-  if (sequence > 0) entry.lastActivitySequence = sequence;
+  taskFace.progress(entry.activity || entry.thinkingRow, progress);
+  const target = progressTarget(progress);
+  if (sequence > 0) {
+    entry.lastActivitySequences ||= new Map();
+    entry.lastActivitySequences.set(target, Math.max(
+      Number(entry.lastActivitySequences.get(target) || 0),
+      sequence
+    ));
+    entry.lastActivitySequence = Math.max(Number(entry.lastActivitySequence || 0), sequence);
+  }
   entry.activityUpdatedAt = Date.now();
   if (!Array.isArray(entry.activityDetails)) entry.activityDetails = [];
   setLiveStreamStage(entry, executionStageForActivity(activity));
   const transient = activityIsTransient(activity);
   const source = String(progress?.source || "").toLowerCase();
   const kind = String(progress?.kind || "").toLowerCase();
-  const factualProgress = Boolean(String(progress?.message || progress?.delta || progress?.text || "").trim());
+  const type = String(progress?.type || "").toLowerCase();
+  if (kind === "lifecycle" && type === "model_request_dispatched") {
+    armLiveStreamFirstEventTimeout(entry, progress.timestamp);
+  }
+  const factualProgress = Boolean(activityDetailText(progress)
+    || (progress?.eventId && progress?.status
+      && ["tool", "stage_result"].includes(String(progress?.semanticType || progress?.kind || ""))));
   if (!factualProgress) return;
   activateLiveBlackBallExecution(entry, progress);
+  const reportProcessPaint = (node, result) => {
+    if (!["thinking", "action", "tool"].includes(result.semanticType)
+      || entry.activity?.dataset.lifecycle === "completed") return;
+    reportLiveOutputTiming(entry, "firstProcessDomText", result, node);
+  };
+  if (["thinking", "action", "tool"].includes(progress.semanticType)
+    && ["blackball_public", "blackball_tool"].includes(progress.provenance)) {
+    reportLiveOutputTiming(entry, "firstProcessReceived", progress);
+  }
+  if (entry.activity) entry.activity.__reportFirstProcessPaint = reportProcessPaint;
   const modelEvent = String(progress?.actor || "").toLowerCase() === "model"
-    || source === "hms"
+    || (source === "hms" && kind !== "lifecycle")
     || ["reasoning_delta", "reasoning_note", "public_reasoning", "tool"].includes(kind);
   if (modelEvent) markLiveStreamEventReceived(entry);
-  const target = progressTarget(progress);
-  if (target === "structured_result") {
+  const reasoningKind = ["reasoning_delta", "reasoning_note", "public_reasoning", "thought"];
+  if (target === "structured_result" || target === "reasoning" || reasoningKind.includes(kind)) {
     appendLiveStructuredResult(entry, progress);
+    if (entry.activity) {
+      paintExecutionStageView(entry.activity, [...entry.activityDetails, ...(entry.structuredEvents || [])], entry.turnId);
+    }
     return;
   }
   if (target !== "execution_activity") return;
-  if (["reasoning_delta", "reasoning_note", "public_reasoning"].includes(kind)) {
-    appendLiveReasoningDelta(entry, progress);
-    return;
-  }
-  if (!["progress", "public_progress", "runtime_status", "lifecycle", "plan", "tool", "thought", "execution"].includes(kind)) return;
-  const activityEntry = executionActivityEntry(activity, entry.activityUpdatedAt);
+  if (["answer", "result", "public_result"].includes(kind)) return;
+  const activityEntry = executionSummaryEntry(activity, entry.activityUpdatedAt);
   entry.activityLabel = activityEntry || null;
   if (!activityEntry) return;
   if (factualProgress && !entry.modelPublicProgressStarted) {
     entry.modelPublicProgressStarted = true;
   }
   entry.activityTransient = transient;
-  entry.activityDetails = [...entry.activityDetails, activityEntry]
-    .filter((item, index, list) => list.findIndex((candidate) => executionActivityEntryKey(candidate) === executionActivityEntryKey(item)) === index)
-    .slice(-EXECUTION_ACTIVITY_HISTORY_LIMIT);
+  const createdActivity = !entry.activity?.isConnected;
   const root = entry.activity || ensureLiveStreamRow(entry)?.querySelector?.(".streaming-activity");
+  taskFace.progress(root, progress);
+  if (root) root.__reportFirstProcessPaint = reportProcessPaint;
+  entry.activityDetails = uniqueExecutionActivityEntries([...entry.activityDetails, activityEntry])
+    .sort((a, b) => (Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0))
+      || (Number(a.timestamp || 0) - Number(b.timestamp || 0)));
+  scheduleExecutionNarrativeReveal(entry, activityEntry);
   if (root) {
     // The lifecycle anchor is a run-level event, not an answer segment. Do
     // not allocate an empty process block for it; the first public thought or
@@ -11987,9 +13050,19 @@ function setLiveStreamActivity(entry, activity = "正在生成回复") {
     // They must never be copied into the transient thought line, otherwise a
     // status such as "黑球已接收请求" is rendered as fake reasoning.
     setLiveCurrentThinking(entry, "", { segmentId: "" });
+    root.hidden = false;
     const details = executionActivityNodes(root).viewport;
-    if (details) details.hidden = true;
-    if (EXECUTION_ACTIVITY_THEATER_ENABLED) enqueueExecutionActivityTheater(root, activityEntry);
+    if (details) details.hidden = root.dataset.activityExpanded !== "1";
+    if (createdActivity) {
+      clearExecutionActivityDetails(root);
+      for (const queuedEntry of entry.activityDetails.slice(-EXECUTION_ACTIVITY_VISIBLE_LIMIT)) {
+        pushExecutionActivityDetail(root, queuedEntry, { real: true });
+      }
+    } else {
+      pushExecutionActivityDetail(root, activityEntry, { real: true });
+    }
+    paintExecutionStageView(root, [...entry.activityDetails, ...(entry.structuredEvents || [])], entry.turnId);
+    paintLiveExecutionNarrative(entry);
   }
 }
 
@@ -12006,6 +13079,7 @@ function adoptPersistedLiveStreamRow(entry) {
   entry.persistedRowAdopted = true;
   entry.backendCompleted = true;
   entry.terminalType ||= "persisted";
+  freezeLiveStreamElapsed(entry);
   if (entry.firstEventTimer) clearTimeout(entry.firstEventTimer);
   if (entry.requestTimeoutTimer) clearTimeout(entry.requestTimeoutTimer);
   if (entry.noProgressTimer) clearInterval(entry.noProgressTimer);
@@ -12028,7 +13102,7 @@ function ensureLiveStreamRow(entry) {
   const row = thinkingRow || document.createElement("div");
   removeStaleExecutionRows(row);
   const rendered = document.createElement("div");
-  rendered.className = "rendered streaming-rendered";
+  rendered.className = "rendered result-region streaming-rendered";
   let activityRoot = null;
   mutatePreservingMessageViewport(() => {
     row.className = "message assistant streaming-response";
@@ -12066,7 +13140,6 @@ function ensureLiveStreamRow(entry) {
   entry.activity = activityRoot;
   entry.structuredPanel = null;
   entry.structuredNodes ||= new Map();
-  entry.seenStructuredEventIds ||= new Set();
   entry.activity.dataset.activityExpanded = "0";
   entry.activity.hidden = entry.activityDetails.length === 0 && !entry.currentThoughtText;
   setExecutionCurrentThinking(entry.activity, entry.currentThoughtText);
@@ -12076,7 +13149,6 @@ function ensureLiveStreamRow(entry) {
   entry.activity.__executionActivityRenderedDetails = [...entry.activityDetails].slice(-EXECUTION_ACTIVITY_VISIBLE_LIMIT);
   scrollExecutionActivityToLatest(entry.activity.querySelector(".execution-activity-details"));
   ensureExecutionActivityFlow(entry.activity);
-  if (EXECUTION_ACTIVITY_THEATER_ENABLED) scheduleExecutionActivityWhimsy(entry.activity);
   return row;
 }
 
@@ -12090,7 +13162,7 @@ function flushLiveChatStream(entry) {
     if (entry.backendCompleted) {
       setLiveStreamStage(entry, "completed");
       hideLiveThinkingLayer(entry);
-      if (!entry.finalizing) entry.finalizeWhenDrained?.();
+      entry.finalizeWhenDrained?.();
     }
     return;
   }
@@ -12100,7 +13172,7 @@ function flushLiveChatStream(entry) {
   if (entry.revealedLength < entry.targetChars.length) scheduleLiveChatStreamPaint(entry);
   else if (entry.backendCompleted) {
     setLiveStreamStage(entry, "completed");
-    if (!entry.finalizing) entry.finalizeWhenDrained?.();
+    entry.finalizeWhenDrained?.();
   }
 }
 
@@ -12125,25 +13197,46 @@ function handleChatStreamFrame(frame = {}) {
   handleVoiceConversationStreamFrame(frame);
   const entry = liveChatStreams.get(String(frame.streamId || ""));
   if (!entry || entry.sessionId !== String(frame.sessionId || "") || entry.finalized || entry.finalizing) return;
-  const turnId = String(frame.turnId || frame.streamId || "").trim();
-  if (turnId && turnId !== String(entry.turnId || entry.streamId || "").trim()) return;
-  const eventId = String(frame.eventId || "").trim();
-  if (eventId) {
-    entry.seenEventIds ||= new Set();
-    if (entry.seenEventIds.has(eventId)) return;
-    entry.seenEventIds.add(eventId);
-  }
+  // Once a terminal event has been latched, late transport frames cannot
+  // mutate the turn ledger, sequence cursor, or visible answer.
   if (entry.terminalType) return;
-  if (entry.timedOut && !["done", "error", "cancelled"].includes(frame.type)) return;
-  if (entry.backendCompleted && !["done", "error", "cancelled"].includes(frame.type)) return;
-  const frameSequence = Number(frame.seq || 0);
-  if (frameSequence > 0 && frameSequence <= Number(entry.lastFrameSequence || 0)) return;
-  if (frameSequence > 0) entry.lastFrameSequence = frameSequence;
+  if (frame.type === "transport_activity") {
+    markLiveStreamTransportActivity(entry, frame);
+    return;
+  }
   // The main process attaches the normalized Black Ball event to the frame.
   // Consume it before the transport-specific branches so start/phase/progress
   // all share the same fixed theater and timeline owner.
   const frameProgress = frame.progress && typeof frame.progress === "object" ? frame.progress : null;
-  if (frameProgress) setLiveStreamActivity(entry, frameProgress);
+  const acceptedEvent = acceptLiveTurnEvent(entry, frameProgress || frame, {
+    turnId: frame.turnId || frame.streamId,
+    eventId: frame.eventId,
+    sequence: frameProgress?.sequence || frame.sequence,
+    turnSequence: frame.turnSequence || frame.seq,
+    target: frameProgress?.target || frame.target,
+    type: frameProgress?.type || frame.eventType || frame.type,
+    segmentId: frameProgress?.segmentId || frame.segmentId
+  });
+  if (!acceptedEvent) return;
+  const frameSequence = Number(frame.turnSequence || frame.seq || 0);
+  const turnCompleted = acceptedEvent.type === "turn_complete";
+  const terminalFrame = turnCompleted || ["done", "error", "cancelled"].includes(frame.type);
+  entry.lastFrameSequence = Math.max(Number(entry.lastFrameSequence || 0), frameSequence);
+  if (entry.timedOut && !terminalFrame) return;
+  if (entry.backendCompleted && !terminalFrame) return;
+  if (!terminalFrame) {
+    transitionLiveTurn(entry, LIVE_TURN_STATES.RUNNING);
+  }
+  if (frameProgress) setLiveStreamActivity(entry, acceptedEvent);
+  if (!["error", "cancelled"].includes(frame.type)
+    && (acceptedEvent.semanticType === "final" || acceptedEvent.type === "final" || turnCompleted || frame.type === "done")) {
+    freezeLiveStreamElapsed(entry);
+    if (entry.activity) {
+      collapseCompletedExecutionActivity(entry.activity, entry.completedDurationMs, [
+        ...(entry.activityDetails || []), ...(entry.structuredEvents || [])
+      ]);
+    }
+  }
   if (frame.type === "start") {
     if (!Number(entry.executionStartedAt) && Number(frame.startedAt) > 0) {
       entry.executionStartedAt = Number(frame.startedAt);
@@ -12188,7 +13281,6 @@ function handleChatStreamFrame(frame = {}) {
       entry.answerStartedSegments?.clear?.();
       entry.segmentBlocks?.forEach((block) => block.structured?.replaceChildren?.());
       entry.structuredNodes?.clear?.();
-      entry.seenStructuredEventIds?.clear?.();
     }
     entry.pendingSegmentThought = null;
     if (!clearAnswer && entry.activeSegmentId && !Number.isFinite(Number(entry.segmentEndLengths?.get(entry.activeSegmentId)))) {
@@ -12196,6 +13288,7 @@ function handleChatStreamFrame(frame = {}) {
     }
     entry.activeSegmentId = "";
     entry.reasoningSegments = [];
+    entry.reasoningDetails = [];
     entry.reasoningBlockCounter = 0;
     entry.pendingReasoningBlockId = "";
     entry.queuedReasoningDeltas = [];
@@ -12214,9 +13307,15 @@ function handleChatStreamFrame(frame = {}) {
     if (!entry.segmentOrder.includes(segmentId)) entry.segmentOrder.push(segmentId);
     return;
   }
-  if (["done", "error", "cancelled"].includes(frame.type)) {
-    entry.terminalType = frame.type;
+  if (terminalFrame) {
+    entry.terminalType = ["done", "error", "cancelled"].includes(frame.type)
+      ? frame.type
+      : "turn_complete";
     entry.backendCompleted = true;
+    freezeLiveStreamElapsed(entry);
+    recycleLiveStructuredProcess(entry, "", { transientOnly: true, respectMinimum: false });
+    transitionLiveTurn(entry, LIVE_TURN_STATES.TERMINAL_RECEIVED);
+    syncSessionRuntimeControls(entry.sessionId);
     markLiveStreamEventReceived(entry);
   if (entry.requestTimeoutTimer) clearTimeout(entry.requestTimeoutTimer);
   entry.requestTimeoutTimer = null;
@@ -12235,6 +13334,10 @@ function handleChatStreamFrame(frame = {}) {
   if (frame.type !== "delta") return;
   const delta = filterLiveAssistantDelta(entry, frame.delta);
   if (!delta) return;
+  if (delta.trim()) {
+    reportLiveOutputTiming(entry, "firstAnswerReceived", acceptedEvent);
+    entry.__reportFirstAnswerPaint ||= (node) => reportLiveOutputTiming(entry, "firstAnswerDomText", acceptedEvent, node);
+  }
   markLiveStreamEventReceived(entry);
   let segmentId = String(frame.segmentId || "").trim().slice(0, 160);
   if (!segmentId) {
@@ -12257,7 +13360,7 @@ function handleChatStreamFrame(frame = {}) {
     entry.segmentEndLengths.set(previousSegmentId, Array.from(entry.text || "").length);
   }
   if (!entry.segmentOrder.includes(segmentId)) entry.segmentOrder.push(segmentId);
-  orderLiveSegmentBlocks(entry, segmentId, frame.sequence || frame.seq);
+  orderLiveSegmentBlocks(entry, segmentId, acceptedEvent.turnSequence || frame.turnSequence || frame.seq);
   settleLiveSegmentTransition(entry);
   if (!entry.activeSegmentId) entry.activeSegmentId = segmentId;
   entry.activityUpdatedAt = Date.now();
@@ -12291,32 +13394,19 @@ function discardSupersededLiveChatStreams(sessionId, keepStreamId = "") {
   const keep = String(keepStreamId || "");
   for (const [streamId, entry] of liveChatStreams) {
     if (entry.sessionId !== key || streamId === keep) continue;
+    if (entry.finalizing && typeof entry.finalizeWhenDrained === "function") continue;
     discardLiveChatStream(streamId);
   }
 }
 
 function restoreLiveChatStream(entry) {
   if (!entry || entry.sessionId !== state.selectedSessionId) return false;
-  if (entry.text) {
-    if (!entry.row?.isConnected) {
-      entry.row = null;
-      entry.rendered = null;
-      entry.activity = null;
-    }
-    const row = ensureLiveStreamRow(entry);
-    if (row) {
-      if (entry.persistedRowAdopted) return true;
-      restoreLiveStreamSegments(entry);
-      if (entry.activity?.isConnected) {
-        entry.activity.hidden = false;
-        ensureExecutionActivityFlow(entry.activity);
-      }
-      if (entry.noProgress) checkLiveStreamProgress(entry);
-      flushLiveChatStream(entry);
-    }
-    return Boolean(row);
+  if (!entry.row?.isConnected) {
+    entry.row = null;
+    entry.rendered = null;
+    entry.activity = null;
   }
-  if (!entry.thinkingRow?.isConnected) {
+  if (!entry.row && !entry.thinkingRow?.isConnected) {
     removeThinkingMessage(entry.thinkingRow);
     entry.thinkingRow = createThinkingMessage(entry.activityLabel || "", {
       startedAt: entry.startedAt,
@@ -12325,17 +13415,31 @@ function restoreLiveChatStream(entry) {
     });
     removeStaleExecutionRows(entry.thinkingRow);
   }
+  const row = ensureLiveStreamRow(entry);
+  if (!row) return false;
+  if (entry.persistedRowAdopted) return true;
+  restoreLiveStreamSegments(entry);
+  if (entry.activity?.isConnected) {
+    entry.activity.hidden = false;
+    ensureExecutionActivityFlow(entry.activity);
+  }
   setLiveStreamStage(entry, entry.executionStage, { force: true });
   if (entry.activityLabel) setLiveStreamActivity(entry, entry.activityLabel);
   updateLiveStreamElapsed(entry);
-  return true;
+  if (entry.noProgress) checkLiveStreamProgress(entry);
+  if (entry.text) flushLiveChatStream(entry);
+  return Boolean(row);
 }
 
 function restoreLiveStreamSegments(entry) {
   if (!entry?.rendered) return;
+  const visibleStructuredEvents = (Array.isArray(entry.structuredEvents) ? entry.structuredEvents : [])
+    .filter((event) => event?.__retired !== true)
+    .slice(-STRUCTURED_RESULT_VISIBLE_LIMIT);
   placeLiveActivityBeforeBlock(entry);
   entry.segmentBlocks?.clear?.();
-  entry.segmentCharsById?.clear?.();
+  entry.structuredNodes?.clear?.();
+  entry.structuredEvents = [];
   entry.rendered.replaceChildren();
   const order = Array.isArray(entry.segmentOrder) ? entry.segmentOrder : [];
   if (!order.length) {
@@ -12347,6 +13451,10 @@ function restoreLiveStreamSegments(entry) {
     }
   }
   for (const segmentId of entry.segmentOrder) ensureLiveSegmentBlock(entry, segmentId);
+  visibleStructuredEvents.forEach((event) => appendLiveStructuredResult(entry, {
+    ...event,
+    __turnEventAccepted: true
+  }));
   renderSegmentedLiveAnswer(entry);
   for (const segment of Array.isArray(entry.reasoningSegments) ? entry.reasoningSegments : []) {
     if (!segment?.text) continue;
@@ -12439,8 +13547,7 @@ function ensureSelectedSessionExecutionPresence() {
 }
 
 function hasActiveSessionExecution() {
-  return activeSendOwners.size > 0
-    || liveChatStreams.size > 0
+  return [...activeSendOwners.keys()].some((sessionId) => localSessionRuntime(sessionId).phase === "running")
     || (state.db?.sessions || []).some((session) => sessionIsRunning(session));
 }
 
@@ -12518,7 +13625,7 @@ function bindFinalOnlyLiveAnswer(entry, message, finalText = "") {
     entry.answerStartedSegments.add(segmentId);
     if (!entry.segmentOrder.includes(segmentId)) entry.segmentOrder.push(segmentId);
     ensureLiveSegmentBlock(entry, segmentId);
-    orderLiveSegmentBlocks(entry, segmentId, segment.sequence);
+    orderLiveSegmentBlocks(entry, segmentId, segment.turnSequence || segment.sequence);
   }
   entry.activeSegmentId = String(segments[0]?.segmentId || "").trim();
   placeLiveStructuredResultPanel(entry, entry.activeSegmentId);
@@ -12531,13 +13638,23 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
   const responseMessageId = String(message?.id || message?.raw?.productResult?.responseMessageId || entry.responseMessageId || "");
   if (responseMessageId && !message?.id) message = { ...message, id: responseMessageId };
   entry.responseMessageId = responseMessageId;
-  if (entry.elapsedTimer) clearInterval(entry.elapsedTimer);
-  entry.elapsedTimer = null;
+  reportStartupMetric("cross-reply:renderer:finalize-received", {
+    sessionId: entry.sessionId,
+    turnId: entry.turnId,
+    streamId,
+    responseMessageId,
+    rowConnected: Boolean(entry.row?.isConnected),
+    renderedConnected: Boolean(entry.rendered?.isConnected),
+    hasAnswerText: Boolean(String(message?.text || "").trim()),
+    hasStructuredEvents: structuredEventsFromMessage(message).length > 0
+  });
   if (entry.firstEventTimer) clearTimeout(entry.firstEventTimer);
   if (entry.requestTimeoutTimer) clearTimeout(entry.requestTimeoutTimer);
+  if (entry.noProgressTimer) clearInterval(entry.noProgressTimer);
   if (entry.completionTimer) clearTimeout(entry.completionTimer);
   entry.firstEventTimer = null;
   entry.requestTimeoutTimer = null;
+  entry.noProgressTimer = null;
   entry.completionTimer = null;
   const authoredAnswerText = answerSegmentsFromMessage(message)
     .map((segment) => String(segment.text || ""))
@@ -12546,9 +13663,16 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
     blackBallBrandText(message?.text || authoredAnswerText || entry.text || "")
   );
   if (!finalText) {
-    discardLiveChatStream(streamId);
+    discardLiveChatStream(streamId, { reason: "empty_durable_answer" });
     return null;
   }
+  if (entry.turnState === LIVE_TURN_STATES.CREATED) {
+    transitionLiveTurn(entry, LIVE_TURN_STATES.RUNNING);
+  }
+  transitionLiveTurn(entry, LIVE_TURN_STATES.ANSWER_COMMITTED);
+  entry.runtimeOutcome = messageRuntimeOutcome(message);
+  freezeLiveStreamElapsed(entry);
+  syncSessionRuntimeControls(entry.sessionId);
   entry.finalizing = true;
   message = { ...message, text: finalText };
   const row = ensureLiveStreamRow(entry);
@@ -12563,12 +13687,22 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
   const normalizedFinalText = normalizeFinalText(finalDisplayText);
   const hasStreamedAnswer = Boolean(normalizedStreamedText);
   const finalTextDiffers = normalizedStreamedText !== normalizedFinalText;
-  const finalExtendsStream = Boolean(normalizedStreamedText && normalizedFinalText.startsWith(normalizedStreamedText));
+  const finalExtendsStream = Boolean(
+    streamedDisplayText
+      && finalDisplayText.length > streamedDisplayText.length
+      && finalDisplayText.startsWith(streamedDisplayText)
+  );
   // A durable final answer can arrive without deltas. Bind it before painting
   // and keep the live process rail until those visible characters are drained.
   // The durable payload may contain structured events that arrived after the
   // last live frame. Render only those real events before committing the answer.
-  structuredEventsFromMessage(message).forEach((event) => appendLiveStructuredResult(entry, event));
+  const durableStructuredEvents = structuredEventsFromMessage(message);
+  durableStructuredEvents.forEach((event) => appendLiveStructuredResult(entry, event));
+  answerSegmentsFromMessage(message).forEach((event) => acceptLiveTurnEvent(entry, event, {
+    target: "answer",
+    type: event.type || "answer_segment"
+  }));
+  recycleLiveStructuredProcess(entry, "", { transientOnly: true, respectMinimum: false });
   if (!hasStreamedAnswer) bindFinalOnlyLiveAnswer(entry, message, finalDisplayText);
   const applyCompletedRow = () => {
     if (!liveChatStreams.has(streamId) || entry.finalized) return;
@@ -12577,11 +13711,22 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
     entry.finalized = true;
     entry.finalizing = false;
     entry.finalizeWhenDrained = null;
+    transitionLiveTurn(entry, LIVE_TURN_STATES.VIEW_DRAINED);
+    if (entry.elapsedTimer) clearInterval(entry.elapsedTimer);
+    if (entry.completionTimer) clearTimeout(entry.completionTimer);
+    entry.elapsedTimer = null;
     entry.completionTimer = null;
-    hideLiveThinkingLayer(entry);
-    const currentRow = entry.row?.isConnected ? entry.row : row;
+    hideLiveThinkingLayer(entry, { allStructured: true, respectMinimum: false });
+    const currentRow = entry.row?.isConnected ? entry.row : ensureLiveStreamRow(entry);
     if (!currentRow) {
-      liveChatStreams.delete(streamId);
+      reportStartupMetric("cross-reply:renderer:finalize-no-row", {
+        sessionId: entry.sessionId,
+        turnId: entry.turnId,
+        streamId,
+        responseMessageId,
+        rowConnected: false
+      });
+      closeLiveChatStream(streamId, { reason: "view_drained_without_row" });
       return;
     }
     // Keep the stream-owned row in place. Replacing it with a newly rendered
@@ -12589,14 +13734,19 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
     const rendered = entry.rendered || currentRow.querySelector(":scope > .bubble > .rendered");
     // Measure the run before removing its temporary process surface. The
     // stream-owned answer row remains in place throughout finalization.
-    const completedDurationMs = Math.max(
-      0,
-      Number(options.durationMs || 0),
-      Date.now() - Number(entry.startedAt || Date.now())
-    );
+    const completedDurationMs = Number(entry.completedAt) > 0
+      ? Math.max(0, Number(entry.completedDurationMs || 0), Number(options.durationMs || 0))
+      : Math.max(
+        0,
+        Number(options.durationMs || 0),
+        Date.now() - Number(entry.startedAt || Date.now())
+      );
     entry.completedDurationMs = completedDurationMs;
     mutatePreservingMessageViewport(() => {
       flushLiveActivityPaint(entry);
+      const answerPaintIncomplete = Number(entry.revealedLength || 0) < Number(entry.targetChars?.length || 0)
+        || (Boolean(finalDisplayText.trim()) && ![...rendered?.querySelectorAll?.(".stream-segment-answer") || []]
+          .some((answer) => String(answer.textContent || "").trim()));
       // Once answer text is visible, its nodes are immutable. A mismatched
       // durable payload is a protocol failure, not permission to replay it.
       if (rendered && !hasStreamedAnswer) {
@@ -12607,16 +13757,10 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
         entry.targetText = finalDisplayText;
         entry.targetChars = entry.visibleChars;
         entry.revealedLength = entry.targetChars.length;
+        entry.segmentBlocks?.forEach?.((block) => { block.renderedVisibleCount = -1; });
         renderSegmentedLiveAnswer(entry);
-      } else if (rendered && finalExtendsStream) {
-        appendLiveFinalAnswerSuffix(entry, rendered, normalizedStreamedText, normalizedFinalText);
-        entry.text = finalDisplayText;
-        entry.streamedAnswerText = finalDisplayText;
-        entry.visibleText = finalDisplayText;
-        entry.visibleChars = Array.from(finalDisplayText);
-        entry.targetText = finalDisplayText;
-        entry.targetChars = entry.visibleChars;
-        entry.revealedLength = entry.targetChars.length;
+      } else if (rendered && (finalExtendsStream || answerPaintIncomplete)) {
+        renderSegmentedLiveAnswer(entry);
         bindRenderedLinks(rendered);
         classifyRenderedDataLayout(rendered, { preserveWide: true, source: finalDisplayText });
       } else if (rendered) {
@@ -12624,54 +13768,125 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
         bindRenderedLinks(rendered);
         classifyRenderedDataLayout(rendered, { preserveWide: true, source: entry.visibleText || entry.text });
       }
+      if (rendered && durableStructuredEvents.length) {
+        renderPersistedSegmentPairs(message, rendered);
+      }
       currentRow.classList.remove("streaming-response");
       currentRow.dataset.contentReady = "1";
       delete currentRow.dataset.streamId;
       if (responseMessageId) currentRow.dataset.messageId = responseMessageId;
       entry.row = currentRow;
-      entry.activity = collapseCompletedExecutionActivity(entry.activity, completedDurationMs, entry.activityDetails);
+      const bubble = currentRow.querySelector(":scope > .bubble");
+      const hasSegmentedDetails = Boolean(rendered?.querySelector?.(".stream-segment-block"));
+      if (entry.activity) entry.activity.dataset.segmentedDetailsOwner = hasSegmentedDetails ? "1" : "0";
+      entry.activity = collapseCompletedExecutionActivity(entry.activity, completedDurationMs, [
+        ...entry.activityDetails,
+        ...entry.structuredEvents
+      ]);
+      const knowledgeReferences = bubble?.querySelector?.(":scope > .message-knowledge-references")
+        || createMessageKnowledgeReferences(message);
+      if (knowledgeReferences && !placeKnowledgeReferencesInExecutionHeader(entry.activity, knowledgeReferences)) {
+        bubble?.insertBefore(knowledgeReferences, rendered || null);
+      }
+      if (hasSegmentedDetails && entry.activity) {
+        rendered.querySelectorAll(
+          ".stream-segment-process, .stream-segment-reasoning"
+        ).forEach((detail) => { detail.hidden = true; });
+        // Keep the elapsed-time anchor and its expandable history before the
+        // committed answer, so the result remains the terminal visual block.
+        if (bubble && rendered) bubble.insertBefore(entry.activity, rendered);
+        else bubble?.appendChild(entry.activity);
+      }
       const committedText = hasStreamedAnswer && !finalExtendsStream
         ? streamedDisplayText
         : finalDisplayText;
-      const bubble = currentRow.querySelector(":scope > .bubble");
-      ensureAssistantCopyAction(bubble, () => committedText || rendered?.textContent || "");
+      setAnswerResultDocument(rendered, committedText, message);
+      entry.segmentBlocks?.forEach?.((block) => {
+        if (!block?.answer?.isConnected) return;
+        const source = String(block.answer._resultAst?.source || "");
+        if (source) decorateAnswerResult(block.answer, source, message);
+      });
+      ensureAssistantCopyAction(bubble, () => answerResultCopyText(rendered, committedText || rendered?.textContent || ""));
       evaluateLongReply(currentRow, rendered, committedText, { keepExpanded: true });
     });
+    reportStartupMetric("cross-reply:renderer:finalize-dom", {
+      sessionId: entry.sessionId,
+      turnId: entry.turnId,
+      streamId,
+      responseMessageId,
+      rowConnected: Boolean(currentRow.isConnected),
+      renderedConnected: Boolean(rendered?.isConnected),
+      hasAnswerText: Boolean(String(rendered?.textContent || "").trim()),
+      persistedRowAdopted: entry.persistedRowAdopted
+    });
     showFreshComposerSuggestions(message, { sessionId: entry.sessionId });
-    liveChatStreams.delete(streamId);
     locallyCompletedSessions.add(entry.sessionId);
+    closeLiveChatStream(streamId, { reason: "view_drained" });
   };
-  if (!String(entry.text || "").trim()) entry.text = finalDisplayText;
-  else if (finalExtendsStream) entry.text = finalDisplayText;
+  if (!String(entry.text || "").trim()) {
+    entry.text = finalDisplayText;
+  } else if (finalExtendsStream) {
+    const suffix = finalDisplayText.slice(streamedDisplayText.length);
+    const lastSegmentId = String(entry.segmentOrder?.at?.(-1) || entry.activeSegmentId || "__default");
+    const segmentChars = entry.segmentCharsById?.get(lastSegmentId) || [];
+    entry.segmentCharsById ||= new Map();
+    entry.segmentCharsById.set(lastSegmentId, segmentChars.concat(Array.from(suffix)));
+    entry.text = finalDisplayText;
+  } else if (finalTextDiffers) {
+    reportLiveTurnProtocolError(entry, "durable_answer_conflicts_with_stream", {
+      turnId: entry.turnId,
+      eventId: responseMessageId || `${entry.turnId}:durable-answer`,
+      sequence: Number.MAX_SAFE_INTEGER,
+      target: "answer",
+      type: "answer_commit"
+    });
+  }
   entry.streamedAnswerText = String(entry.text || "");
   entry.backendCompleted = true;
   entry.terminalType ||= "finalized";
   entry.finalizeWhenDrained = applyCompletedRow;
+  const drainCharacters = Math.max(
+    Number(entry.targetChars?.length || 0),
+    Array.from(finalDisplayText || "").length
+  );
+  const drainSeconds = drainCharacters / Math.max(1, ASSISTANT_TYPING_MIN_CHARS_PER_SECOND);
+  const drainDeadline = Date.now() + Math.max(5000, Math.ceil((drainSeconds + 2) * 1000));
+  const watchVisibleDrain = () => {
+    if (!liveChatStreams.has(streamId) || entry.finalized) return;
+    if (entry.completionTimer) clearTimeout(entry.completionTimer);
+    entry.completionTimer = setTimeout(() => {
+      if (!liveChatStreams.has(streamId) || entry.finalized) return;
+      const revealedLength = Number(entry.revealedLength || 0);
+      const targetLength = Number(entry.targetChars?.length || 0);
+      if (targetLength > revealedLength && entry.row?.isConnected && Date.now() < drainDeadline) {
+        scheduleLiveChatStreamPaint(entry, true);
+        watchVisibleDrain();
+        return;
+      }
+      applyCompletedRow();
+    }, 3000);
+  };
   if (row?.isConnected) {
     updateLiveStreamElapsed(entry);
   }
-  if (entry.persistedRowAdopted || (hasStreamedAnswer && finalTextDiffers)) applyCompletedRow();
-  else flushLiveChatStream(entry);
+  if (entry.persistedRowAdopted) applyCompletedRow();
+  else {
+    flushLiveChatStream(entry);
+    watchVisibleDrain();
+  }
   if (followAtFinalize && !instructionAnchorId(entry.sessionId)) scheduleStreamingScroll();
   return row;
 }
 
-function discardLiveChatStreamsForSession(sessionId) {
+function discardLiveChatStreamsForSession(sessionId, options = {}) {
+  const force = options.force === true;
   for (const [streamId, entry] of liveChatStreams) {
     if (entry.sessionId !== sessionId) continue;
-    if (entry.finalizing && typeof entry.finalizeWhenDrained === "function") continue;
-    if (entry.paintTimer) clearTimeout(entry.paintTimer);
-    if (entry.paintFrame) cancelAnimationFrame(entry.paintFrame);
-    if (entry.elapsedTimer) clearInterval(entry.elapsedTimer);
-    if (entry.completionTimer) clearTimeout(entry.completionTimer);
-    if (entry.firstEventTimer) clearTimeout(entry.firstEventTimer);
-    if (entry.requestTimeoutTimer) clearTimeout(entry.requestTimeoutTimer);
-    if (entry.noProgressTimer) clearInterval(entry.noProgressTimer);
-    if (entry.activityPaintFrame) cancelAnimationFrame(entry.activityPaintFrame);
-    stopExecutionActivityFlow(entry.activity);
-    removeThinkingMessage(entry.thinkingRow);
-    releaseLiveChatStreamRow(entry);
-    liveChatStreams.delete(streamId);
+    if (!force && entry.finalizing && typeof entry.finalizeWhenDrained === "function") continue;
+    closeLiveChatStream(streamId, {
+      force: true,
+      reason: force ? "forced_session_cleanup" : "session_cleanup"
+    });
   }
   removeSessionExecutionIndicator(sessionId);
 }
@@ -12683,8 +13898,15 @@ function releaseLiveChatStreamRow(entry) {
     entry.row?.remove();
     return;
   }
-  entry.activity?.remove?.();
-  entry.activity = null;
+  const completedActivity = entry.activity?.matches?.(".execution-activity-completed")
+    ? entry.activity
+    : null;
+  if (completedActivity) {
+    completedActivity.hidden = false;
+  } else {
+    entry.activity?.remove?.();
+    entry.activity = null;
+  }
   if (!entry.row) return;
   entry.row.hidden = false;
   entry.row.classList.remove("streaming-response");
@@ -12695,22 +13917,64 @@ function releaseLiveChatStreamRow(entry) {
   if (answerText) ensureAssistantCopyAction(bubble, () => answerText);
 }
 
-function discardLiveChatStream(streamId) {
+function closeLiveChatStream(streamId, options = {}) {
   const entry = liveChatStreams.get(streamId);
-  if (!entry) return;
-    if (entry.paintTimer) clearTimeout(entry.paintTimer);
-    if (entry.paintFrame) cancelAnimationFrame(entry.paintFrame);
-    if (entry.elapsedTimer) clearInterval(entry.elapsedTimer);
-    if (entry.completionTimer) clearTimeout(entry.completionTimer);
-    if (entry.firstEventTimer) clearTimeout(entry.firstEventTimer);
-    if (entry.requestTimeoutTimer) clearTimeout(entry.requestTimeoutTimer);
-    if (entry.noProgressTimer) clearInterval(entry.noProgressTimer);
-    if (entry.activityPaintFrame) cancelAnimationFrame(entry.activityPaintFrame);
+  if (!entry) return true;
+  const force = options.force === true;
+  if (!force && entry.turnState !== LIVE_TURN_STATES.VIEW_DRAINED) return false;
+  transitionLiveTurn(entry, LIVE_TURN_STATES.CLOSED, { force });
+  entry.closeReason = String(options.reason || (force ? "forced" : "view_drained"));
+  miniTheatre.finish(streamId, entry.timedOut || entry.terminalType === "error" ? "failure" : "cancelled", entry.completedAt || Date.now());
+  if (entry.paintTimer) clearTimeout(entry.paintTimer);
+  if (entry.paintFrame) cancelAnimationFrame(entry.paintFrame);
+  if (entry.elapsedTimer) clearInterval(entry.elapsedTimer);
+  if (entry.completionTimer) clearTimeout(entry.completionTimer);
+  if (entry.firstEventTimer) clearTimeout(entry.firstEventTimer);
+  if (entry.requestTimeoutTimer) clearTimeout(entry.requestTimeoutTimer);
+  if (entry.noProgressTimer) clearInterval(entry.noProgressTimer);
+  if (entry.reasoningRevealTimer) clearTimeout(entry.reasoningRevealTimer);
+  if (entry.activityPaintFrame) cancelAnimationFrame(entry.activityPaintFrame);
+  if (force) {
+    for (const node of entry.structuredNodes?.values?.() || []) {
+      if (node.__structuredFadeTimer) clearTimeout(node.__structuredFadeTimer);
+      if (node.__structuredPaintFrame) cancelAnimationFrame(node.__structuredPaintFrame);
+      node.remove?.();
+    }
+  }
   stopExecutionActivityFlow(entry.activity);
   removeThinkingMessage(entry.thinkingRow);
   releaseLiveChatStreamRow(entry);
+  reportStartupMetric("cross-reply:renderer:stream-close", {
+    sessionId: entry.sessionId,
+    turnId: entry.turnId,
+    streamId,
+    responseMessageId: entry.responseMessageId,
+    reason: entry.closeReason,
+    rowConnected: Boolean(entry.row?.isConnected),
+    renderedConnected: Boolean(entry.rendered?.isConnected),
+    hasAnswerText: Boolean(String(entry.rendered?.textContent || entry.streamedAnswerText || entry.text || "").trim()),
+    persistedRowAdopted: entry.persistedRowAdopted,
+    finalized: entry.finalized,
+    finalizing: entry.finalizing
+  });
   liveChatStreams.delete(streamId);
   removeSessionExecutionIndicator(entry.sessionId);
+  releaseActiveSendOwner(entry.sessionId, streamId);
+  sessionTaskQueue.setActive(entry.sessionId, false);
+  state.abortRequestedSessions.delete(entry.sessionId);
+  state.abortedStreamIds.delete(streamId);
+  if (!force && entry.sendFinallyCompleted === true) {
+    queueMicrotask(() => processQueue(entry.sessionId));
+  }
+  return true;
+}
+
+function discardLiveChatStream(streamId, options = {}) {
+  return closeLiveChatStream(streamId, {
+    ...options,
+    force: true,
+    reason: options.reason || "discarded"
+  });
 }
 
 function formatTaskDuration(durationMs) {
@@ -12924,7 +14188,7 @@ function productResultText(result = {}) {
     result.result?.response?.error
   ];
   const text = candidates.find((value) => typeof value === "string" && value.trim());
-  return text?.trim() || (result.success ? "任务完成。" : "");
+  return text?.trim() || "";
 }
 
 function isTaskBrainConfirmation(result = {}) {
@@ -13088,6 +14352,9 @@ function restoreSessionMessageDom(sessionId) {
   const cached = state.sessionMessageDomCache.get(sessionId);
   if (!cached?.fragment?.childNodes?.length) return false;
   state.sessionMessageDomCache.delete(sessionId);
+  for (const message of Array.isArray(cached.messages) ? cached.messages : []) {
+    rememberAuthoritativeMessage(sessionId, message);
+  }
   messageList.replaceChildren(cached.fragment);
   state.lastRenderedSessionId = sessionId;
   state.lastMessageSignature = cached.signature;
@@ -13117,6 +14384,13 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
     state.messageWindowOffsets.set(session.id, Math.max(0, Number(savedSessionPosition.windowOffset)));
   }
   const requestedOffset = Math.max(0, Number(state.messageWindowOffsets.get(session.id) || 0));
+  let historySource = prefetchedMessages?.sessionId === session.id && prefetchedMessages.history !== null ? "prefetched" : "ipc";
+  reportStartupMetric("cross-reply:renderer:history-request", {
+    sessionId: session.id,
+    renderEpoch,
+    selectionEpoch: sessionSelectionEpoch,
+    source: historySource
+  });
   let history = prefetchedMessages?.sessionId === session.id && prefetchedMessages.history !== null
     ? prefetchedMessages.history
     : await api.messages(session.id, { limit: MESSAGE_WINDOW_SIZE, offset: requestedOffset });
@@ -13129,6 +14403,7 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
   // conversation already held by the renderer.
   if (history == null || (historyCount(history) === 0 && historyCount(cachedHistory) > 0)) {
     history = cachedHistory || history;
+    if (cachedHistory) historySource = "history-cache";
   }
   // A failed IPC read is different from a valid empty conversation. Keep the
   // current DOM intact until a real history response arrives. Locally received
@@ -13151,6 +14426,16 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
   const messages = historyIsWindow
     ? allMessages
     : allMessages.slice(Math.max(0, allMessages.length - resolvedOffset - MESSAGE_WINDOW_SIZE), allMessages.length - resolvedOffset);
+  reportStartupMetric("cross-reply:renderer:history-result", {
+    sessionId: session.id,
+    renderEpoch,
+    selectionEpoch: sessionSelectionEpoch,
+    source: historySource,
+    messageCount: messages.length,
+    lastMessageId: messages.at(-1)?.id || "",
+    messageIds: messages.map((message) => message?.id || ""),
+    assistantMessageIds: messages.filter((message) => message?.role === "assistant").map((message) => message?.id || "")
+  });
   const windowStart = historyIsWindow ? Number(history.start || 0) : Math.max(0, totalMessages - resolvedOffset - messages.length);
   const windowEnd = historyIsWindow ? Number(history.end || 0) : windowStart + messages.length;
   state.messageWindowOffsets.set(session.id, resolvedOffset);
@@ -13174,8 +14459,28 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
   const signature = `${session.id}:${windowStart}:${windowEnd}:${totalMessages}:${tail}`;
   const activeTyping = activeAssistantTypingForSession(session.id);
   const activeStream = activeLiveChatStreamForSession(session.id);
-  if (signature !== state.lastMessageSignature || sessionChanged) {
-    if ((activeTyping || activeStream) && !sessionChanged) {
+  const activeStreamOwnsVisibleRow = liveChatStreamOwnsVisibleRow(activeStream);
+  const activeMessageId = String(
+    activeStream?.responseMessageId
+    || activeTyping?.row?.dataset?.messageId
+    || ""
+  );
+  const durableActiveMessage = activeMessageId
+    ? visibleMessages.find((message) => String(message?.id || "") === activeMessageId)
+    : null;
+  const durableActiveAnswerCommitted = Boolean(
+    durableActiveMessage && messageHasTerminalExecution(durableActiveMessage)
+  );
+  const activeTypingBlocksRender = Boolean(activeTyping && !durableActiveAnswerCommitted);
+  const activeStreamBlocksRender = Boolean(
+    activeStreamOwnsVisibleRow
+    && liveChatStreamRuntimePhase(activeStream) === "running"
+    && !durableActiveAnswerCommitted
+  );
+  if (signature !== state.lastMessageSignature
+    || sessionChanged
+    || !renderedMessageWindowMatches(visibleMessages)) {
+    if ((activeTypingBlocksRender || activeStreamBlocksRender) && !sessionChanged) {
       // Persisted results can arrive before the local 125 chars/sec reveal ends.
       // Keep the response row owned by its client/response message binding.
       if (renderedMessageWindowMatches(visibleMessages)) {
@@ -13191,6 +14496,7 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
       state.lastMessageSignature = signature;
       requestAnimationFrame(updateReadingControls);
     } else {
+      if (durableActiveAnswerCommitted && activeTyping) cancelAssistantTyping(session.id);
       const fragment = document.createDocumentFragment();
       clearComposerClarification();
       if (windowStart > 0) fragment.appendChild(createMessageWindowControl({ action: "older", label: "查看更早消息", count: windowStart }));
@@ -13209,7 +14515,22 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
           count: remaining
         }));
       }
+      reportStartupMetric("cross-reply:renderer:replace-start", {
+        sessionId: session.id,
+        renderEpoch,
+        messageCount: visibleMessages.length,
+        lastMessageId: visibleMessages.at(-1)?.id || "",
+        assistantMessageIds: visibleMessages.filter((message) => message?.role === "assistant").map((message) => message?.id || "")
+      });
       mutatePreservingMessageViewport(() => messageList.replaceChildren(fragment));
+      const assistantRowsAfterReplace = [...messageList.querySelectorAll(":scope > .message.assistant")];
+      reportStartupMetric("cross-reply:renderer:replace-complete", {
+        sessionId: session.id,
+        renderEpoch,
+        rowCount: messageList.querySelectorAll(":scope > .message").length,
+        assistantRowCount: assistantRowsAfterReplace.length,
+        assistantMessageIds: assistantRowsAfterReplace.map((row) => row.dataset.messageId || "")
+      });
       messagesReplaced = true;
       requestAnimationFrame(refreshLongReplyCandidates);
       state.lastMessageSignature = signature;
@@ -13700,15 +15021,26 @@ function renderProviderDetails() {
   renderModelCenterOverview();
 }
 
+function normalizedProviderEndpoint(value = "") {
+  return String(value || "")
+    .trim()
+    .replace(/\/(?:chat\/completions|responses|models)\/?$/i, "")
+    .replace(/\/+$/, "");
+}
+
+function providerVerificationMatches(provider = {}) {
+  return Boolean(provider.verifiedAt)
+    && String(provider.verifiedModel || "").trim() === String(provider.model || "").trim()
+    && normalizedProviderEndpoint(provider.verifiedBaseURL) === normalizedProviderEndpoint(provider.baseURL);
+}
+
 function providerConnectionState(key, provider) {
   // 验证失败标记不应永久残留：若配置已满足验证条件，恢复为"待验证"而非"配置异常"，
   // 避免一次验证失败（如临时断网）后配置中心永远显示"配置异常"。
   if (state.providerModelErrors[key] && !(provider?.apiKey || provider?.requiresApiKey === false) && !provider?.model) {
     return { online: false, state: "error", label: "配置异常" };
   }
-  const verified = Boolean(provider?.verifiedAt)
-    && provider.verifiedModel === provider.model
-    && String(provider.verifiedBaseURL || "").replace(/\/+$/, "") === String(provider.baseURL || "").replace(/\/+$/, "");
+  const verified = providerVerificationMatches(provider);
   if (verified) return { online: true, state: "online", label: "已验证" };
   if ((provider?.apiKey || provider?.requiresApiKey === false) && provider?.model) {
     return { online: false, state: "pending", label: "待验证" };
@@ -13785,11 +15117,13 @@ function modelSortMode() {
 
 function configuredModelScore(providerKey, provider = {}, mode = "recommended") {
   const profile = modelPresentationProfile(provider.model, providerKey);
+  const configured = provider.requiresApiKey === false || Boolean(String(provider.apiKey || "").trim());
   const enabled = provider.enabled || providerKey === state.db?.settings?.defaultProvider ? 8 : 0;
   const verified = provider.verifiedAt && provider.verifiedModel === provider.model ? 8 : 0;
-  if (mode === "capability") return profile.capability * 100 + verified * 2 + enabled;
-  if (mode === "common") return profile.common * 100 + verified * 2 + enabled;
-  return profile.capability * 60 + profile.common * 40 + verified * 5 + enabled;
+  const configuredPriority = configured ? 100000 : 0;
+  if (mode === "capability") return configuredPriority + profile.capability * 100 + verified * 2 + enabled;
+  if (mode === "common") return configuredPriority + profile.common * 100 + verified * 2 + enabled;
+  return configuredPriority + profile.capability * 60 + profile.common * 40 + verified * 5 + enabled;
 }
 
 function orderedModelProviders(providers = {}, mode = modelSortMode()) {
@@ -13834,18 +15168,20 @@ function modelProviderIcon(provider = {}, key = "") {
 async function useModelProvider(key) {
   const provider = state.db.settings.providers?.[key];
   if (!provider) return;
-  state.providerModelStatus[key] = "正在进行真实推理验证...";
+  state.providerModelStatus[key] = "正在切换模型...";
   renderModelCenterOverview();
   try {
     const result = await api.activateModel(key);
     state.providerModels[key] = result?.verification?.models || [];
     state.providerLastChecked[key] = Date.now();
     state.providerModelErrors[key] = false;
-    state.providerModelStatus[key] = `真实推理验证通过，响应 ${result?.verification?.latencyMs ?? "--"}ms`;
+    state.providerModelStatus[key] = result?.reusedVerification
+      ? "已复用验证记录并切换"
+      : `真实推理验证通过，响应 ${result?.verification?.latencyMs ?? "--"}ms`;
     providerSelect.value = key;
     state.db = await api.init();
     renderSettings();
-    showCopyToast(`已验证并切换到 ${provider.name || key}`, 2200);
+    showCopyToast(`已切换到 ${provider.name || key}`, 2200);
   } catch (error) {
     state.providerModelErrors[key] = true;
     state.providerModelStatus[key] = error?.message || String(error);
@@ -13865,7 +15201,7 @@ async function toggleModelProvider(key, enabled) {
     return;
   }
   try {
-    state.providerModelStatus[key] = enabled ? "正在验证并接入黑球..." : "正在停用...";
+    state.providerModelStatus[key] = enabled ? "正在接入黑球..." : "正在停用...";
     const result = await api.setModelEnabled({ providerId: key, enabled });
     state.providerModels[key] = result?.models || state.providerModels[key] || [];
     state.providerModelErrors[key] = false;
@@ -13891,13 +15227,24 @@ async function toggleModelProvider(key, enabled) {
 const API_KEY_MASK = "***************";
 
 function bindSavedApiKeyMask(input) {
-  if (!input || input.dataset.savedApiKey !== "1") return;
-  input.addEventListener("focus", () => {
-    requestAnimationFrame(() => input.select());
-  });
+  if (!input) return;
+  const confirmButton = input.closest(".configured-model-api-key")?.querySelector("[data-confirm-api-key]");
+  const renderConfirmationState = () => {
+    if (!confirmButton) return;
+    const saved = input.dataset.savedApiKey === "1" && input.value === API_KEY_MASK;
+    confirmButton.disabled = saved;
+    confirmButton.textContent = saved ? "已保存" : "验证并保存";
+  };
+  if (input.dataset.savedApiKey === "1") {
+    input.addEventListener("focus", () => {
+      requestAnimationFrame(() => input.select());
+    });
+  }
   input.addEventListener("input", () => {
     if (input.value !== API_KEY_MASK) input.dataset.savedApiKey = "0";
+    renderConfirmationState();
   });
+  renderConfirmationState();
 }
 
 async function confirmProviderApiKey(key, input) {
@@ -13909,7 +15256,7 @@ async function confirmProviderApiKey(key, input) {
     return;
   }
   if (!value) {
-    showCopyToast("请输入 API Key 后再确认", 2200);
+    showCopyToast("请输入 API Key 后再保存", 2200);
     input?.focus();
     return;
   }
@@ -13929,7 +15276,7 @@ async function confirmProviderApiKey(key, input) {
     state.providerModelStatus[key] = `已验证 ${result?.provider?.model || "真实模型"}`;
     state.db = await api.init();
     renderSettings({ heavy: false });
-    showCopyToast("API Key 已验证并接入黑球", 2200);
+    showCopyToast("接口正文验证通过，配置已保存", 2200);
   } catch (error) {
     state.providerModelErrors[key] = true;
     state.providerModelStatus[key] = error?.message || String(error);
@@ -13999,9 +15346,7 @@ function configuredProviderCardState(key, provider, selected = false) {
   const missingKey = provider.requiresApiKey !== false && !String(provider.apiKey || "").trim();
   const missingEndpoint = !String(provider.baseURL || "").trim() || !String(provider.model || "").trim();
   if (missingKey || missingEndpoint) return { state: "offline", label: "待配置" };
-  const verified = Boolean(provider.verifiedAt)
-    && provider.verifiedModel === provider.model
-    && String(provider.verifiedBaseURL || "").replace(/\/+$/, "") === String(provider.baseURL || "").replace(/\/+$/, "");
+  const verified = providerVerificationMatches(provider);
   if (!verified) return { state: "pending", label: "待验证" };
   if (selected && provider.enabled) return { state: "active", label: "当前使用" };
   if (provider.enabled) return { state: "online", label: "已启用 · 可切换" };
@@ -14062,12 +15407,10 @@ function renderModelCenterOverview() {
             <span class="sr-only">API Key</span>
             <input type="password" data-provider-api-key="${escapeHtml(key)}" data-saved-api-key="${hasSavedApiKey ? "1" : "0"}" value="${escapeHtml(keyValue)}" placeholder="${escapeHtml(keyPlaceholder)}" autocomplete="off" spellcheck="false" aria-label="${hasSavedApiKey ? "API Key 已保存，输入可替换" : "输入 API Key"}">
           </label>
-          <button type="button" data-confirm-api-key="${escapeHtml(key)}">确认</button>
+          <button type="button" data-confirm-api-key="${escapeHtml(key)}"${hasSavedApiKey ? " disabled" : ""}>${hasSavedApiKey ? "已保存" : "验证并保存"}</button>
         </div>
         <div class="configured-model-controls">
-          <span>模型启用</span>
           <button type="button" data-delete-api-key="${escapeHtml(key)}">删除 API Key</button>
-          <label class="model-enabled-toggle" title="启用或停用模型"><input type="checkbox" data-toggle-provider="${escapeHtml(key)}"${provider.enabled ? " checked" : ""}><span></span></label>
         </div>
       </article>
     `;
@@ -14086,20 +15429,15 @@ function renderModelCenterOverview() {
   configuredModelList.querySelectorAll("[data-open-provider-url]").forEach((button) => {
     button.addEventListener("click", () => tryOpenExternalUrl(button.dataset.openProviderUrl));
   });
-  configuredModelList.querySelectorAll("[data-toggle-provider]").forEach((input) => {
-    input.addEventListener("change", () => toggleModelProvider(input.dataset.toggleProvider, input.checked));
-  });
   configuredModelList.querySelectorAll("[data-provider-card]").forEach((card) => {
     card.addEventListener("click", (event) => {
       if (event.target.closest("button, input, label")) return;
       const key = card.dataset.providerCard || "";
       if (!key || key === state.db.settings.defaultProvider) return;
       const provider = state.db.settings.providers?.[key] || {};
-      const verified = Boolean(provider.verifiedAt)
-        && provider.verifiedModel === provider.model
-        && String(provider.verifiedBaseURL || "").replace(/\/+$/, "") === String(provider.baseURL || "").replace(/\/+$/, "");
-      if (!provider.enabled || !verified) {
-        showCopyToast("请先打开模型启用并完成真实验证", 2200);
+      const verified = providerVerificationMatches(provider);
+      if (provider.requiresApiKey !== false && !String(provider.apiKey || "").trim() || !String(provider.baseURL || "").trim() || !String(provider.model || "").trim()) {
+        showCopyToast("请先填写 API Key、接口地址和模型版本", 2200);
         return;
       }
       void useModelProvider(key);
@@ -14271,6 +15609,7 @@ function modelVersionsForProvider(key = "", provider = {}) {
 let modelVersionSwitchRevision = 0;
 
 async function selectModelVersion(key, model) {
+  if (reasoningWaterControl?.getAttribute("aria-busy") === "true") return;
   const provider = state.db.settings.providers?.[key];
   const version = String(model || "").trim();
   if (!provider || !version || !modelVersionsForProvider(key, provider).includes(version)) return;
@@ -14287,7 +15626,7 @@ async function selectModelVersion(key, model) {
       providerId: key,
       ...provider,
       model: version,
-      activate: key === state.db.settings.defaultProvider,
+      activate: true,
       strictModel: true
     });
     if (revision !== modelVersionSwitchRevision) return;
@@ -14315,6 +15654,10 @@ async function selectModelVersion(key, model) {
     if (revision === modelVersionSwitchRevision) {
       reasoningWaterControl?.removeAttribute("aria-busy");
       reasoningWaterControl?.classList.remove("switching-model");
+      if (reasoningWaterControl?.dataset.open === "1") {
+        renderReasoningMode();
+        requestAnimationFrame(positionReasoningMenu);
+      }
     }
   }
 }
@@ -14459,7 +15802,6 @@ function renderModelConfigDrawer() {
     ? `<label class="model-config-field"><span>模型供应商</span><select id="modelProviderTypeInput">${modelProviderOptions().map((item) => `<option value="${escapeHtml(item.key)}"${item.key === key ? " selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}</select></label>`
     : "";
   if (modelConfigTitle) modelConfigTitle.textContent = state.modelConfigMode === "add" ? "添加模型" : `${provider.name || key} 配置`;
-  if (testModelConnectionBtn) testModelConnectionBtn.hidden = false;
   modelConfigLayer?.classList.remove("local-model-config");
   modelConfigBody.innerHTML = `
     <section class="model-config-group">
@@ -14530,8 +15872,8 @@ async function saveModelConfig({ closeAfter = false } = {}) {
     return false;
   }
   state.modelConfigSaving = true;
-  [testModelConnectionBtn, modelConfigCancelBtn, saveModelConfigBtn].forEach((button) => { if (button) button.disabled = true; });
-  setModelConfigSaveState("checking", "正在验证并接入黑球...");
+  [modelConfigCancelBtn, saveModelConfigBtn].forEach((button) => { if (button) button.disabled = true; });
+  setModelConfigSaveState("checking", "正在验证模型接口...");
   try {
     const existing = state.db.settings.providers?.[key] || {};
     const result = await api.configureModel({
@@ -14548,15 +15890,15 @@ async function saveModelConfig({ closeAfter = false } = {}) {
     state.providerLastChecked[key] = Date.now();
     state.providerModelErrors[key] = false;
     state.providerModelStatus[key] = models.length
-      ? `已接入黑球，发现 ${models.length} 个真实文本模型`
-      : "已通过真实推理验证并接入黑球";
+      ? `接口验证通过，发现 ${models.length} 个模型；完整任务能力待验证`
+      : "接口正文验证通过；完整任务能力待验证";
     state.db = await api.init();
     state.modelConfigDraft = JSON.parse(JSON.stringify(state.db.settings.providers[key]));
     state.modelConfigSetDefault = state.db.settings.defaultProvider === key;
     state.modelConfigOriginalSnapshot = modelConfigSnapshot(key, state.modelConfigDraft);
     renderSettings({ heavy: false });
-    setModelConfigSaveState("saved", "✓ 已验证并接入黑球");
-    showCopyToast("模型配置已验证并接入黑球", 2400);
+    setModelConfigSaveState("saved", "✓ 接口已验证，配置已保存");
+    showCopyToast("接口验证通过，完整任务能力仍需验证", 2400);
     if (closeAfter) closeModelConfigDrawer();
     return true;
   } catch (error) {
@@ -14564,7 +15906,7 @@ async function saveModelConfig({ closeAfter = false } = {}) {
     return false;
   } finally {
     state.modelConfigSaving = false;
-    [testModelConnectionBtn, modelConfigCancelBtn, saveModelConfigBtn].forEach((button) => { if (button) button.disabled = false; });
+    [modelConfigCancelBtn, saveModelConfigBtn].forEach((button) => { if (button) button.disabled = false; });
   }
 }
 
@@ -14650,6 +15992,7 @@ async function renderAllPass({ refreshSettings = true, refreshSecondary = true, 
       state.selectedSessionId = activeSessions.find((session) => session.id === state.db.selectedSessionId)?.id || activeSessions[0]?.id || "";
     }
     const activeSession = selectedSession();
+    miniTheatre.select(state.selectedSessionId);
     if (activeSession?.id) markSessionRead(activeSession.id);
     const activeProject = activeSession?.projectId
       ? state.db.projects.find((project) => project.id === activeSession.projectId)
@@ -14923,6 +16266,7 @@ function scheduleWechatQrPolling() {
 }
 
 function applyWechatStatus(status = {}) {
+  const wasConnected = Boolean(state.wechat?.connected);
   const qrExpired = status.qrStatus === "expired";
   state.wechat = {
     ...state.wechat,
@@ -14935,6 +16279,12 @@ function applyWechatStatus(status = {}) {
   if (state.wechat.connected) {
     state.wechat.qrDataUrl = "";
     stopWechatQrPolling();
+    if (!wasConnected && !wechatConversationAutoEntered) {
+      wechatConversationAutoEntered = true;
+      void enterWechatConversation();
+    }
+  } else {
+    wechatConversationAutoEntered = false;
   }
   if (wechatStatusPill) wechatStatusPill.textContent = state.wechat.connected ? "已连接" : "未连接";
   if (wechatQrBox) wechatQrBox.dataset.wechatState = state.wechat.connected ? "connected" : state.wechat.available ? "available" : "unavailable";
@@ -14956,6 +16306,7 @@ function applyWechatStatus(status = {}) {
     wechatLastSync.textContent = at ? `最近同步 ${new Date(at).toLocaleString()}` : "微信消息会进入左侧固定的“微信聊天”目录";
   }
   if (unbindWechatBtn) unbindWechatBtn.disabled = !state.wechat.connected;
+  if (disconnectWechatTopBtn) disconnectWechatTopBtn.hidden = !state.wechat.connected;
   setSettingsTabSummary("wechat", state.wechat.connected ? "已连接" : "未连接");
   updateProjectTreePresentation();
 }
@@ -15680,7 +17031,20 @@ function bindDialogOutsideDismiss(dialog, dismiss) {
   });
 }
 
-function openSettingsTab(tab, mode = "external") {
+async function openSettingsTab(tab, mode = "external", options = {}) {
+  if (tab === "wechat") {
+    if (!wechatDialog) return false;
+    if (options.userInitiated !== true) return false;
+    const status = await api.wechatStatus?.().catch(() => null);
+    if (status) applyWechatStatus(status);
+    if (state.wechat?.connected) {
+      await enterWechatConversation();
+      return true;
+    }
+    wechatDialog.showModal();
+    await renderWechatLink({ refreshQr: false });
+    return true;
+  }
   if (tab === "conscious") {
     openConsciousCenter();
     return true;
@@ -15873,7 +17237,7 @@ function openFirstUseGuideTarget(target = "") {
   closeFirstUseGuide();
   requestAnimationFrame(() => {
     const openSetting = (tab) => {
-      openSettingsTab(tab);
+      openSettingsTab(tab, "external", { userInitiated: true });
       requestAnimationFrame(() => flashFirstUseGuideDestination(settingsDialog?.querySelector(`[data-settings-page="${CSS.escape(tab)}"]`)));
     };
     switch (target) {
@@ -16893,19 +18257,17 @@ async function renderInviteOwner() {
 async function renderLicenseControls(knownStatus = null) {
   if (!TEST_PHASE_MEMBERSHIP_ENABLED) {
     applyTestPhaseMembershipIsolation();
-    return;
-  }
-  [
+  } else [
     document.querySelector('[data-settings-tab="invite"]'),
     document.querySelector('[data-settings-page="invite"]'),
     document.querySelector('[data-debug-check="licenseState"]')
   ].filter(Boolean).forEach((element) => { element.hidden = false; });
   const status = knownStatus || await api.ownerStatus().catch(() => ({ owner: false }));
-  if (status.owner) await renderAdminCodeList();
+  if (TEST_PHASE_MEMBERSHIP_ENABLED && status.owner) await renderAdminCodeList();
   if (developerLogsTab) developerLogsTab.hidden = !status.devMode;
   if (developerLogsPage) developerLogsPage.hidden = !status.devMode;
   if (applyOnlineUpdateBtn) applyOnlineUpdateBtn.hidden = Boolean(status.devMode);
-  if (ownerInvitePanel) ownerInvitePanel.hidden = !status.owner;
+  if (ownerInvitePanel) ownerInvitePanel.hidden = !TEST_PHASE_MEMBERSHIP_ENABLED || !status.owner;
   if (publishUpdatePanel) publishUpdatePanel.hidden = !status.owner;
 }
 
@@ -17743,18 +19105,24 @@ async function abortCurrentTask() {
     || activeSendOwners.get(session.id)
     || "";
   if (activeRunId) state.abortedStreamIds.add(activeRunId);
+  releaseActiveSendOwner(session.id, activeRunId);
+  sessionTaskQueue.setActive(session.id, false);
   api.signalAbortChat?.({ sessionId: session.id, runId: activeRunId });
-  discardLiveChatStreamsForSession(session.id);
   taskState.textContent = "正在终止";
   if (monitorMode) monitorMode.textContent = "正在终止";
   try {
     await api.abortChat({ sessionId: session.id, runId: activeRunId });
     sessionTaskQueue.clear(session.id);
+    discardLiveChatStreamsForSession(session.id, { force: true });
     state.db = await api.init();
     await renderAll();
   } catch (error) {
     console.error("[Abort] 终止当前任务失败", error);
   } finally {
+    discardLiveChatStreamsForSession(session.id, { force: true });
+    sessionTaskQueue.setActive(session.id, false);
+    state.abortRequestedSessions.delete(session.id);
+    if (activeRunId) state.abortedStreamIds.delete(activeRunId);
     clearComposerClarification();
   }
 }
@@ -17762,12 +19130,14 @@ async function abortCurrentTask() {
 function sendCurrentTaskWasInterrupted(sessionId, streamId) {
   return state.abortedStreamIds.has(streamId)
     || state.abortRequestedSessions.has(sessionId)
-    || activeSendOwners.get(sessionId) !== streamId;
+    || !activeSendOwnerMatches(sessionId, streamId);
 }
 
 function taskFailureText(error) {
   const raw = String(error?.message || error || "").replace(/^Error:\s*/i, "").trim();
   if (!raw) return "本次请求未完成，请稍后重试。";
+  if (/模型在 30 秒内没有返回首个内容/.test(raw)) return "模型在 30 秒内没有返回首个内容。";
+  if (/连续 2 分钟没有收到模型、工具或正文事件/.test(raw)) return "连续 2 分钟没有收到模型、工具或正文事件。";
   if (error?.code === "HERMES_TOOL_LOOP_LIMIT" || /工具.*(?:重复|上限)|tool.*(?:loop|limit)/i.test(raw)) {
     return "检测到工具重复调用或执行阶段超限，任务已自动停止；已有结果已保留，请确认后再继续。";
   }
@@ -17788,9 +19158,44 @@ function taskFailureText(error) {
     : "本次请求未完成，请检查模型配置和网络连接后重试。";
 }
 
+let wechatSendPending = false;
+let wechatSendRetryAt = 0;
+
 async function sendWechatConversationMessage(session, text, attachments = []) {
   if (!isWechatChatSession(session)) return false;
-  showCopyToast("微信聊天仅供查看和同步，请在手机微信中发送消息");
+  if (wechatSendPending) return true;
+  if (wechatSendRetryAt > Date.now()) {
+    showCopyToast(`微信发送冷却中，还剩 ${Math.ceil((wechatSendRetryAt - Date.now()) / 1000)} 秒；草稿已保留`, 3600);
+    return true;
+  }
+  if (attachments.length) {
+    showCopyToast("当前微信发送接口仅支持文字，附件尚未发送");
+    return true;
+  }
+  const message = String(text || "").trim();
+  if (!message) return true;
+  const draft = chatInput.value;
+  wechatSendPending = true;
+  sendBtn.disabled = true;
+  try {
+    const result = await api.wechatSend({ sessionId: session.id, message });
+    if (result?.code === "WECHAT_SEND_RATE_LIMITED" && Number(result.retryAfterSeconds) > 0) {
+      wechatSendRetryAt = Date.now() + Number(result.retryAfterSeconds) * 1000;
+    }
+    if (!result?.ok) throw new Error(result?.reason || "微信消息未发送成功");
+    if (result.db) state.db = ensureClientDb(result.db);
+    if (state.selectedSessionId === session.id && chatInput.value === draft) {
+      chatInput.value = "";
+      adjustComposerHeight();
+    }
+    await renderAll();
+    showCopyToast("已提交给黑球，等待回复", 1800);
+  } catch (error) {
+    showCopyToast(`发送失败：${error?.message || String(error)}`, 3600);
+  } finally {
+    wechatSendPending = false;
+    sendBtn.disabled = false;
+  }
   return true;
 }
 
@@ -17810,7 +19215,7 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
   const clarificationCardKey = String(task?.ui?.clarificationCardKey || "");
   if (!text && !attachments.length && !quote) return;
   if (isWechatChatSession(session)) {
-    showCopyToast("微信聊天仅供查看和同步，请在手机微信中发送消息");
+    await sendWechatConversationMessage(session, text, attachments);
     return;
   }
   if (session.id === state.selectedSessionId) clearComposerSuggestions();
@@ -17839,6 +19244,8 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
   if (requestedStreamId) streamId = requestedStreamId;
   locallyCompletedSessions.delete(session.id);
   activeSendOwners.set(session.id, streamId);
+  miniTheatre.start({ taskId: streamId, sessionId: session.id, startedAt: taskStartedAt });
+  miniTheatre.select(state.selectedSessionId);
   const userMessage = {
     id: globalThis.crypto?.randomUUID?.() || `message-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     role: "user",
@@ -17866,8 +19273,14 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
     if (message.role === "assistant") {
       const responseMessageId = String(message.raw?.responseMessageId || message.raw?.productResult?.responseMessageId || "");
       if (responseMessageId && !message.id) message = { ...message, id: responseMessageId };
+      if (!Number(message.createdAt)) message = { ...message, createdAt: Date.now() };
     }
     rememberAuthoritativeMessage(session.id, message);
+    if (message.role === "assistant") {
+      const outcome = messageRuntimeOutcome(message);
+      const cancelled = messageExecutionStatusValues(message).some((status) => ["cancelled", "aborted", "interrupted"].includes(status));
+      miniTheatre.finish(streamId, cancelled ? "cancelled" : outcome === "completed" ? "success" : outcome === "waiting" ? "waiting" : "failure");
+    }
     if (!isVisible()) return;
     if (message.role === "assistant") {
       const responseMessageId = String(message.id || message.raw?.productResult?.responseMessageId || "");
@@ -18008,7 +19421,8 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
         context: structuredContext
       });
       if (sendCurrentTaskWasInterrupted(session.id, streamId)) return;
-      const assistantText = productResultText(productResult) || productResult?.text || "操作已完成。";
+      const assistantText = productResultText(productResult) || productResult?.text || "";
+      if (!String(assistantText).trim()) throw new Error("黑球没有返回可持久化答案。");
       addVisibleMessage({ role: "assistant", text: assistantText, raw: { productResult } });
       scrollVisible();
       const awaitingConfirmation = isTaskBrainConfirmation(productResult);
@@ -18028,7 +19442,8 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
       });
       if (sendCurrentTaskWasInterrupted(session.id, streamId)) return;
       updateVisibleProgress("正在验证", 86);
-      const assistantText = productResultText(productResult) || productResult?.text || (productResult?.success ? "任务完成。" : "本次请求没有取得有效结果。");
+      const assistantText = productResultText(productResult) || productResult?.text || "";
+      if (!String(assistantText).trim()) throw new Error("黑球没有返回可持久化答案。");
       const awaitingConfirmation = isTaskBrainConfirmation(productResult);
       const awaitingModel = productResult?.requiresModelConfiguration === true;
       const agentReport = session.type === "Agent" && !awaitingConfirmation;
@@ -18046,42 +19461,39 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
       if (isVisible()) renderProductDashboard(productTask, { devMode: Boolean(owner?.devMode) });
       return;
     }
-    addVisibleMessage({ role: "assistant", text: "当前产品层暂时没有返回结果，请稍后再试。" });
-    scrollVisible();
-    await api.appendMessage(session.id, { role: "assistant", text: "当前产品层暂时没有返回结果，请稍后再试。", raw: { productLayer: true, emptyResult: true } });
+    throw new Error("客户端未连接到黑球任务接口。");
   } catch (error) {
     if (sendCurrentTaskWasInterrupted(session.id, streamId)) return;
     console.error(error);
     const message = taskFailureText(error);
-    const failureMessage = {
-      id: `product-result:${userMessage.id}`,
-      role: "assistant",
-      text: `没有发送成功。\n原因：${message}`,
-      raw: { uiError: true, clientMessageId: userMessage.id }
-    };
-    addVisibleMessage(failureMessage);
+    miniTheatre.finish(streamId, "failure");
+    const liveEntry = liveChatStreams.get(streamId);
+    if (liveEntry) appendLiveStreamNotice(liveEntry, `客户端传输失败：${message}`);
+    showCopyToast(`发送失败：${message}`, 3200);
     scrollVisible();
     updateVisibleProgress("执行失败", 0);
-    await api.appendMessage(session.id, failureMessage).catch(() => null);
   } finally {
     const preserveStreamedView = streamFinalizedInView && isVisible();
-    // The durable result is already terminal at this point. Release the
-    // execution owner before waiting for any remaining paint work.
+    miniTheatre.finish(streamId, "cancelled");
+    // A durable result keeps ownership until its visible typewriter drains.
+    // This prevents a following task from discarding the still-painting row.
     removeThinkingMessage(thinkingRow);
     thinkingRow = null;
     if (clarificationCardKey) state.pendingClarificationCards.delete(clarificationCardKey);
-    if (activeSendOwners.get(session.id) !== streamId) {
+    if (!activeSendOwnerMatches(session.id, streamId)) {
       state.abortedStreamIds.delete(streamId);
+      sessionTaskQueue.setActive(session.id, false);
+      processQueue(session.id);
       return;
     }
     if (!preserveStreamedView) {
       discardLiveChatStream(streamId);
+      releaseActiveSendOwner(session.id, streamId);
+      sessionTaskQueue.setActive(session.id, false);
     }
-    activeSendOwners.delete(session.id);
-    sessionTaskQueue.setActive(session.id, false);
     updateProjectTreePresentation();
     state.db = await api.init();
-    if (activeSendOwners.has(session.id)) {
+    if (activeSendOwners.has(session.id) && !activeSendOwnerMatches(session.id, streamId)) {
       state.abortedStreamIds.delete(streamId);
       return;
     }
@@ -18112,6 +19524,8 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
     if (preserveStreamedView) scheduleStreamingScroll();
     else scrollVisible();
     if (isVisible()) state.forceScrollBottom = false;
+    const drainingEntry = liveChatStreams.get(streamId);
+    if (drainingEntry) drainingEntry.sendFinallyCompleted = true;
     processQueue(session.id);
   }
 }
@@ -18316,10 +19730,17 @@ chatInput.addEventListener("keydown", (event) => {
   }
 });
 
+sendBtn.addEventListener("click", async (event) => {
+  const session = selectedSession();
+  if (!state.busy && !sessionIsRunning(session)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  await abortCurrentTask();
+});
 chatForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (isWechatChatSession(selectedSession())) {
-    await syncWechatConversation();
+    await sendWechatConversationMessage(selectedSession(), chatInput.value, state.attachments);
     return;
   }
   if (voiceRecorder?.state === "recording") {
@@ -18343,6 +19764,7 @@ window.addEventListener("beforeunload", () => {
 });
 composerClarificationAbort?.addEventListener("click", () => {
   if (state.onboardingOpen) {
+    try { localStorage.setItem(PROFILE_ONBOARDING_DISMISSED_KEY, "1"); } catch {}
     clearComposerClarification();
     return;
   }
@@ -18418,6 +19840,7 @@ reasoningWaterControl?.addEventListener("click", async (event) => {
 window.addEventListener("resize", positionReasoningMenu, { passive: true });
 window.addEventListener("scroll", positionReasoningMenu, { passive: true, capture: true });
 reasoningWaterControl?.addEventListener("keydown", (event) => {
+  if (event.target !== reasoningWaterControl) return;
   if (event.key !== "Enter" && event.key !== " ") return;
   event.preventDefault();
   reasoningWaterControl.click();
@@ -18425,7 +19848,7 @@ reasoningWaterControl?.addEventListener("keydown", (event) => {
 
 document.addEventListener("click", (event) => {
   if (slashCommandMenu && !chatForm?.contains(event.target)) hideSlashCommandMenu();
-  if (reasoningWaterControl && !reasoningWaterControl.contains(event.target)) {
+  if (reasoningWaterControl && !event.composedPath().includes(reasoningWaterControl)) {
     reasoningWaterControl.dataset.open = "0";
     reasoningWaterControl.setAttribute("aria-expanded", "false");
   }
@@ -18500,11 +19923,12 @@ sessionSearch?.addEventListener("input", () => {
 
 $("settingsBtn").addEventListener("click", () => openSettingsTab("skin", "settings"));
 profileOnboardingBtn?.addEventListener("click", () => void openUserProfileOnboarding());
-wechatBtn?.addEventListener("click", () => openSettingsTab("wechat", "settings"));
+modelQuickBtn?.addEventListener("click", () => openSettingsTab("model", "settings"));
 currentModelBadge?.addEventListener("click", () => openSettingsTab("model"));
 updateQuickBtn?.addEventListener("click", async () => {
   await runQuickUpdate();
 });
+consciousQuickBtn?.addEventListener("click", () => openConsciousCenter());
 async function closeSettingsDialog(event) {
   event?.preventDefault?.();
   event?.stopPropagation?.();
@@ -18518,13 +19942,23 @@ configureOtherModelBtn?.addEventListener("click", openOtherModelConfigDrawer);
 modelConfigCloseBtn?.addEventListener("click", requestCloseModelConfigDrawer);
 modelConfigLayer?.querySelector("[data-model-config-close]")?.addEventListener("click", requestCloseModelConfigDrawer);
 modelConfigCancelBtn?.addEventListener("click", requestCloseModelConfigDrawer);
-openConsciousSettingsBtn?.addEventListener("click", () => openConsciousCenter());
-extractConsciousSettingsBtn?.addEventListener("click", () => { void extractCurrentConsciousnessFromCenter(); });
 refreshWechatQrBtn?.addEventListener("click", () => { void renderWechatLink({ refreshQr: true }); });
 unbindWechatBtn?.addEventListener("click", async () => {
   const result = await api.wechatUnbind?.().catch((error) => ({ connected: false, available: false, reason: error?.message || String(error) }));
   applyWechatStatus(result || {});
 });
+wechatConversationUnbindBtn?.addEventListener("click", async () => {
+  const result = await api.wechatUnbind?.().catch((error) => ({ connected: false, available: false, reason: error?.message || String(error) }));
+  applyWechatStatus(result || {});
+  wechatDialog?.showModal?.();
+  await renderWechatLink({ refreshQr: true });
+});
+disconnectWechatTopBtn?.addEventListener("click", async () => {
+  const result = await api.wechatUnbind?.().catch((error) => ({ connected: false, available: false, reason: error?.message || String(error) }));
+  applyWechatStatus(result || {});
+  await renderWechatLink({ refreshQr: true });
+});
+wechatDialogCloseBtn?.addEventListener("click", () => wechatDialog?.close("close"));
 openWechatSessionBtn?.addEventListener("click", async () => {
   const result = await api.wechatEnsureSession?.().catch((error) => ({ ok: false, error: error?.message || String(error) }));
   if (result?.ok === false) {
@@ -18534,10 +19968,6 @@ openWechatSessionBtn?.addEventListener("click", async () => {
   if (result?.db) state.db = result.db;
   if (result?.sessionId) state.selectedSessionId = result.sessionId;
   await renderAll();
-});
-testModelConnectionBtn?.addEventListener("click", () => {
-  const key = state.modelConfigKey;
-  if (key) refreshProviderModels(key, testModelConnectionBtn, $("modelDiscoveryStatus"), "test");
 });
 saveModelConfigBtn?.addEventListener("click", () => saveModelConfig());
 document.addEventListener("click", (event) => {
@@ -19717,6 +21147,11 @@ document.addEventListener("click", () => {
 let lastGatewayRenderAt = 0;
 let lastGatewayRenderState = "";
 api.onGatewayStatus((status) => {
+  if (status.runtimeInvalidated) {
+    const pending = foregroundChatPrewarmRequests.get(state.selectedSessionId);
+    if (pending) void pending.then(() => scheduleForegroundChatPrewarm(state.selectedSessionId, 0));
+    else scheduleForegroundChatPrewarm(state.selectedSessionId, 0);
+  }
   const key = `${status.state || ""}:${status.message || ""}`;
   const now = Date.now();
   if (key === lastGatewayRenderState && now - lastGatewayRenderAt < 30000) return;
@@ -19736,21 +21171,62 @@ api.onGatewayStatus((status) => {
 });
 
 let taskBoardLiveRenderTimer = null;
+function taskBoardToolValue(...values) {
+  return values.find((value) => {
+    if (value === undefined || value === null) return false;
+    if (typeof value === "string") return Boolean(value.trim()) && !/^(?:\{\}|\[\]|null)$/i.test(value.trim());
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === "object") return Object.keys(value).length > 0;
+    return true;
+  });
+}
+
+function taskBoardToolDetail(value, fallback = "黑球正在执行真实工具调用") {
+  if (value === undefined) return fallback;
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, (key, item) => (
+      /(?:api[_-]?key|token|password|secret|authorization|cookie)/i.test(key) ? "[已隐藏]" : item
+    ));
+  } catch {
+    return String(value || fallback);
+  }
+}
+
 function recordTaskBoardLiveEvent(frame = {}) {
   const sessionId = String(frame.sessionId || "");
   if (!sessionId) return;
   const update = frame.update && typeof frame.update === "object" ? frame.update : {};
   let event = null;
   if (frame.type === "hermes_tool_update") {
-    const toolId = String(update.toolCallId || update.id || update.toolCall?.id || `${Date.now()}`);
-    const rawInput = update.rawInput || update.input || update.toolCall?.rawInput || update.toolCall?.input || {};
-    const detail = typeof rawInput === "string" ? rawInput : Object.keys(rawInput).length ? JSON.stringify(rawInput) : "黑球正在执行真实工具调用";
+    const toolCall = update.toolCall && typeof update.toolCall === "object" ? update.toolCall : {};
+    const toolId = String(update.toolCallId || update.tool_call_id || update.callId || update.call_id
+      || toolCall.toolCallId || toolCall.tool_call_id || toolCall.callId || toolCall.call_id || toolCall.id || `${Date.now()}`);
+    const rawInput = taskBoardToolValue(
+      update.rawInput, update.input, update.arguments, update.parameters, update.params,
+      toolCall.rawInput, toolCall.input, toolCall.arguments, toolCall.parameters, toolCall.params,
+      update.payload?.rawInput, update.payload?.input, update.payload?.arguments,
+      update.payload?.parameters, update.payload?.params,
+      update.data?.rawInput, update.data?.input, update.data?.arguments,
+      update.data?.parameters, update.data?.params
+    );
+    const rawResult = taskBoardToolValue(
+      update.result, update.rawOutput, update.toolResult, update.rawResult, update.output, update.response,
+      toolCall.result, toolCall.rawOutput, toolCall.toolResult, toolCall.rawResult, toolCall.output, toolCall.response,
+      update.payload?.result, update.payload?.rawOutput, update.payload?.toolResult,
+      update.payload?.rawResult, update.payload?.output, update.payload?.response,
+      update.data?.result, update.data?.rawOutput, update.data?.toolResult,
+      update.data?.rawResult, update.data?.output, update.data?.response,
+      update.content, update.locations, toolCall.content, toolCall.locations
+    );
+    const payloadDetail = taskBoardToolValue(rawResult, rawInput);
+    const detail = update.error || update.message || (payloadDetail === undefined ? "" : taskBoardToolDetail(payloadDetail));
     event = {
       id: `live-tool:${toolId}`,
       source: "黑球工具",
-      label: update.title || update.name || update.toolCall?.title || update.toolCall?.name || "工具调用",
-      detail: String(update.error || update.message || detail).slice(0, 260),
-      status: update.status || (update.sessionUpdate === "tool_call_update" ? "running" : "running"),
+      label: update.title || update.name || update.toolName || toolCall.title || toolCall.name || toolCall.toolName || "工具调用",
+      ...(detail ? { detail: String(detail).slice(0, 260) } : {}),
+      status: update.status || update.state || (rawResult === undefined ? "running" : "completed"),
       createdAt: Date.now()
     };
   } else if (frame.type === "hermes-delegation-update") {
@@ -19787,7 +21263,7 @@ function recordTaskBoardLiveEvent(frame = {}) {
   const list = Array.isArray(state.taskBoardLiveEvents[sessionId]) ? state.taskBoardLiveEvents[sessionId] : [];
   const existing = list.findIndex((item) => item.id === event.id);
   if (existing >= 0) list[existing] = { ...list[existing], ...event };
-  else list.unshift(event);
+  else list.unshift({ detail: "黑球正在执行真实工具调用", ...event });
   state.taskBoardLiveEvents[sessionId] = list.slice(0, 80);
   state.taskBoardEventCache = { signature: "", value: null };
   const drawer = document.getElementById("taskBoardDrawer");
@@ -22024,10 +23500,24 @@ api.onSessionChanged((db) => {
   if (state.debugCenterRunning) return;
   clearTimeout(sessionChangedRenderTimer);
   const selectedSessionId = String(state.selectedSessionId || "");
-  const preservesLiveConversation = !selectionChanged && Boolean(
-    activeSendOwners.has(selectedSessionId)
-    || activeLiveChatStreamForSession(selectedSessionId)
-    || activeAssistantTypingForSession(selectedSessionId)
+  const selectedLiveStream = activeLiveChatStreamForSession(selectedSessionId);
+  const selectedTyping = activeAssistantTypingForSession(selectedSessionId);
+  const liveStreamOwnsCurrentView = liveChatStreamOwnsVisibleRow(selectedLiveStream);
+  if (selectedLiveStream && !liveStreamOwnsCurrentView) {
+    discardLiveChatStream(selectedLiveStream.streamId, { reason: "detached_session_row" });
+  }
+  const durableAssistantMessage = (state.db?.messages?.[selectedSessionId] || [])
+    .find((message) => String(message?.id || "") === String(
+      selectedLiveStream?.responseMessageId
+      || selectedTyping?.row?.dataset?.messageId
+      || ""
+    ));
+  const durableAnswerCommitted = Boolean(
+    durableAssistantMessage && messageHasTerminalExecution(durableAssistantMessage)
+  );
+  const preservesLiveConversation = !selectionChanged && !durableAnswerCommitted && Boolean(
+    liveStreamOwnsCurrentView
+    || selectedTyping
   ) && !state.abortRequestedSessions.has(selectedSessionId);
   if (preservesLiveConversation) {
     // Runtime progress can publish many DB snapshots per second. Rebuilding
@@ -22079,8 +23569,11 @@ api.init().then(async (db) => {
   installComponentHelp();
   reportStartupMetric("renderer:render:start");
   await renderAll();
+  // Restore the connected WeChat conversation silently; the QR dialog opens only
+  // after the user explicitly clicks the WeChat entry.
+  wechatDialog?.close?.("startup-restore");
   reportStartupMetric("renderer:render:complete");
-  setTimeout(async () => {
+  void (async () => {
     try {
       const receipt = await api.modelRuntimeState?.();
       if (!receipt) return;
@@ -22092,7 +23585,7 @@ api.init().then(async (db) => {
     } finally {
       scheduleForegroundChatPrewarm(state.selectedSessionId, 0);
     }
-  }, 350);
+  })();
   requestAnimationFrame(() => reportStartupMetric("renderer:first-interactive"));
   scheduleExecutionPresenceCheck(1000);
   if (!openFirstUseGuide({ automatic: true })) void openUserProfileOnboarding({ automatic: true });
@@ -22105,126 +23598,3 @@ api.init().then(async (db) => {
     } catch {}
   }, 1500);
 });
-123
-
-// The React renderer consumes this sanitized view only. Black Ball events,
-// persistence, and all IPC actions remain owned by the legacy renderer.
-(function installAssistantUiBridge() {
-  const listeners = new Set();
-  let lastFingerprint = "";
-  const copyEvent = (event, target) => event && typeof event === "object" ? { ...event, target } : null;
-  const messageEvents = (message = {}) => {
-    const raw = message.raw && typeof message.raw === "object" ? message.raw : {};
-    const product = raw.productResult && typeof raw.productResult === "object" ? raw.productResult : {};
-    const productRaw = product.raw && typeof product.raw === "object" ? product.raw : {};
-    const structuredEvents = [
-      ...(Array.isArray(message.structuredEvents) ? message.structuredEvents : []),
-      ...(Array.isArray(raw.structuredEvents) ? raw.structuredEvents : []),
-      ...(Array.isArray(product.structuredEvents) ? product.structuredEvents : []),
-      ...(Array.isArray(productRaw.structuredEvents) ? productRaw.structuredEvents : [])
-    ].map((event) => copyEvent(event, "structured")).filter(Boolean);
-    const executionEvents = [
-      ...(Array.isArray(raw.executionLog) ? raw.executionLog : []),
-      ...(Array.isArray(raw.requestRun?.evidence?.executionLog) ? raw.requestRun.evidence.executionLog : []),
-      ...(Array.isArray(product.executionLog) ? product.executionLog : []),
-      ...(Array.isArray(productRaw.executionLog) ? productRaw.executionLog : []),
-      ...(Array.isArray(product.taskBrain?.execution_log) ? product.taskBrain.execution_log : [])
-    ].map((event) => copyEvent(event, "execution")).filter((event) => event
-      && !["reasoning_delta", "reasoning_note", "public_reasoning"].includes(String(event.kind || event.type || "").toLowerCase()));
-    const answerSegments = [
-      ...(Array.isArray(message.answerSegments) ? message.answerSegments : []),
-      ...(Array.isArray(raw.answerSegments) ? raw.answerSegments : []),
-      ...(Array.isArray(product.answerSegments) ? product.answerSegments : []),
-      ...(Array.isArray(productRaw.answerSegments) ? productRaw.answerSegments : [])
-    ].map((event) => copyEvent(event, "answer")).filter(Boolean);
-    return { structuredEvents, executionEvents, answerSegments };
-  };
-  const safeMessage = (message = {}) => ({
-    id: String(message.id || ""),
-    role: message.role === "user" ? "user" : "assistant",
-    text: String(message.text || message.content || ""),
-    createdAt: message.createdAt || message.timestamp || Date.now(),
-    turnId: String(message.turnId || message.raw?.productResult?.turnId || ""),
-    eventId: String(message.eventId || ""),
-    sequence: Number(message.sequence || 0),
-    ...messageEvents(message)
-  });
-  const liveMessage = (entry) => {
-    if (!entry || entry.sessionId !== String(state.selectedSessionId || "")) return null;
-    if (!entry.row?.isConnected && !entry.finalizing) return null;
-    return {
-      id: `live:${String(entry.streamId || entry.turnId || Date.now())}`,
-      role: "assistant",
-      text: String(entry.visibleText || entry.targetText || ""),
-      createdAt: entry.startedAt || Date.now(),
-      turnId: String(entry.turnId || entry.streamId || ""),
-      eventId: "",
-      sequence: Number(entry.lastFrameSequence || 0),
-      live: true,
-      executionEvents: (Array.isArray(entry.activityDetails) ? entry.activityDetails : [])
-        .map((event) => copyEvent(event, "execution")).filter(Boolean),
-      structuredEvents: (Array.isArray(entry.structuredEvents) ? entry.structuredEvents : [])
-        .map((event) => copyEvent(event, "structured")).filter(Boolean),
-      answerSegments: []
-    };
-  };
-  const snapshot = () => {
-    const db = state.db && typeof state.db === "object" ? state.db : {};
-    const sessionId = String(state.selectedSessionId || db.selectedSessionId || "");
-    const session = (Array.isArray(db.sessions) ? db.sessions : []).find((item) => String(item.id) === sessionId);
-    const messages = Array.isArray(state.currentMessages) ? state.currentMessages.map(safeMessage) : [];
-    const live = [...liveChatStreams.values()].map(liveMessage).filter(Boolean).at(-1);
-    if (live && messages.at(-1)?.text !== live.text) messages.push(live);
-    const sessions = (Array.isArray(db.sessions) ? db.sessions : []).filter((item) => !isTrashSession(item)).map((item) => ({
-      id: String(item.id || ""),
-      title: String(projectSessionDisplayName(item) || item.title || "新对话"),
-      type: String(item.type || "chat"),
-      status: String(item.status || "created"),
-      running: sessionIsRunning(item),
-      pinned: item.pinned === true
-    }));
-    return {
-      sessionId,
-      sessionTitle: String(projectSessionDisplayName(session || {}) || "新对话"),
-      model: String(db.settings?.model || db.settings?.modelId || currentModelBadge?.textContent || "DeepSeek"),
-      running: Boolean(state.busy || sessionIsRunning(session)),
-      sessions,
-      messages
-    };
-  };
-  const fingerprint = (value) => JSON.stringify({
-    sessionId: value.sessionId,
-    running: value.running,
-    sessions: value.sessions.map((item) => `${item.id}:${item.title}:${item.status}`),
-    messages: value.messages.map((item) => `${item.id}:${item.text.length}:${item.structuredEvents.length}:${item.executionEvents.length}`)
-  });
-  const notify = (force = false) => {
-    const value = snapshot();
-    const nextFingerprint = fingerprint(value);
-    if (!force && nextFingerprint === lastFingerprint) return;
-    lastFingerprint = nextFingerprint;
-    listeners.forEach((listener) => listener());
-  };
-  window.baiqiuAssistantUI = {
-    getSnapshot: snapshot,
-    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    send(text) {
-      const value = String(text || "").trim();
-      if (!value || !chatInput || !chatForm) return;
-      chatInput.value = value;
-      chatInput.dispatchEvent(new Event("input", { bubbles: true }));
-      chatForm.requestSubmit?.();
-    },
-    cancel() { sendBtn?.click(); },
-    newSession() { newSessionBtn?.click(); },
-    selectSession(id) {
-      [...(sessionList?.querySelectorAll("[data-id]") || [])]
-        .find((node) => String(node.dataset.id) === String(id))?.click();
-    },
-    openSettings() { settingsBtn?.click(); },
-    openTasks() { taskBoardToggleBtn?.click(); },
-    windowAction(action) { document.querySelector(`[data-window="${CSS.escape(String(action))}"]`)?.click(); }
-  };
-  setInterval(() => notify(false), 220);
-  requestAnimationFrame(() => notify(true));
-})();

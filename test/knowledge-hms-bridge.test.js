@@ -2,6 +2,8 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const fs = require("node:fs");
+const path = require("node:path");
 const { createTools } = require("../tools/knowledge");
 const {
   buildHmsToolCatalog,
@@ -86,4 +88,9 @@ test("successful knowledge tool results become clickable conversation references
   }]);
   assert.deepEqual(references.map((item) => item.id), ["note-1"]);
   assert.equal(references[0].snippet, "活动口径");
+});
+
+test("Hermes-native knowledge_search calls participate in persisted references", () => {
+  const main = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+  assert.match(main, /knowledgeReferencesFromToolCalls\(\[\.\.\.\(result\?\.toolCalls \|\| \[\]\), \.\.\.localBaiqiuToolCalls, \.\.\.nativeWhiteBallExecutions\]\)/);
 });

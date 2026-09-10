@@ -8,11 +8,22 @@ export function PageLoader() {
   const { reduceMotion } = useMotionPrefs();
 
   useEffect(() => {
+    if ("scrollRestoration" in window.history) {
+      window.history.scrollRestoration = "manual";
+    }
+
+    const resetScroll = () => window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    resetScroll();
+    window.addEventListener("pageshow", resetScroll);
+
     const timeout = window.setTimeout(
       () => setVisible(false),
       reduceMotion ? 120 : 750,
     );
-    return () => window.clearTimeout(timeout);
+    return () => {
+      window.clearTimeout(timeout);
+      window.removeEventListener("pageshow", resetScroll);
+    };
   }, [reduceMotion]);
 
   if (!visible) return null;

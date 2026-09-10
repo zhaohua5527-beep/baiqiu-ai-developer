@@ -67,7 +67,8 @@ test("self-check UI and QA implementation expose ten probes including production
 test("run-scoped lifecycle protects cancellation, idempotency, and non-blocking visible output drain", () => {
   assert.match(mainSource, /cancelRequestTargetsRun\(requestedRunId, run\)/);
   assert.match(mainSource, /eventId: executionRunId \? `\$\{executionRunId\}:execution:\$\{sequence\}`/);
-  assert.match(rendererSource, /entry\.seenActivityEventIds\?\.has\(eventId\)/);
+  assert.match(rendererSource, /entry\.eventLedger\.get\(eventId\)/);
+  assert.match(rendererSource, /conflicting_event_id/);
   assert.match(rendererSource, /void waitForVisibleOutputDrain\(session\.id, streamId\)/);
   assert.doesNotMatch(rendererSource, /await waitForVisibleOutputDrain\(session\.id, streamId\)/);
   assert.match(rendererSource, /if \(!stillRunning\) \{[\s\S]*?removeSessionExecutionIndicator\(session\.id\)/);
@@ -77,5 +78,5 @@ test("online updates use the signed update.json authority without latest.json fa
   const urls = mainSource.slice(mainSource.indexOf("function updateManifestUrls"), mainSource.indexOf("function updateJsonUrl"));
   assert.match(urls, /`\$\{baseUrl\}\/update\.json`/);
   assert.doesNotMatch(urls, /latest\.json/);
-  assert.match(mainSource, /DEFAULT_PUBLIC_SERVER = "http:\/\/47\.108\.191\.67"/);
+  assert.match(mainSource, /DEFAULT_PUBLIC_SERVER = "http:\/\/156\.239\.227\.26"/);
 });

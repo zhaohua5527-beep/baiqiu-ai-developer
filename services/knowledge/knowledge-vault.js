@@ -292,7 +292,7 @@ class KnowledgeVault {
     this.indexReconcileState = { status: "initializing", completedAt: "", error: "" };
     this.indexReconcilePromise = new Promise((resolve) => {
       const worker = new Worker(path.join(__dirname, "knowledge-index-worker.js"), {
-        workerData: { storageRoot: path.dirname(this.root()), dbPath: this.indexDbPath(), cleanup: true }
+        workerData: { storageRoot: path.dirname(this.root()), dbPath: this.indexDbPath(), cleanup: false }
       });
       let settled = false;
       const finish = (result) => {
@@ -656,12 +656,7 @@ class KnowledgeVault {
       const indexed = this.indexState();
       if (indexed) return indexed;
     }
-    const scanned = this.notes();
-    const cleanup = this.cleanupInactive({ scanned });
-    const finalSnapshot = cleanup.movedToRecycle || cleanup.permanentlyDeleted
-      ? this.notes()
-      : scanned;
-    return this.buildState({ cleanup, scanned: finalSnapshot });
+    return this.buildState({ scanned: this.notes() });
   }
 
   unique(file) {
@@ -858,6 +853,7 @@ class KnowledgeVault {
 module.exports = {
   KnowledgeVault,
   parseMarkdown,
+  knowledgeContentHash,
   KNOWLEDGE_VAULT_CATEGORIES: CATEGORIES,
   KNOWLEDGE_VAULT_TYPES: KNOWLEDGE_TYPES,
   KNOWLEDGE_VAULT_STATUSES: KNOWLEDGE_STATUSES,

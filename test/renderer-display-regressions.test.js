@@ -55,7 +55,7 @@ test("conversation prose separates reading text from data and delivery surfaces"
   assert.match(styles, /\.streaming-rendered\s*\{[\s\S]*?contain:\s*layout style/);
 });
 
-test("completed answers do not retain a process activity surface", () => {
+test("completed answers retain one collapsed execution timeline independent of the answer", () => {
   const addMessageSource = rendererSource.slice(
     rendererSource.indexOf("function addMessage"),
     rendererSource.indexOf("function activityDetailText")
@@ -66,8 +66,34 @@ test("completed answers do not retain a process activity surface", () => {
     rendererSource.indexOf("function streamActivityHtml")
   );
   assert.doesNotMatch(addMessageSource, /execution-activity-completed/);
-  assert.match(collapseSource, /root\.remove\(\)/);
-  assert.match(collapseSource, /return null/);
+  assert.match(collapseSource, /root\.dataset\.lifecycle = "completed"/);
+  assert.doesNotMatch(collapseSource, /execution-completion-count/);
+  assert.match(collapseSource, /streaming-elapsed/);
+  assert.doesNotMatch(collapseSource, /execution-activity-duration-only/);
+  assert.match(collapseSource, /return root/);
+});
+
+test("completed public summaries stay visible while execution details retire", () => {
+  const persistedSource = rendererSource.slice(
+    rendererSource.indexOf("function renderPersistedSegmentPairs"),
+    rendererSource.indexOf("function snapshotMessageIdentity")
+  );
+  const toggleSource = rendererSource.slice(
+    rendererSource.indexOf("function bindExecutionActivityToggle"),
+    rendererSource.indexOf("function updateExecutionActivityToggle")
+  );
+  const finalizeSource = rendererSource.slice(
+    rendererSource.indexOf("const hasSegmentedDetails = Boolean(rendered?.querySelector?.(\".stream-segment-block\"))"),
+    rendererSource.indexOf("const committedText", rendererSource.indexOf("const hasSegmentedDetails"))
+  );
+
+  assert.match(persistedSource, /structured\.hidden = structuredItems\.length === 0/);
+  assert.match(toggleSource, /\.stream-segment-process, \.stream-segment-reasoning/);
+  assert.doesNotMatch(toggleSource, /\.stream-segment-process, \.stream-segment-structured/);
+  assert.match(toggleSource, /detail\.hidden = !expanded \|\| !String\(detail\.textContent \|\| \"\"\)\.trim\(\)/);
+  assert.match(finalizeSource, /rendered\.querySelectorAll\([\s\S]*?detail\.hidden = true/);
+  assert.doesNotMatch(finalizeSource, /\.stream-segment-process, \.stream-segment-structured/);
+  assert.match(finalizeSource, /bubble\?\.appendChild\(entry\.activity\)/);
 });
 
 test("session execution presence suppresses a stale duplicate after completion", () => {
@@ -92,7 +118,7 @@ test("live stream registration removes every stale active execution row", () => 
   );
 
   assert.match(cleanupSource, /querySelectorAll\("\.message\.thinking-message, \.message\.streaming-response"\)/);
-  assert.match(cleanupSource, /if \(row !== keepRow\) removeThinkingMessage\(row\)/);
+  assert.match(cleanupSource, /if \(row !== keepRow && !drainingRows\.has\(row\)\) removeThinkingMessage\(row\)/);
   assert.match(registerSource, /discardSupersededLiveChatStreams\(sessionId, streamId\);[\s\S]*?removeSessionExecutionIndicator\(sessionId\);[\s\S]*?removeStaleExecutionRows\(thinkingRow\)/);
 });
 

@@ -282,6 +282,7 @@ async function readStreamedChatCompletion(response, options = {}) {
   let usage = null;
   let content = "";
   let reasoningContent = "";
+  let finishReason = null;
   let firstDeltaSeen = false;
   let firstDeltaTimedOut = false;
   let firstDeltaTimer = setTimeout(() => {
@@ -308,9 +309,18 @@ async function readStreamedChatCompletion(response, options = {}) {
     if (!data || data === "[DONE]") return;
     let chunk;
     try { chunk = JSON.parse(data); } catch { return; }
+    if (chunk.error || chunk.type === "error") {
+      const error = new Error(String(chunk.error?.message || chunk.message || "模型流返回错误。"));
+      error.code = "PROVIDER_STREAM_ERROR";
+      error.providerId = options.providerId;
+      error.model = options.requestModel;
+      error.partialText = content;
+      throw error;
+    }
     usage ||= chunk.usage || null;
     if (options.apiStyle === "anthropic") {
       const delta = chunk.delta || {};
+      if (delta.stop_reason) finishReason = delta.stop_reason;
       if (chunk.type === "content_block_start" && chunk.content_block?.type === "tool_use") {
         const index = toolCalls.length;
         const toolCall = {
@@ -337,6 +347,7 @@ async function readStreamedChatCompletion(response, options = {}) {
       return;
     }
     const choice = chunk.choices?.[0] || {};
+    if (choice.finish_reason) finishReason = choice.finish_reason;
     const delta = choice.delta || {};
     const nextContent = typeof delta.content === "string" ? delta.content : "";
     const nextReasoning = String(delta.reasoning_content || delta.reasoning || "");
@@ -370,6 +381,7 @@ async function readStreamedChatCompletion(response, options = {}) {
     if (buffer.trim()) consumeEvent(buffer);
   } finally {
     if (firstDeltaTimer) clearTimeout(firstDeltaTimer);
+    await reader.cancel().catch(() => {});
   }
   if (firstDeltaTimedOut) {
     const error = new Error("模型在 30 秒内没有返回首个流式内容，请检查模型连接、API Key 或供应商状态。");
@@ -389,7 +401,7 @@ async function readStreamedChatCompletion(response, options = {}) {
     } : {})
   };
   return {
-    choices: [{ message, finish_reason: "stop" }],
+    choices: [{ message, finish_reason: finishReason }],
     ...(usage ? { usage } : {}),
     _debug: {
       providerId: options.providerId,
@@ -449,6 +461,8 @@ async function probeProvider({ providerId, provider, fetchImpl = fetch, signal =
     model: normalized.model,
     baseURL: normalized.baseURL,
     verified: true,
+    verificationScope: "direct_text",
+    verifiedApiStyle: normalized.apiStyle,
     instructionCompliant: text.includes(MODEL_PROBE_TOKEN),
     verifiedAt: new Date().toISOString(),
     latencyMs: payload._debug?.durationMs ?? null,
@@ -462,7 +476,7 @@ async function probeReasoningControl({ providerId, provider, fetchImpl = fetch, 
   if (inferred.reasoningMode !== "native-candidate") return inferred;
   const probeLevel = inferred.reasoningLevels.includes("low") ? "low" : inferred.reasoningLevels[0];
   try {
-    await callChatCompletion({
+    const payload = await callChatCompletion({
       providerId,
       provider: normalized,
       body: {
@@ -478,6 +492,7 @@ async function probeReasoningControl({ providerId, provider, fetchImpl = fetch, 
       fetchImpl,
       signal
     });
+    if (!completionText(payload)) throw new Error("思考参数请求没有返回正文，不能标记为已验证。");
     return {
       ...inferred,
       reasoningMode: "native",

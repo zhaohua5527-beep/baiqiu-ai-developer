@@ -64,10 +64,14 @@ function parseJson(value) {
 
 function completionFromRow(row, delegationId) {
   if (!row) return { delegationId, status: "missing", results: [], error: "Hermes 没有找到该委派批次的持久化记录。" };
-  const event = parseJson(row.event_json) || parseJson(row.result_json) || {};
+  const event = parseJson(row.event_json) || {};
+  const result = parseJson(row.result_json) || {};
   const task = parseJson(row.task_json) || {};
   const state = String(row.state || event.status || "unknown").toLowerCase();
-  const results = Array.isArray(event.results) ? event.results : [];
+  const results = Array.isArray(event.results) ? event.results
+    : Array.isArray(result.results) ? result.results
+      : (event.summary || result.summary || event.error || result.error)
+        ? [{ ...result, ...event, status: event.status || state, task_index: 0 }] : [];
   return {
     delegationId,
     status: state === "completed" ? "completed" : state === "error" ? "failed" : state,
@@ -75,7 +79,7 @@ function completionFromRow(row, delegationId) {
     event,
     task,
     completedAt: row.completed_at || event.completed_at || null,
-    error: row.error || event.error || ""
+    error: row.error || event.error || result.error || ""
   };
 }
 
@@ -218,7 +222,7 @@ async function waitForHermesDelegationCompletion(delegationIds = [], options = {
     if (completions.every((item) => item.status === "completed")) {
       const expected = completions.reduce((sum, item) => sum + Number(item.event?.goals?.length || item.event?.results?.length || 0), 0);
       const completed = results.filter((item) => item.status === "completed" && item.summary).length;
-      if (expected === 0 || completed >= expected) return { status: "completed", completions, results, text: formatDelegationResults(results) };
+      if (completed >= Math.max(expected, completions.length)) return { status: "completed", completions, results, text: formatDelegationResults(results) };
       return { status: "partial", completions, results, text: formatDelegationResults(results), error: `Hermes 委派批次完成，但只有 ${completed}/${expected} 个子任务返回正文。` };
     }
     const missing = completions.some((item) => item.status === "missing");
@@ -226,7 +230,7 @@ async function waitForHermesDelegationCompletion(delegationIds = [], options = {
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
       continue;
     }
-    if (completions.some((item) => ["failed", "missing", "unavailable"].includes(item.status))) {
+    if (completions.some((item) => !["running", "finalizing", "completed"].includes(item.status))) {
       const completed = results.filter((item) => item.status === "completed" && item.summary).length;
       if (completed > 0) return { status: "partial", completions, results, text: formatDelegationResults(results), error: completions.find((item) => item.error)?.error || "Hermes 委派批次部分完成。" };
       return { status: "failed", completions, results, error: completions.find((item) => item.error)?.error || "Hermes 委派批次未完成。" };

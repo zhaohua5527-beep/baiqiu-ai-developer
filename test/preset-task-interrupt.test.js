@@ -60,7 +60,7 @@ test("an interrupted sender cannot clear a replacement sender", () => {
 
   assert.match(rendererSource, /const activeSendOwners = new Map\(\)/);
   assert.match(send, /activeSendOwners\.set\(session\.id, streamId\)/);
-  assert.match(send, /activeSendOwners\.get\(session\.id\) !== streamId/);
+  assert.match(send, /!activeSendOwnerMatches\(session\.id, streamId\)/);
   assert.match(send, /activeSendOwners\.has\(session\.id\)/);
   assert.match(send, /state\.abortedStreamIds\.has\(streamId\)/);
 });

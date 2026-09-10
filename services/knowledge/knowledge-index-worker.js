@@ -27,7 +27,7 @@ function indexDocument(vault, index, file, usageStore) {
   return { id, changed: true };
 }
 
-function reconcileKnowledgeIndex({ storageRoot, dbPath, cleanup = true } = {}) {
+function reconcileKnowledgeIndex({ storageRoot, dbPath, cleanup = false } = {}) {
   const vault = new KnowledgeVault({ rootProvider: () => storageRoot, enableSearchIndex: false });
   const index = new KnowledgeSearchIndex({ dbPath });
   const cleanupReport = cleanup ? vault.cleanupInactive({ permanentlyDelete: false }) : null;

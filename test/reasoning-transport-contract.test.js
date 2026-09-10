@@ -52,3 +52,18 @@ test("Hermes runtime config persists only verified native reasoning effort", (t)
   });
   assert.equal(service.read().agent.reasoning_effort, undefined);
 });
+
+test("Hermes runtime config stores an OpenAI-compatible base URL instead of a full endpoint", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "baiqiu-endpoint-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const service = new HermesConfigService({ hermesHome: home });
+  service.apply({
+    provider: "custom-provider",
+    model: "chat-model",
+    baseURL: "https://example.invalid/v1/chat/completions/"
+  });
+  const config = service.read();
+  assert.equal(config.model.base_url, "https://example.invalid/v1");
+  assert.equal(config.delegation.base_url, "https://example.invalid/v1");
+  assert.equal(config.custom_providers[0].base_url, "https://example.invalid/v1");
+});

@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+import math
 import os
+import re
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from gateway.platforms import weixin
@@ -87,6 +90,8 @@ class Bridge:
         self.qr_base_url = weixin.ILINK_BASE_URL
         self.gateway = None
         self.gateway_reader = None
+        self.send_cooldowns = {}
+        self.desktop_receipts = {}
 
     async def relay_gateway_events(self, stream):
         prefix = b"__BAIQIU_WECHAT_EVENT__"
@@ -99,6 +104,11 @@ class Bridge:
             try:
                 event = json.loads(line[len(prefix):].decode("utf-8"))
             except Exception:
+                continue
+            if event.get("type") == "desktop_receipt":
+                pending = self.desktop_receipts.get(event.get("requestId"))
+                if pending and not pending.done():
+                    pending.set_result(event.get("result") or {})
                 continue
             _emit({"type": "event", "event": event})
 
@@ -123,6 +133,7 @@ class Bridge:
             sys.executable,
             str(Path(__file__).with_name("wechat-gateway-runtime.py")),
             env=env,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
@@ -207,8 +218,33 @@ class Bridge:
         if action == "send":
             accounts = _accounts()
             if not accounts:
+                return {"ok": False, "reason": "微信尚未连接，请先扫码"}
+            account_id, data = accounts[0]
+            if not await self.ensure_gateway_started(account_id, data):
+                return {"ok": False, "reason": "微信消息网关启动失败"}
+            request_id = str(request.get("id") or "")
+            future = asyncio.get_running_loop().create_future()
+            self.desktop_receipts[request_id] = future
+            try:
+                self.gateway.stdin.write((json.dumps({"id": request_id, "message": request.get("message")}, ensure_ascii=False) + "\n").encode("utf-8"))
+                await self.gateway.stdin.drain()
+                return await asyncio.wait_for(future, timeout=30)
+            except asyncio.TimeoutError:
+                return {"ok": False, "reason": "暂未收到网关接收确认，请先查看会话记录，避免重复提交"}
+            finally:
+                self.desktop_receipts.pop(request_id, None)
+        if action == "deliver":
+            accounts = _accounts()
+            if not accounts:
                 return {"ok": False, "connected": False, "available": True, "reason": "微信尚未连接"}
             account_id, data = accounts[0]
+            remaining = math.ceil(self.send_cooldowns.get(account_id, 0) - time.monotonic())
+            if remaining > 0:
+                return {
+                    "ok": False, "connected": True, "code": "WECHAT_SEND_RATE_LIMITED",
+                    "retryAfterSeconds": remaining,
+                    "reason": f"微信接口拒绝发送，客户端冷却还剩 {remaining} 秒；草稿已保留，请稍后手动重试",
+                }
             chat_id = str(request.get("chatId") or data.get("user_id") or "")
             message = str(request.get("message") or "").strip()
             if not chat_id or not message:
@@ -219,7 +255,17 @@ class Bridge:
                 chat_id=chat_id,
                 message=message,
             )
-            return {"ok": bool(result.get("success")), "connected": True, "messageId": result.get("message_id"), "reason": result.get("error") or ""}
+            error = str(result.get("error") or "")
+            cooldown = re.search(r"cooldown active for ([0-9]+(?:\.[0-9]+)?)s", error)
+            if not result.get("success") and cooldown:
+                remaining = max(1, math.ceil(float(cooldown.group(1))))
+                self.send_cooldowns[account_id] = time.monotonic() + remaining
+                return {
+                    "ok": False, "connected": True, "code": "WECHAT_SEND_RATE_LIMITED",
+                    "retryAfterSeconds": remaining,
+                    "reason": f"微信接口返回限流，客户端暂停发送 {remaining} 秒；草稿已保留，请稍后手动重试",
+                }
+            return {"ok": bool(result.get("success")), "connected": True, "messageId": result.get("message_id"), "reason": error}
         return {"ok": False, "reason": f"未知微信桥接命令：{action}"}
 
 

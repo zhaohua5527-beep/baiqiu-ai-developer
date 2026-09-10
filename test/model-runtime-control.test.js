@@ -11,7 +11,11 @@ const {
   probeProvider,
   verifyProviderConnection
 } = require("../services/model-adapter");
-const { selectModelRoute } = require("../services/model-route-policy");
+const {
+  providerCredentialFingerprint,
+  providerVerificationMatches,
+  selectModelRoute
+} = require("../services/model-route-policy");
 
 test("provider discovery keeps conversational models out of speech controls", () => {
   assert.deepEqual(conversationModelIds([
@@ -126,6 +130,22 @@ test("model routing only uses enabled and exactly verified providers", () => {
   assert.equal(route.fallback, true);
 });
 
+test("saved verification remains reusable until its credential changes", () => {
+  const provider = {
+    enabled: false,
+    model: "deepseek-chat",
+    baseURL: "https://api.deepseek.com/v1",
+    apiKey: "first-key",
+    verifiedAt: "2026-08-28T00:00:00.000Z",
+    verifiedModel: "deepseek-chat",
+    verifiedBaseURL: "https://api.deepseek.com/v1"
+  };
+  provider.verifiedCredentialFingerprint = providerCredentialFingerprint("deepseek", provider);
+
+  assert.equal(providerVerificationMatches("deepseek", provider), true);
+  assert.equal(providerVerificationMatches("deepseek", { ...provider, apiKey: "replacement-key" }), false);
+});
+
 test("renderer controls use transactional Black Ball runtime APIs", () => {
   const renderer = fs.readFileSync(path.join(__dirname, "..", "renderer-v2", "app.js"), "utf8");
   const preload = fs.readFileSync(path.join(__dirname, "..", "preload.js"), "utf8");
@@ -151,7 +171,7 @@ test("runtime controls preserve discovered models and distinguish native from pr
   assert.match(main, /reasoningMode === "native"/);
   assert.match(main, /modelCapabilities/);
   assert.match(main, /selectedModelReadiness\(settings\)\.configured/);
-  assert.match(main, /runModelRuntimeTransition\(\(\) => verifiedProviderConfiguration\(/);
+  assert.match(main, /runModelRuntimeTransition\(\s*\(\) => verifiedProviderConfiguration\(/);
   assert.match(main, /enable: true/);
   assert.match(main, /activate: true/);
 });
@@ -162,8 +182,11 @@ test("saved credentials are reconciled into the Black Ball runtime without re-en
 
   assert.match(main, /async function reconcileSelectedModelRuntime\(\)/);
   assert.match(main, /readiness\.missing\.length === 1/);
+  assert.match(main, /if \(!modelRuntimeStartupReconciled\) clearHermesSessionBindings\(next\)/);
+  assert.match(main, /saveDb\(next, \{ immediate: true, requireCommit: true \}\)/);
   assert.match(main, /ipcMain\.handle\("models:runtime-state", \(\) => runModelRuntimeTransition\(\(\) => reconcileSelectedModelRuntime\(\)\)\)/);
   assert.match(renderer, /await api\.modelRuntimeState\?\.\(\)/);
+  assert.doesNotMatch(renderer, /setTimeout\(async \(\) => \{\s*try \{\s*const receipt = await api\.modelRuntimeState/);
   assert.match(renderer, /label: "待验证"/);
   assert.match(renderer, /label: "已验证 · 未启用"/);
   assert.doesNotMatch(renderer, /provider\.enabled \|\| selected \? " checked"/);
@@ -176,6 +199,7 @@ test("saved API keys remain visibly masked and the mask is never submitted as a 
   assert.match(renderer, /data-saved-api-key=/);
   assert.match(renderer, /value === API_KEY_MASK && provider\.apiKey/);
   assert.match(renderer, /apiKeyInput\?\.dataset\.savedApiKey === "1" && apiKeyValue === API_KEY_MASK/);
+  assert.match(renderer, /saved \? "已保存" : "验证并保存"/);
   assert.doesNotMatch(renderer, /value="\$\{escapeHtml\(provider\.apiKey \|\| ""\)\}"/);
 });
 

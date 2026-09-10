@@ -89,6 +89,93 @@ test("concurrent foreground prewarm and first prompt share one session build", a
   assert.equal(warmed.hermesSessionId, "shared-session");
 });
 
+test("a real prompt refreshes the MCP handler while sharing an in-flight prewarm build", async () => {
+  let releaseBuild;
+  let buildCount = 0;
+  const calls = [];
+  const client = new HermesAcpClient();
+  client.start = async () => {};
+  client.initialization = { agentCapabilities: { mcpCapabilities: { acp: true } } };
+  client.connection = {
+    agent: {
+      buildSession() {
+        buildCount += 1;
+        return {
+          start: () => new Promise((resolve) => {
+            releaseBuild = () => resolve({ sessionId: "shared-execution", dispose() {} });
+          })
+        };
+      }
+    }
+  };
+  const tools = [{ name: "knowledge_search", inputSchema: { type: "object" } }];
+  const prewarm = client.ensureSession("execution:one", {
+    mcpServer: {
+      signature: "same-catalog",
+      tools,
+      callTool: async () => ({ isError: true })
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const prompt = client.ensureSession("execution:one", {
+    mcpServer: {
+      signature: "same-catalog",
+      tools,
+      callTool: async (request) => {
+        calls.push(request.name);
+        return { content: [{ type: "text", text: "real result" }] };
+      }
+    }
+  });
+  releaseBuild();
+  await Promise.all([prewarm, prompt]);
+
+  const serverId = [...client.mcpServers.keys()][0];
+  const { connectionId } = client.connectMcp({ serverId });
+  const result = await client.messageMcp({
+    connectionId,
+    method: "tools/call",
+    params: { name: "knowledge_search", arguments: {} }
+  });
+  assert.equal(buildCount, 1);
+  assert.deepEqual(calls, ["knowledge_search"]);
+  assert.equal(result.content[0].text, "real result");
+});
+
+test("an in-flight prewarm is rebuilt when the real prompt has a different MCP catalog", async () => {
+  let releaseFirstBuild;
+  let buildCount = 0;
+  const client = new HermesAcpClient();
+  client.start = async () => {};
+  client.initialization = { agentCapabilities: { mcpCapabilities: { acp: true } } };
+  client.connection = {
+    agent: {
+      buildSession() {
+        buildCount += 1;
+        return {
+          start: () => buildCount === 1
+            ? new Promise((resolve) => { releaseFirstBuild = () => resolve({ sessionId: "prewarm", dispose() {} }); })
+            : Promise.resolve({ sessionId: "real", dispose() {} })
+        };
+      }
+    }
+  };
+  const server = (signature) => ({
+    signature,
+    tools: [{ name: signature, inputSchema: { type: "object" } }],
+    callTool: async () => ({})
+  });
+  const prewarm = client.ensureSession("execution:two", { mcpServer: server("catalog-a") });
+  await new Promise((resolve) => setImmediate(resolve));
+  const prompt = client.ensureSession("execution:two", { mcpServer: server("catalog-b") });
+  releaseFirstBuild();
+  const [, real] = await Promise.all([prewarm, prompt]);
+
+  assert.equal(buildCount, 2);
+  assert.equal(real.hermesSessionId, "real");
+  assert.equal(real.mcpSignature, "catalog-b");
+});
+
 test("a blocked execution client does not delay a foreground client prompt", async () => {
   let releaseExecution;
   const execution = new HermesAcpClient();

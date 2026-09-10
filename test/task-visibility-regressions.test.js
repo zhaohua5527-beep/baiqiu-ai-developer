@@ -8,6 +8,7 @@ const test = require("node:test");
 const root = path.join(__dirname, "..");
 const rendererSource = fs.readFileSync(path.join(root, "renderer-v2", "app.js"), "utf8");
 const mainSource = fs.readFileSync(path.join(root, "main.js"), "utf8");
+const modelAdapterSource = fs.readFileSync(path.join(root, "services", "model-adapter.js"), "utf8");
 
 test("live execution and structured results use separate surfaces", () => {
   const streamActivity = rendererSource.slice(
@@ -36,19 +37,24 @@ test("live execution and structured results use separate surfaces", () => {
   );
 
   assert.match(streamActivity, /execution-reasoning-flow/);
-  assert.match(streamActivity, /execution-activity-inline-theater/);
+  assert.match(streamActivity, /execution-activity-narrative streaming-structured-result/);
+  assert.match(streamActivity, /executionActivityToggleHtml\(visibleDetails\.length, false\)/);
   assert.match(rendererSource, /streaming-structured-result/);
   assert.match(rendererSource, /appendLiveStructuredResult/);
   assert.doesNotMatch(streamActivity, /thinking-bars/);
   assert.doesNotMatch(streamActivity, /已用/);
   assert.match(rendererSource, /const EXECUTION_ACTIVITY_VISIBLE_LIMIT = 3/);
-  assert.match(rendererSource, /const EXECUTION_ACTIVITY_QUEUE_LIMIT = 1/);
+  assert.match(rendererSource, /const EXECUTION_ACTIVITY_QUEUE_LIMIT = 32/);
   assert.match(rendererSource, /REASONING_SEGMENT_HISTORY_LIMIT/);
   assert.match(hideThinking, /clearExecutionCurrentThinking\(root\)/);
   assert.doesNotMatch(hideThinking, /current\.hidden = true/);
   assert.match(collapse, /stopExecutionActivityFlow\(root\)/);
-  assert.doesNotMatch(collapse, /completedActivityHtml\(elapsedMs, history, true\)/);
-  assert.match(finalize, /collapseCompletedExecutionActivity\(entry\.activity, completedDurationMs, entry\.activityDetails\)/);
+  assert.match(collapse, /root\.dataset\.lifecycle = "completed"/);
+  assert.doesNotMatch(collapse, /execution-completion-count/);
+  assert.match(collapse, /streaming-elapsed/);
+  assert.doesNotMatch(collapse, /execution-activity-duration-only/);
+  assert.match(collapse, /return root/);
+  assert.match(finalize, /collapseCompletedExecutionActivity\(entry\.activity, completedDurationMs, \[[\s\S]*?entry\.activityDetails[\s\S]*?entry\.structuredEvents/);
   assert.doesNotMatch(finalize, /currentRow\.querySelector\("\.execution-activity-completed"\)/);
   assert.match(delta, /retireLiveExecutionPhase\(entry, segmentId\)/);
   assert.match(delta, /entry\.text \+= delta/);
@@ -62,7 +68,7 @@ test("live execution and structured results use separate surfaces", () => {
   assert.match(rendererSource, /模型连接失败，请检查网络/);
 });
 
-test("model reasoning is forwarded and missing first events terminate instead of hanging", () => {
+test("only public model reasoning is forwarded and missing first events terminate instead of hanging", () => {
   const providerDelta = mainSource.slice(
     mainSource.indexOf("const onProviderDelta"),
     mainSource.indexOf("logDeepSeekFinalRequestBodyOnce", mainSource.indexOf("const onProviderDelta"))
@@ -73,8 +79,10 @@ test("model reasoning is forwarded and missing first events terminate instead of
   );
   assert.match(providerDelta, /kind: "reasoning_delta"/);
   assert.match(providerDelta, /delta: reasoning/);
-  assert.match(hmsPrompt, /MODEL_FIRST_EVENT_TIMEOUT_MS/);
-  assert.match(hmsPrompt, /MODEL_FIRST_EVENT_TIMEOUT/);
+  assert.match(providerDelta, /visibility \|\| ""\)\.toLowerCase\(\) === "public"/);
+  assert.match(providerDelta, /provenance \|\| ""\)\.toLowerCase\(\) === "blackball_public"/);
+  assert.match(modelAdapterSource, /FIRST_STREAM_DELTA_TIMEOUT_MS/);
+  assert.match(modelAdapterSource, /MODEL_FIRST_EVENT_TIMEOUT/);
   assert.match(rendererSource, /LIVE_STREAM_FIRST_EVENT_TIMEOUT_MS/);
   assert.match(rendererSource, /handleLiveStreamTimeout/);
   assert.match(rendererSource, /api\.signalAbortChat/);

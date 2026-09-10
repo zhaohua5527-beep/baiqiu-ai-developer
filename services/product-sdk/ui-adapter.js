@@ -2,6 +2,7 @@ const path = require("node:path");
 const { ProductSDK } = require("./product-sdk");
 const { TaskExperience } = require("./task-experience");
 const { userFacingError } = require("../user-facing-error-adapter");
+const { preserveFailedOutput } = require("../hms-stream-failure");
 const { evaluateHmsResponse } = require("../hms-outcome-contract");
 
 function firstText(...values) {
@@ -14,7 +15,8 @@ function structuredResponseEvidence(response = {}) {
     "ceoOrchestration", "integratedCeoDelivery", "projectRunId", "assignments", "results", "employeeResults",
     "report", "reportStatus", "delegationIds", "delegationResults", "delegationEvidence",
     "hermesSessionId", "traceId", "clarification", "presentation", "outline", "knowledgeReferences",
-    "hmsOutcome", "toolCalls", "files", "generatedFiles", "baiqiuToolProtocol", "executionLog"
+    "hmsOutcome", "toolCalls", "files", "generatedFiles", "baiqiuToolProtocol", "executionLog",
+    "structuredEvents", "answerSegments"
   ];
   return keys.reduce((result, key) => {
     if (response[key] !== undefined) result[key] = response[key];
@@ -133,10 +135,10 @@ class UIAdapter {
       ? evaluation.text
       : response?.ok === true && responseText
         ? responseText
-      : userFacingError(response?.error || evaluation.error || response?.text || "conversation_response_text_invalid", {
+      : preserveFailedOutput(response, userFacingError(response?.error || evaluation.error || response?.text || "conversation_response_text_invalid", {
         classification: input.context?.conversationUnderstanding?.classification,
         domain: input.context?.conversationUnderstanding?.domain || ""
-      });
+      }));
     const success = evaluation.success;
     const responseEvidence = structuredResponseEvidence(response);
     const responseRaw = response?.raw && typeof response.raw === "object" ? response.raw : {};

@@ -3,18 +3,25 @@ const path = require("node:path");
 const YAML = require("yaml");
 const { resolveHermesHome } = require("./hermes-skill-service");
 const { RETRYABLE_RENAME_CODES } = require("./atomic-json-file");
+const { normalizeProvider } = require("./model-adapter");
 
 const PROVIDER_API_KEYS = Object.freeze({
   deepseek: ["DEEPSEEK_API_KEY"],
   openai: ["OPENAI_API_KEY"],
   anthropic: ["ANTHROPIC_API_KEY"],
-  kimi: ["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+  kimi: ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_CN_API_KEY"],
   qwen: ["DASHSCOPE_API_KEY"],
   zhipu: ["ZHIPU_API_KEY", "GLM_API_KEY"],
   minimax: ["MINIMAX_API_KEY", "MINIMAX_CN_API_KEY"],
   stepfun: ["STEPFUN_API_KEY"],
   xiaomi: ["XIAOMI_API_KEY"],
-  hunyuan: ["TENCENT_TOKENHUB_API_KEY"]
+  hunyuan: ["TENCENT_TOKENHUB_API_KEY", "TOKENHUB_API_KEY"]
+});
+
+const PROVIDER_BASE_URL_KEYS = Object.freeze({
+  deepseek: "DEEPSEEK_BASE_URL", openai: "OPENAI_BASE_URL", anthropic: "ANTHROPIC_BASE_URL",
+  qwen: "DASHSCOPE_BASE_URL", zhipu: "GLM_BASE_URL", minimax: "MINIMAX_CN_BASE_URL",
+  stepfun: "STEPFUN_BASE_URL", xiaomi: "XIAOMI_BASE_URL", hunyuan: "TOKENHUB_BASE_URL"
 });
 
 const STT_PROVIDER_ENV_KEYS = Object.freeze({
@@ -64,11 +71,13 @@ function resolveHermesProviderConfig({ provider, baseURL, apiStyle = "openai" } 
   const apiMode = style === "anthropic" ? "anthropic_messages" : "chat_completions";
 
   const nativeRoute = HERMES_NATIVE_ROUTES[providerId];
-  if (nativeRoute?.hosts.includes(endpointHost(endpoint))) {
+  const nativeStyle = providerId === "anthropic" ? "anthropic" : "openai";
+  if (style === nativeStyle && nativeRoute?.hosts.includes(endpointHost(endpoint))) {
     return {
       provider: nativeRoute.provider,
-      apiMode: "",
+      apiMode,
       envKeys: PROVIDER_API_KEYS[providerId] || [],
+      baseURLEnvKey: PROVIDER_BASE_URL_KEYS[providerId] || "",
       customProviderName: ""
     };
   }
@@ -142,6 +151,19 @@ function normalizeHermesReasoningEffort(value = "") {
   })[String(value || "").trim().toLowerCase()] || "";
 }
 
+function resolveHermesProtocol({ provider, model, baseURL, apiStyle = "openai", reasoning = "maximum" } = {}) {
+  const mapping = resolveHermesProviderConfig({ provider, baseURL, apiStyle });
+  if (mapping.provider !== "zai" || !/^glm-5\.3(?:-flash)?$/i.test(String(model || ""))) return null;
+  return {
+    id: "glm-preserved-thinking",
+    provider: mapping.provider,
+    model: String(model).toLowerCase(),
+    baseURL: String(baseURL).replace(/\/+$/, ""),
+    reasoningEffort: reasoning === "maximum" ? "max" : "",
+    extraBody: { thinking: { type: "enabled", clear_thinking: false }, tool_stream: true }
+  };
+}
+
 class HermesConfigService {
   constructor(options = {}) {
     this.home = resolveHermesHome(options);
@@ -168,6 +190,7 @@ class HermesConfigService {
       model: String(config.model?.default || "").trim(),
       baseURL: String(config.model?.base_url || "").trim(),
       reasoningEffort: String(config.agent?.reasoning_effort || "").trim(),
+      providerProtocol: config.baiqiu?.provider_protocol || null,
       configFile: this.configFile
     };
   }
@@ -175,15 +198,20 @@ class HermesConfigService {
   apply({ provider, model, baseURL, apiKey = "", apiStyle = "openai", reasoning = "", nativeReasoning = false, stt = {} } = {}) {
     const providerId = String(provider || "").trim().toLowerCase();
     const modelId = String(model || "").trim();
-    const endpoint = String(baseURL || "").trim();
+    const rawEndpoint = String(baseURL || "").trim();
+    const endpoint = rawEndpoint
+      ? normalizeProvider(providerId, { baseURL: rawEndpoint }).baseURL
+      : "";
     if (!providerId || !modelId || !endpoint) throw new Error("Hermes provider, model and base URL are required.");
     const mapping = resolveHermesProviderConfig({ provider: providerId, baseURL: endpoint, apiStyle });
+    const protocol = resolveHermesProtocol({ provider: providerId, model: modelId, baseURL: endpoint, apiStyle, reasoning });
     const config = structuredClone(this.read());
     config.model = { ...(config.model || {}), provider: mapping.provider, default: modelId, base_url: endpoint };
     if (mapping.apiMode) config.model.api_mode = mapping.apiMode;
     else delete config.model.api_mode;
     config.agent = { ...(config.agent || {}) };
-    const reasoningEffort = nativeReasoning ? normalizeHermesReasoningEffort(reasoning) : "";
+    config.baiqiu = { ...(config.baiqiu || {}), provider_protocol: protocol };
+    const reasoningEffort = nativeReasoning && !protocol ? normalizeHermesReasoningEffort(reasoning) : "";
     if (reasoningEffort) config.agent.reasoning_effort = reasoningEffort;
     else delete config.agent.reasoning_effort;
     if (mapping.customProviderName) {
@@ -236,9 +264,10 @@ class HermesConfigService {
       atomicTextWrite(this.configFile, nextConfig);
       changed = true;
     }
-    if (apiKey) {
+    if (apiKey || mapping.baseURLEnvKey) {
       const current = fs.existsSync(this.envFile) ? fs.readFileSync(this.envFile, "utf8") : "";
-      const next = mapping.envKeys.reduce((content, envKey) => updateEnvValue(content, envKey, apiKey), current);
+      let next = apiKey ? mapping.envKeys.reduce((content, envKey) => updateEnvValue(content, envKey, apiKey), current) : current;
+      if (mapping.baseURLEnvKey) next = updateEnvValue(next, mapping.baseURLEnvKey, endpoint);
       if (current !== next) {
         atomicTextWrite(this.envFile, next);
         changed = true;
@@ -264,6 +293,7 @@ module.exports = {
   HERMES_NATIVE_ROUTES,
   HermesConfigService,
   PROVIDER_API_KEYS,
+  PROVIDER_BASE_URL_KEYS,
   STT_PROVIDER_ENV_KEYS,
   atomicTextWrite,
   customProviderName,
@@ -271,5 +301,6 @@ module.exports = {
   resolveHermesProviderConfig,
   normalizeSttConfig,
   normalizeHermesReasoningEffort,
+  resolveHermesProtocol,
   updateEnvValue
 };

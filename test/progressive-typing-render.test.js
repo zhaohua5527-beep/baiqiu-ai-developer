@@ -16,11 +16,13 @@ test("session refresh preserves an active local typewriter row", () => {
   );
 
   assert.match(rendererSource, /const activeAssistantTypings = new Map\(\);/);
+  assert.match(rendererSource, /function liveChatStreamOwnsVisibleRow\(entry\)[\s\S]*?!row\?\.isConnected \|\| !messageList\.contains\(row\) \|\| row\.hidden[\s\S]*?rowStreamId === streamId[\s\S]*?rowMessageId === messageId/);
   assert.match(renderMessages, /const activeTyping = activeAssistantTypingForSession\(session\.id\);/);
   assert.match(renderMessages, /const activeStream = activeLiveChatStreamForSession\(session\.id\);/);
+  assert.match(renderMessages, /const activeStreamOwnsVisibleRow = liveChatStreamOwnsVisibleRow\(activeStream\);/);
   assert.match(
     renderMessages,
-    /if \(activeTyping \|\| activeStream\) \{[\s\S]*?requestAnimationFrame\(updateReadingControls\);[\s\S]*?\} else if \(!sessionChanged && renderedMessageWindowMatches\(visibleMessages\)\)[\s\S]*?mutatePreservingMessageViewport\(\(\) => messageList\.replaceChildren\(fragment\)\);/
+    /if \(\(activeTyping \|\| activeStreamOwnsVisibleRow\) && !sessionChanged\) \{[\s\S]*?requestAnimationFrame\(updateReadingControls\);[\s\S]*?\} else if \(!sessionChanged && renderedMessageWindowMatches\(visibleMessages\)\)[\s\S]*?mutatePreservingMessageViewport\(\(\) => messageList\.replaceChildren\(fragment\)\);/
   );
 });
 
@@ -29,9 +31,27 @@ test("persisted session refreshes cannot discard a locally owned response reveal
     rendererSource.indexOf("api.onSessionChanged((db) =>"),
     rendererSource.indexOf("api.init().then", rendererSource.indexOf("api.onSessionChanged((db) =>"))
   );
+  const preservation = handler.slice(
+    handler.indexOf("const preservesLiveConversation"),
+    handler.indexOf("if (preservesLiveConversation)")
+  );
   assert.match(handler, /sessionTaskQueue\.isActive\(session\.id\)/);
   assert.match(handler, /activeLiveChatStreamForSession\(session\.id\)/);
   assert.match(handler, /activeAssistantTypingForSession\(session\.id\)/);
+  assert.match(handler, /if \(selectedLiveStream && !liveStreamOwnsCurrentView\) \{[\s\S]*?discardLiveChatStream\(selectedLiveStream\.streamId, \{ reason: "detached_session_row" \}\);/);
+  assert.match(preservation, /liveStreamOwnsCurrentView/);
+  assert.doesNotMatch(preservation, /activeSendOwners/);
+});
+
+test("final answer commit never waits for decorative execution animation", () => {
+  const finalize = rendererSource.slice(
+    rendererSource.indexOf("function finalizeLiveChatStream"),
+    rendererSource.indexOf("function discardLiveChatStreamsForSession")
+  );
+
+  assert.doesNotMatch(rendererSource, /function executionActivityFlowIsPending/);
+  assert.doesNotMatch(finalize, /executionActivityFlowIsPending|setTimeout\(applyCompletedRow, 80\)/);
+  assert.match(finalize, /const applyCompletedRow = \(\) => \{[\s\S]*?entry\.finalized = true;/);
 });
 
 test("a direct assistant reply reconciles in place without a completion render", () => {
@@ -92,7 +112,7 @@ test("automatic scrolling runs only while bottom-anchored and the new-output act
   assert.match(rendererSource, /function scrollMessagesToBottom\(\)/);
   assert.match(rendererSource, /if \(!state\.followOutput \|\| state\.manualOutputPause\) return;/);
   assert.match(rendererSource, /if \(!messageList \|\| !state\.followOutput \|\| state\.manualOutputPause \|\| streamingScrollFrame\) return;/);
-  assert.match(rendererSource, /newOutputBtn\?\.addEventListener\("click", jumpMessagesToBottom\);/);
+  assert.match(rendererSource, /function jumpMessagesToBottom\(\)[\s\S]*?state\.followOutput = true;[\s\S]*?state\.manualOutputPause = false;[\s\S]*?applyMessageScrollPosition\(null, \{ fallbackToBottom: true \}\);/);
 });
 
 test("directory focus persists until manual scrolling has been idle for two seconds", () => {
@@ -162,7 +182,7 @@ test("composing preserves the reading position and sending anchors the new instr
   assert.match(sendCurrentTask, /rememberPendingUserMessage\(session\.id, userMessage\);/);
   assert.match(rendererSource, /function messageRowForId\(messageId = ""\)/);
   assert.match(rendererSource, /function applyInstructionAnchor\(sessionId = state\.selectedSessionId, \{ reposition = false \} = \{\}\)[\s\S]*?ensureInstructionAnchorSpace\(row\);[\s\S]*?if \(reposition\) positionInstructionAnchor\(row, anchor\.targetOffset\);/);
-  assert.match(rendererSource, /function anchorNewInstruction\(row\)[\s\S]*?state\.instructionAnchors\.set\(sessionId, \{[\s\S]*?targetOffset: 0,[\s\S]*?locked: true,[\s\S]*?state\.followOutput = false;[\s\S]*?state\.manualOutputPause = true;[\s\S]*?ensureInstructionAnchorSpace\(anchorRow\);\s*applyInstructionAnchor\(sessionId, \{ reposition: true \}\);[\s\S]*?scheduleInstructionAnchor\(sessionId\);/);
+  assert.match(rendererSource, /function anchorNewInstruction\(row\)[\s\S]*?state\.instructionAnchors\.set\(sessionId, \{[\s\S]*?targetOffset: INSTRUCTION_ANCHOR_TOP_GAP,[\s\S]*?locked: true,[\s\S]*?state\.followOutput = false;[\s\S]*?state\.manualOutputPause = true;[\s\S]*?ensureInstructionAnchorSpace\(anchorRow\);[\s\S]*?animateInstructionAnchor\(anchorRow, INSTRUCTION_ANCHOR_TOP_GAP\);[\s\S]*?scheduleInstructionAnchor\(sessionId\);/);
   assert.doesNotMatch(rendererSource, /animateInstructionToStart|instructionScrollAnimationFrame/);
   assert.match(rendererSource, /function scrollMessageToStart\(row, behavior = "auto"[\s\S]*?if \(behavior === "auto"\) \{[\s\S]*?messageList\.style\.scrollBehavior = "auto";[\s\S]*?messageList\.scrollTop = targetTop;/);
   assert.match(rendererSource, /messageList\.dataset\.instructionAnchored = "1";/);
@@ -195,7 +215,7 @@ test("composing preserves the reading position and sending anchors the new instr
   assert.match(renderMessages, /const anchoredPosition = renderPosition \|\| \(sessionChanged \? savedSessionPosition : null\);[\s\S]*?messagesReplaced && anchoredPosition && !anchorLocked[\s\S]*?applyMessageScrollPosition\(anchoredPosition, \{ keepInstructionAnchor: true \}\);/);
   assert.match(rendererSource, /function releaseInstructionAnchorPosition\(sessionId = state\.selectedSessionId\)[\s\S]*?anchor\.locked = false;/);
   assert.match(rendererSource, /messageList\?\.addEventListener\("wheel", \(event\) => \{[\s\S]*?releaseInstructionAnchorPosition\(state\.selectedSessionId\);/);
-  assert.match(rendererSource, /function createThinkingMessage\(label = "", options = \{\}\)[\s\S]*?const instructionIsAnchored = Boolean\(instructionAnchorId\(state\.selectedSessionId\)\);[\s\S]*?if \(instructionIsAnchored\)[\s\S]*?state\.followOutput = false;[\s\S]*?state\.manualOutputPause = true;[\s\S]*?else if \(options\.follow !== false\) \{[\s\S]*?scrollMessagesToBottom\(\);/);
+  assert.match(rendererSource, /function createThinkingMessage\(_label = "", options = \{\}\)[\s\S]*?const instructionIsAnchored = Boolean\(instructionAnchorId\(state\.selectedSessionId\)\);[\s\S]*?if \(instructionIsAnchored\)[\s\S]*?state\.followOutput = false;[\s\S]*?state\.manualOutputPause = true;[\s\S]*?else if \(options\.follow !== false\) \{[\s\S]*?scrollMessagesToBottom\(\);/);
 });
 
 test("a running request persists its user message before waiting for a result", () => {
@@ -221,24 +241,31 @@ test("a running session without a live renderer stream still shows an execution 
   assert.match(motion, /sessionExecutionIndicators\.set\(session\.id, indicator\);/);
 });
 
-test("active response headers identify real execution progress and retain recent public steps", () => {
+test("active response headers keep all real execution events behind a compact three-line view", () => {
   assert.match(rendererSource, /const EXECUTION_STAGE_LABELS = Object\.freeze\(\{[\s\S]*?understanding: "\u6b63\u5728\u7406\u89e3"[\s\S]*?executing: "\u6b63\u5728\u6267\u884c"[\s\S]*?typing: "\u6b63\u5728\u8f93\u5165"[\s\S]*?completed: "\u6267\u884c\u5b8c\u6bd5"/);
-  assert.match(rendererSource, /EXECUTION_STAGE_LABELS\[executionStage\]/);
-  assert.match(rendererSource, /const EXECUTION_ACTIVITY_QUEUE_LIMIT = 40;/);
-  assert.match(rendererSource, /const EXECUTION_ACTIVITY_HISTORY_LIMIT = 40;/);
-  assert.match(rendererSource, /const EXECUTION_ACTIVITY_RENDERED_LIMIT = 40;/);
-  assert.match(rendererSource, /flow\.queue\.splice\(0, flow\.queue\.length - EXECUTION_ACTIVITY_QUEUE_LIMIT\)/);
-  assert.match(rendererSource, /slice\(-EXECUTION_ACTIVITY_HISTORY_LIMIT\)/);
+  assert.match(rendererSource, /root\.dataset\.executionStage = normalized;/);
+  assert.match(rendererSource, /const EXECUTION_ACTIVITY_QUEUE_LIMIT = 32;/);
+  assert.doesNotMatch(rendererSource, /EXECUTION_ACTIVITY_HISTORY_LIMIT/);
+  assert.match(rendererSource, /flow\.queue = \[\.\.\.flow\.queue, detail\]\.slice\(-EXECUTION_ACTIVITY_QUEUE_LIMIT\);/);
+  assert.match(rendererSource, /function uniqueExecutionActivityEntries\(details = \[\], fallbackTimestamp = Date\.now\(\)\)/);
+  assert.match(rendererSource, /Number\.POSITIVE_INFINITY/);
   assert.doesNotMatch(rendererSource, /黑球仍在运行 ·/);
   assert.match(rendererSource, /function activityIsTransient\(activity = ""\)/);
-  assert.match(rendererSource, /const factualRuntimeStatus = \["bridge", "runtime", "provider", "hms"\]\.includes\(source\)/);
+  assert.match(rendererSource, /const transient = activityIsTransient\(activity\);/);
   assert.match(rendererSource, /entry\.activityTransient = transient;/);
 });
 
-test("real execution summaries use a two-line expandable viewport with an inline theater", () => {
-  assert.match(rendererSource, /function activityDetailText\(activity = ""\)[\s\S]*?return progress \? "" : publicValue\.slice\(0, 180\);/);
-  assert.match(rendererSource, /\["progress", "public_progress", "reasoning_delta", "plan", "tool", "thought", "runtime_status"\]\.includes\(String\(progress\.kind \|\| ""\)\.toLowerCase\(\)\)/);
-  assert.match(rendererSource, /return publicValue\.slice\(0, 180\);/);
+test("real execution uses deterministic action narration and keeps raw details expandable", () => {
+  assert.match(rendererSource, /function activityDetailText\(activity = ""\)[\s\S]*?return value\.slice\(0, 20000\);/);
+  assert.match(rendererSource, /function mergeExecutionNarrativeEntries\(details = \[\]\)/);
+  assert.match(rendererSource, /String\(entry\.publicActionId \|\| entry\.toolCallId \|\| ""\)/);
+  assert.match(rendererSource, /if \(existingIndex >= 0\) merged\[existingIndex\] = entry;/);
+  assert.match(rendererSource, /function executionNarrativeMustStayVisible\(entry, summaries = \[\]\)/);
+  assert.match(rendererSource, /actionIds\.size >= 2/);
+  assert.match(rendererSource, /summaries\.some\(\(item\) => item\.publicSummarySalient === true\)/);
+  assert.match(rendererSource, /function completedExecutionNarrativeEntries\(details = \[\]\)/);
+  assert.match(rendererSource, /execution-completed-narrative/);
+  assert.match(rendererSource, /const EXECUTION_ACTIVITY_VISIBLE_LIMIT = 3;/);
   assert.doesNotMatch(rendererSource, /const expanded = \{/);
   assert.match(rendererSource, /function paintExecutionActivityFrame\(root, now = performance\.now\(\)\)/);
   assert.match(rendererSource, /flow\.activeChars = Array\.from\(activityDetailDisplayText\(next\)\);/);
@@ -247,13 +274,13 @@ test("real execution summaries use a two-line expandable viewport with an inline
   assert.match(rendererSource, /assistantTypingCharsPerSecond\(flow\.activeChars\.length\)/);
   assert.doesNotMatch(rendererSource, /while \(beginNextExecutionActivity\(flow, root, now\)\)/);
   assert.match(rendererSource, /scrollExecutionActivityToLatest\(flow\.viewport\)/);
-  assert.match(rendererStyles, /\.execution-activity-details\s*\{[\s\S]*?max-height: 34px;[\s\S]*?overflow-y: hidden;/);
+  assert.match(rendererStyles, /\.execution-activity-details\s*\{[\s\S]*?max-height: 51px;[\s\S]*?overflow-y: hidden;/);
   assert.match(rendererStyles, /\.execution-activity-inline-theater\s*\{[\s\S]*?height: 24px;[\s\S]*?overflow: visible;[\s\S]*?white-space: nowrap;/);
   assert.match(rendererStyles, /\.thinking-label,[\s\S]*?\.streaming-elapsed\s*\{[\s\S]*?flex: 0 0 auto;[\s\S]*?white-space: nowrap;/);
   assert.match(rendererStyles, /\.streaming-activity\s*\{[\s\S]*?width: min\(680px, 100%\);/);
   assert.match(rendererSource, /function textTheaterTinyInlineParts\(event\)/);
   assert.match(rendererSource, /return textTheaterTinyInlineParts\(event\);/);
-  assert.match(rendererStyles, /\[data-activity-expanded="1"\] \.execution-activity-details\s*\{[\s\S]*?max-height: 102px;[\s\S]*?overflow-y: auto;/);
+  assert.match(rendererStyles, /\[data-activity-expanded="1"\] \.execution-activity-details\s*\{[\s\S]*?max-height: none;[\s\S]*?overflow: visible;/);
   assert.match(rendererSource, /function bindExecutionActivityToggle\(root\)/);
   assert.match(rendererSource, /detailCount \|\| 0\) > 0/);
   const thinkingMessage = rendererSource.slice(
@@ -266,13 +293,16 @@ test("real execution summaries use a two-line expandable viewport with an inline
   );
   assert.match(rendererSource, /function executionActivityEntry\(activity = "", fallbackTimestamp = Date\.now\(\)\)/);
   assert.match(rendererSource, /function activityDetailDisplayText\(activity = ""\)/);
-  assert.match(rendererSource, /plan: "计划"[\s\S]*?thought: "公开判断"[\s\S]*?tool: "工具"[\s\S]*?code: "代码"[\s\S]*?command: "命令"/);
-  assert.match(thinkingMessage, /execution-activity-shell[\s\S]*?executionActivityToggleHtml\(0\)[\s\S]*?execution-activity-details/);
-  assert.match(runningHeader, /executionActivityDetailsHtml\(visibleDetails\)/);
+  assert.match(rendererSource, /function executionActivityEntry\(activity = "", fallbackTimestamp = Date\.now\(\)\)/);
+  assert.match(rendererSource, /publicSummary: String\(progress\.publicSummary \|\| ""\)/);
+  assert.match(thinkingMessage, /streamActivityHtml\(executionStage/);
+  assert.match(runningHeader, /executionActivityDetailsHtml\(visibleDetails,/);
   assert.match(rendererSource, /function executionActivityDetailsHtml\(details = \[\], options = \{\}\)[\s\S]*?EXECUTION_ACTIVITY_VISIBLE_LIMIT[\s\S]*?executionActivityToggleHtml\(history\.length, options\.expanded === true\)[\s\S]*?execution-activity-shell[\s\S]*?execution-activity-details[\s\S]*?execution-activity-flow/);
-  assert.match(rendererSource, /thinking-bars execution-activity-bars[\s\S]*?thinking-label[\s\S]*?thinking-elapsed[\s\S]*?execution-activity-inline-theater/);
-  assert.match(rendererSource, /thinking-bars execution-activity-bars[\s\S]*?streaming-activity-label[\s\S]*?streaming-elapsed[\s\S]*?execution-activity-inline-theater/);
-  assert.match(rendererSource, /if \(root\.dataset\.activityExpanded === "1"\) \{[\s\S]*?toggle\.setAttribute\("aria-expanded", "true"\);[\s\S]*?toggle\.setAttribute\("aria-label", "收回执行过程"\);/);
+  assert.match(runningHeader, /execution-activity-head[\s\S]*?executionActivityToggleHtml\(visibleDetails\.length, false\)[\s\S]*?streaming-elapsed/);
+  assert.match(runningHeader, /execution-activity-narrative streaming-structured-result/);
+  assert.match(rendererSource, /execution-activity-shell[\s\S]*?execution-reasoning-flow/);
+  assert.match(rendererSource, /function executionActivityToggleHtml\(detailCount = 0, expanded = false\)/);
+  assert.match(rendererSource, /root\.dataset\.activityExpanded = expanded \? "1" : "0"/);
   assert.match(rendererSource, /root\.dataset\.activityToggleBound === "1"/);
   assert.match(rendererSource, /root\.addEventListener\("click", \(event\) => \{[\s\S]*?event\.target\?\.closest\?\.\("\.execution-activity-toggle"\)/);
   assert.match(rendererSource, /toggle\.closest\("\.streaming-activity, \.thinking-message"\) !== root/);
@@ -284,8 +314,7 @@ test("real execution summaries use a two-line expandable viewport with an inline
   assert.match(rendererSource, /execution-activity-line-text/);
   assert.match(rendererStyles, /\.execution-activity-bars\s*\{[\s\S]*?flex: 0 0 18px;/);
   assert.match(rendererStyles, /\.execution-activity-inline-theater\s*\{[\s\S]*?font-weight: 550;/);
-  assert.match(rendererSource, /flow\.inlineTheater\.replaceChildren\(whimsy\);/);
-  assert.match(rendererSource, /renderCompactTextTheaterScene\(whimsy, scene\);/);
+  assert.match(rendererSource, /const EXECUTION_ACTIVITY_THEATER_ENABLED = false;/);
   assert.doesNotMatch(rendererSource, /execution-activity-divider|｜|✨/);
   const executionToggleStyles = rendererStyles.slice(
     rendererStyles.indexOf(".execution-activity-toggle {"),
@@ -301,10 +330,10 @@ test("real execution summaries use a two-line expandable viewport with an inline
   assert.match(rendererSource, /if \(expanded && options\.force !== true && root\.dataset\.activityFollowLatest === "0"\) return;/);
   assert.match(rendererStyles, /\.execution-activity-shell\s*\{[\s\S]*?position: relative;/);
   assert.match(executionToggleStyles, /position: absolute;/);
-  assert.match(rendererStyles, /\.execution-activity-line\s*\{[\s\S]*?grid-template-columns: 17px 48px max-content minmax\(0, 1fr\);/);
-  assert.match(rendererStyles, /\[data-activity-expanded="1"\] \.execution-activity-line,[\s\S]*?\.execution-activity-line:first-child\s*\{[\s\S]*?grid-template-columns: 34px 48px max-content minmax\(0, 1fr\);/);
+  assert.match(rendererStyles, /\.execution-activity-line\s*\{[\s\S]*?grid-template-columns: 17px 48px minmax\(0, 1fr\);/);
+  assert.match(rendererStyles, /\[data-activity-expanded="1"\] \.execution-activity-line,[\s\S]*?\.execution-activity-line:first-child\s*\{[\s\S]*?grid-template-columns: 34px 48px minmax\(0, 1fr\);/);
   assert.match(rendererSource, /execution-activity-line-time/);
-  assert.match(rendererSource, /execution-activity-line-protocol/);
+  assert.match(rendererSource, /execution-activity-line-text/);
   assert.match(rendererStyles, /padding-top: 0;/);
   assert.match(rendererStyles, /white-space: pre-wrap/);
   assert.match(rendererStyles, /mask-image: none/);
@@ -312,36 +341,19 @@ test("real execution summaries use a two-line expandable viewport with an inline
   assert.doesNotMatch(rendererStyles, /execution-activity-enter/);
 });
 
-test("idle activity can show whimsical Black Ball status without polluting real execution history", () => {
-  assert.match(rendererSource, /const EXECUTION_ACTIVITY_WHIMSY_SCENES = Object\.freeze\(/);
-  assert.match(rendererSource, /const TEXT_THEATER_SCENE_LIBRARY = Object\.freeze\(/);
-  assert.match(rendererSource, /const TEXT_THEATER_ROLE_LIBRARY = Object\.freeze\(/);
-  assert.match(rendererSource, /const TEXT_THEATER_KNOWLEDGE_KEY/);
-  assert.match(rendererSource, /function recordTextTheaterEvent\(scene, context\)/);
-  assert.match(rendererSource, /const TEXT_THEATER_CONTEXT_STORIES = Object\.freeze\(/);
-  assert.match(rendererSource, /const TEXT_THEATER_EVENT_POOL = Object\.freeze\(/);
-  assert.match(rendererSource, /const TEXT_THEATER_COMPOSITION_LIBRARY = Object\.freeze\(/);
-  assert.match(rendererSource, /const TEXT_THEATER_MODE_LIBRARY = Object\.freeze\(/);
-  assert.match(rendererSource, /const TEXT_THEATER_EXTENSION_CONTRACT = Object\.freeze\(/);
-  assert.match(rendererSource, /realtimeModelGeneration: false/);
-  assert.doesNotMatch(rendererSource, /function humanizeExecutionActivity\(/);
+test("local theater is enabled but cannot become the action narrative", () => {
+  assert.match(rendererSource, /const EXECUTION_ACTIVITY_THEATER_ENABLED = true;/);
   const whimsyScheduler = rendererSource.slice(
     rendererSource.indexOf("function scheduleExecutionActivityWhimsy"),
     rendererSource.indexOf("function scrollExecutionActivityToLatest")
   );
-  assert.doesNotMatch(whimsyScheduler, /flow\.realActivityStarted|flow\.queue\.length|flow\.activeLabel|lastRealActivityAt/);
-  assert.match(whimsyScheduler, /setExecutionActivityInlineTheaterVisible\(flow\.inlineTheater, false\);[\s\S]*?flow\.inlineTheater\.replaceChildren\(whimsy\);[\s\S]*?renderCompactTextTheaterScene\(whimsy, scene\);[\s\S]*?setExecutionActivityInlineTheaterVisible\(flow\.inlineTheater, true\);/);
+  assert.match(whimsyScheduler, /if \(!EXECUTION_ACTIVITY_THEATER_ENABLED\) return;/);
+  assert.match(rendererSource, /function paintLiveExecutionNarrative\(entry\)/);
+  assert.match(rendererSource, /node\.textContent = item\.publicSummary;/);
   assert.doesNotMatch(rendererSource.slice(
-    rendererSource.indexOf("function pushExecutionActivityDetail"),
-    rendererSource.indexOf("function createThinkingMessage")
-  ), /flow\.realActivityStarted = true|clearExecutionActivityWhimsy\(root\)/);
-  assert.match(rendererSource, /scheduleLiveActivityPaint\(entry\);/);
-  assert.match(rendererSource, /function pickTextTheaterStory\(context = "execute", target = "文字"\)/);
-  assert.match(rendererSource, /function buildTextTheaterPlot\(context = "execute", target = "文字", memory = \[\]\)/);
-  assert.match(rendererSource, /const useEasterEgg = Math\.random\(\) >= 0\.7;/);
-  assert.match(rendererSource, /function renderAnimatedTextTheaterScene\(node, scene\)/);
-  assert.match(rendererSource, /const TEXT_THEATER_INTERACTION_ROLE_LIBRARY = Object\.freeze\(/);
-  assert.match(rendererSource, /const TEXT_THEATER_RELATIONSHIP_RULES = Object\.freeze\(/);
+    rendererSource.indexOf("function paintLiveExecutionNarrative"),
+    rendererSource.indexOf("function executionActivityProtocolText")
+  ), /Math\.random|nextExecutionActivityWhimsy|renderExecutionActivityWhimsyScene/);
   assert.match(rendererSource, /function textTheaterContinuity\(memory = \[\], target = \{\}\)/);
   assert.match(rendererSource, /function chooseTextTheaterRelationship\(target, modeId, context, recentRelationships = \[\], continuity = \{\}\)/);
   const relationshipRules = rendererSource.slice(
@@ -362,10 +374,10 @@ test("idle activity can show whimsical Black Ball status without polluting real 
   assert.match(rendererSource, /data-theater-entity="actor"/);
   assert.match(rendererSource, /data-theater-entity="target"/);
   assert.match(rendererSource, /text-theater-live-line/);
-  assert.match(rendererSource, /execution-activity-theater execution-activity-flow/);
+  assert.match(rendererSource, /execution-activity-inline-theater/);
   assert.match(rendererSource, /flow\.whimsyNode = whimsy;/);
   assert.match(rendererSource, /flow\.inlineTheater\.replaceChildren\(whimsy\);/);
-  assert.match(rendererSource, /flow\.whimsyText = summary;/);
+  assert.match(rendererSource, /flow\.whimsyText = scene\.summary;/);
   assert.doesNotMatch(rendererSource, /flow\.rendered\?\.replaceChildren\(whimsy\)/);
   assert.doesNotMatch(rendererSource.slice(
     rendererSource.indexOf("function renderAnimatedTextTheaterScene"),
@@ -377,7 +389,7 @@ test("idle activity can show whimsical Black Ball status without polluting real 
   assert.match(rendererSource.slice(
     rendererSource.indexOf("function scheduleExecutionActivityWhimsy"),
     rendererSource.indexOf("function scrollExecutionActivityToLatest")
-  ), /renderCompactTextTheaterScene\(whimsy, scene\)/);
+  ), /renderExecutionActivityWhimsyScene\(root, scene/);
   assert.match(rendererStyles, /\.execution-activity-flow\s*\{[\s\S]*?min-height: 17px;/);
   assert.match(rendererStyles, /\.execution-activity-flow \.text-theater-live-line\s*\{[\s\S]*?display: inline;/);
   assert.match(rendererStyles, /\.execution-activity-flow \.text-theater-entity/);
@@ -418,12 +430,11 @@ test("idle activity can show whimsical Black Ball status without polluting real 
   assert.match(rendererSource, /offsetX: 0,[\s\S]*?offsetY: verticalOffsets\[index\]\[0\]/);
   assert.match(rendererSource, /const y = Math\.max\(-2, Math\.min\(2, Number\(state\?\.offsetY \|\| 0\)\)\)/);
   assert.match(rendererStyles, /\.thinking-status > \.execution-activity-head,[\s\S]*?\.streaming-activity > \.execution-activity-head[\s\S]*?display: flex;[\s\S]*?height: 24px;[\s\S]*?min-height: 24px;/);
-  assert.match(rendererStyles, /\.execution-activity-inline-theater\s*\{[\s\S]*?flex: 1 1 0;[\s\S]*?width: auto;[\s\S]*?height: 24px;[\s\S]*?max-width: none;/);
+  assert.match(rendererStyles, /\.execution-activity-inline-theater\s*\{[\s\S]*?flex: 0 1 auto;[\s\S]*?width: auto;[\s\S]*?height: 24px;[\s\S]*?max-width: calc\(100% - 30px\);/);
   assert.match(rendererStyles, /\.execution-activity-inline-theater\[data-theater-visible="1"\] \{ visibility: visible; \}/);
   assert.doesNotMatch(rendererStyles, /\.execution-activity-inline-theater\s*\{[\s\S]*?max-width: 280px;/);
   assert.match(rendererSource, /function textTheaterInteraction\(relationship, actor, target\)/);
   assert.match(rendererSource, /flow\.whimsyShownCount \+= 1/);
-  assert.match(whimsyScheduler, /const breathingRoom = textTheaterBreathingRoom\(event\);[\s\S]*?scheduleExecutionActivityWhimsy\(root, Math\.max\(EXECUTION_ACTIVITY_WHIMSY_INTERVAL_MS, sceneDuration \+ breathingRoom\)\);/);
   assert.match(rendererSource, /whimsyHistory: \[\]/);
   assert.match(rendererSource, /recentSceneIds = memory\.slice\(-4\)/);
   assert.match(rendererSource, /const nonRepeatingFallback = eligible\.filter/);
@@ -440,12 +451,11 @@ test("idle activity can show whimsical Black Ball status without polluting real 
   assert.match(rendererSource, /Bug方块/);
   assert.match(rendererSource, /黑球越过文字冲向\{target\}，标点弹了一地/);
   assert.doesNotMatch(rendererSource, /马斯克|铁血战士|奥特曼|赛亚人|唐僧|哪吒|宙斯|齐天大圣/);
-  assert.match(rendererSource, /function scheduleExecutionActivityWhimsy\(root, delay = EXECUTION_ACTIVITY_WHIMSY_DELAY_MS\)/);
-  assert.match(rendererSource, /const summary = compactMonitorText\(scene\.theater\?\.story \|\| scene\.label \|\| "黑球正在处理任务。", 40\);/);
+  assert.match(rendererSource, /function scheduleExecutionActivityWhimsy\(root\)/);
+  assert.match(rendererSource, /const summary = compactTextTheaterEvent\(event\.summary \|\| scene\.theater\?\.story \|\| scene\.label \|\| "黑球正在处理任务。", TEXT_THEATER_SUMMARY_MAX_CHARS\);/);
   assert.match(rendererSource, /function chooseWeightedWhimsyScene\(candidates, profile, context\)/);
   assert.match(rendererSource, /function executionWhimsyPhase\(flow\)/);
   assert.match(rendererStyles, /\.execution-activity-line::before\s*\{[\s\S]*?font-size: 11px;[\s\S]*?line-height: 17px;[\s\S]*?content: "├─";/);
-  assert.match(rendererStyles, /\[data-activity-expanded="1"\] \.execution-activity-line,[\s\S]*?\.execution-activity-line:first-child\s*\{[\s\S]*?grid-template-columns: 34px 48px max-content minmax\(0, 1fr\);/);
   assert.match(rendererStyles, /\.execution-activity-line:last-child::before\s*\{[\s\S]*?content: "└─";/);
   assert.match(rendererStyles, /@keyframes execution-theater-fade-in/);
   assert.match(rendererSource, /relationship:\s*\{[\s\S]*?behavior: relationship\.behavior/);
@@ -471,7 +481,7 @@ test("idle activity can show whimsical Black Ball status without polluting real 
   );
   assert.doesNotMatch(compactTheater, /api\.|fetch\(|XMLHttpRequest/);
   assert.doesNotMatch(rendererStyles, /\.text-theater-compact\s*\{[\s\S]*?position: absolute;/);
-  assert.match(rendererSource, /clearExecutionActivityWhimsy\(root\);/);
+  assert.match(rendererSource, /function clearExecutionActivityWhimsy\(root\)/);
   assert.match(rendererSource, /localStorage\.setItem\(EXECUTION_ACTIVITY_WHIMSY_PROFILE_KEY/);
   assert.doesNotMatch(rendererSource.slice(
     rendererSource.indexOf("function scheduleExecutionActivityWhimsy"),
@@ -504,20 +514,13 @@ test("local lifecycle details stay synchronized when the thinking row becomes a 
     rendererSource.indexOf("function createThinkingMessage"),
     rendererSource.indexOf("function removeThinkingMessage")
   );
-  assert.match(thinkingMessage, /label === "已接收任务，正在建立执行上下文"/);
-  assert.match(thinkingMessage, /source: "bridge"[\s\S]*?kind: "runtime_status"[\s\S]*?timestamp: startedAt/);
-  assert.match(thinkingMessage, /pushExecutionActivityDetail\(row, initialActivity, \{ real: true \}\)/);
-  assert.match(rendererSource, /const initialActivityDetails = Array\.isArray\(thinkingRow\?\.__executionActivityDetails\)/);
-  assert.match(rendererSource, /activityDetails: initialActivityDetails,/);
-  assert.match(rendererSource, /const liveEntry = streamId \? liveChatStreams\.get\(streamId\) : null;/);
-  assert.match(rendererSource, /activityLabel: initialActivityDetails\.at\(-1\) \|\| null/);
-  assert.match(rendererSource, /const transient = activityIsTransient\(activity\);[\s\S]*?const factualRuntimeStatus[\s\S]*?entry\.activityTransient = transient;/);
-  assert.doesNotMatch(rendererSource, /entry\.activityLabel = activityDetailText\(activity\) \|\| "正在等待黑球返回"/);
+  assert.match(thinkingMessage, /const initialThinkingText = String\(_label \|\| ""\)\.trim\(\);/);
+  assert.match(thinkingMessage, /if \(options\.waiting === true\)[\s\S]*?waiting\.textContent = String\(_label \|\| "等待黑球真实执行事件"\)/);
+  assert.doesNotMatch(thinkingMessage, /pushExecutionActivityDetail/);
+  assert.match(rendererSource, /thinkingRow = createThinkingMessage\("", \{[\s\S]*?startedAt: taskStartedAt,[\s\S]*?waiting: true/);
+  assert.match(rendererSource, /registerLiveChatStream\(streamId, session\.id, thinkingRow/);
   assert.match(rendererSource, /message: frame\.progress\.message \|\| frame\.label \|\| ""/);
-  assert.match(rendererSource, /thinkingRow = createThinkingMessage\("已接收任务，正在建立执行上下文", \{[\s\S]*?startedAt: taskStartedAt/);
-  assert.match(rendererSource, /messageList\.appendChild\(row\);[\s\S]*?ensureExecutionActivityFlow\(row\);[\s\S]*?scheduleExecutionActivityWhimsy\(row\);/);
-  assert.match(rendererSource, /entry\.elapsedTimer = setInterval[\s\S]*?ensureLiveStreamRow\(entry\);/);
-  assert.match(rendererSource, /stopExecutionActivityFlow\(entry\.activity\)/);
+  assert.match(rendererSource, /stopExecutionActivityFlow\(entry\.activity/);
 });
 
 test("live response stages advance from understanding through execution and typing to completion", () => {
@@ -533,12 +536,12 @@ test("live response stages advance from understanding through execution and typi
   );
   assert.doesNotMatch(activityStage, /status === "completed"/);
   assert.doesNotMatch(activityStage, /return "completed"/);
-  assert.doesNotMatch(rendererSource, /entry\.completionTimer = setTimeout\(/);
+  assert.match(rendererSource, /entry\.completionTimer = setTimeout\(applyCompletedRow, 80\)/);
   assert.match(rendererSource, /else if \(entry\.backendCompleted\) \{[\s\S]*?setLiveStreamStage\(entry, "completed"\);[\s\S]*?entry\.finalizeWhenDrained\?\.\(\);/);
   assert.match(rendererSource, /entry\.completionTimer = null;[\s\S]*?liveChatStreams\.delete\(streamId\);/);
 });
 
-test("the live lifecycle header is mounted before the growing response body", () => {
+test("the live grounded narrative is mounted before the growing response body", () => {
   const ensureRow = rendererSource.slice(
     rendererSource.indexOf("function ensureLiveStreamRow"),
     rendererSource.indexOf("function flushLiveChatStream")
@@ -551,35 +554,28 @@ test("the live lifecycle header is mounted before the growing response body", ()
     rendererSource.indexOf("function streamActivityHtml"),
     rendererSource.indexOf("function updateLiveStreamElapsed")
   );
-  assert.match(streamActivity, /execution-activity-head[\s\S]*?executionActivityDetailsHtml\(visibleDetails\)[\s\S]*?execution-activity-theater/);
-  assert.match(rendererSource, /function createThinkingMessage[\s\S]*?execution-activity-head[\s\S]*?execution-activity-shell[\s\S]*?execution-activity-details[\s\S]*?execution-activity-theater/);
+  assert.match(streamActivity, /execution-activity-head[\s\S]*?executionActivityToggleHtml\(visibleDetails\.length, false\)[\s\S]*?execution-activity-narrative streaming-structured-result[\s\S]*?execution-activity-shell[\s\S]*?execution-reasoning-flow[\s\S]*?executionActivityDetailsHtml\(visibleDetails/);
+  assert.match(rendererSource, /function createThinkingMessage[\s\S]*?streamActivityHtml\(executionStage/);
   assert.match(rendererStyles, /\.message\.streaming-response > \.bubble \{[\s\S]*?grid-template-rows: auto minmax\(0, auto\)/);
   assert.match(rendererStyles, /\.thinking-status > \.execution-activity-head,[\s\S]*?\.streaming-activity > \.execution-activity-head[\s\S]*?display: flex;[\s\S]*?height: 24px;[\s\S]*?min-height: 24px;/);
-  assert.match(rendererStyles, /\.execution-activity-inline-theater\s*\{[\s\S]*?flex: 1 1 0;[\s\S]*?width: auto;[\s\S]*?height: 24px;/);
-  const inlineTheaterStart = rendererStyles.indexOf(".execution-activity-inline-theater {");
-  const inlineTheaterStyles = rendererStyles.slice(inlineTheaterStart, rendererStyles.indexOf("}", inlineTheaterStart) + 1);
-  assert.doesNotMatch(inlineTheaterStyles, /grid-row:\s*2/);
+  assert.match(rendererStyles, /\.execution-activity-narrative,[\s\S]*?\.execution-event-narrative\s*\{[\s\S]*?font-family: var\(--font-structured-result\);[\s\S]*?font-size: 11px;/);
+  assert.match(rendererStyles, /\.streaming-activity:not\(\[data-activity-expanded="1"\]\) \.execution-activity-details\s*\{[\s\S]*?display: none;/);
 });
 
-test("completed responses collapse execution detail into one compact duration row", () => {
+test("completed responses retain duration and the expandable execution timeline", () => {
   const completionCollapse = rendererSource.slice(
     rendererSource.indexOf("function collapseCompletedExecutionActivity"),
     rendererSource.indexOf("function streamActivityHtml")
   );
-  assert.match(rendererSource, /function completedActivityHtml\(elapsedMs = 0, details = \[\], expanded = false\)/);
-  assert.match(rendererSource, /execution-activity-completed/);
-  assert.match(rendererSource, /function collapseCompletedExecutionActivity\(root, elapsedMs = 0\)/);
-  assert.match(rendererSource, /root\.replaceChildren\(\.\.\.completed\.childNodes\);/);
-  assert.doesNotMatch(rendererSource, /root\.replaceWith\(document\.createRange\(\)\.createContextualFragment\(completedActivityHtml/);
-  assert.match(rendererSource, /collapseCompletedExecutionActivity\(entry\.activity, completedDurationMs\)/);
-  assert.match(rendererSource, /if \(executionStage === "completed"\) return completedActivityHtml\(elapsedMs, details\);/);
-  assert.doesNotMatch(rendererSource, /setLiveStreamStage\(entry, "completed", \{ force: true \}\)/);
-  assert.match(rendererStyles, /\.execution-activity-completed \.execution-completion-head\s*\{[\s\S]*?height:\s*18px;/);
-  assert.match(rendererStyles, /\.execution-completion-count\s*\{[\s\S]*?font-size:\s*10px;[\s\S]*?white-space:\s*nowrap;/);
-  assert.doesNotMatch(rendererSource, /completionTheaterText|execution-completion-theater/);
-  assert.match(completionCollapse, /viewport\.hidden = true/);
-  assert.doesNotMatch(completionCollapse, /requestAnimationFrame|setTimeout|getBoundingClientRect/);
-  assert.match(rendererSource, /await new Promise\(\(resolve\) => requestAnimationFrame\(\(\) => requestAnimationFrame\(resolve\)\)\)/);
+  assert.match(rendererSource, /function collapseCompletedExecutionActivity\(root, elapsedMs = 0, details = \[\]\)/);
+  assert.match(completionCollapse, /stopExecutionActivityFlow\(root\)/);
+  assert.match(completionCollapse, /root\.dataset\.lifecycle = "completed"/);
+  assert.doesNotMatch(completionCollapse, /execution-completion-count/);
+  assert.match(completionCollapse, /streaming-elapsed/);
+  assert.match(completionCollapse, /executionActivityRenderedDetails\(root, history\)/);
+  assert.doesNotMatch(completionCollapse, /execution-activity-duration-only/);
+  assert.match(rendererSource, /collapseCompletedExecutionActivity\(entry\.activity, completedDurationMs, \[[\s\S]*?entry\.activityDetails[\s\S]*?entry\.structuredEvents/);
+  assert.doesNotMatch(completionCollapse, /replaceChildren|replaceWith/);
 });
 
 test("completed progress still clears the running indicator", () => {
@@ -589,14 +585,14 @@ test("completed progress still clears the running indicator", () => {
   assert.doesNotMatch(rendererStyles, /completed-execution-activity/);
 });
 
-test("persisted assistant replies rebuild the compact completed duration header", () => {
+test("persisted assistant replies rebuild the real execution timeline", () => {
   const addMessage = rendererSource.slice(
     rendererSource.indexOf("function addMessage"),
     rendererSource.indexOf("function activityDetailText")
   );
-  assert.match(addMessage, /message\.role === "assistant" && durationMs > 0/);
-  assert.match(addMessage, /streamActivityHtml\("completed", durationMs, executionDetails\)/);
-  assert.match(rendererSource, /用时 \$\{formatTaskDuration\(elapsedMs\)\}/);
+  assert.match(addMessage, /const persistedExecution = renderPersistedExecutionTimeline\(message\);/);
+  assert.match(addMessage, /renderPersistedSegmentPairs\(message, rendered\);[\s\S]*?if \(persistedExecution\) bubble\.appendChild\(persistedExecution\);/);
+  assert.match(rendererSource, /function renderPersistedExecutionTimeline\(message = \{\}\)/);
   const persist = rendererSource.slice(
     rendererSource.indexOf("const persistAssistantResult"),
     rendererSource.indexOf("try {", rendererSource.indexOf("const persistAssistantResult"))
@@ -609,13 +605,16 @@ test("send preflight failures persist a stable terminal response for the origina
     rendererSource.indexOf("async function sendCurrentTask"),
     rendererSource.indexOf("async function processQueue")
   );
-  assert.match(sendCurrentTask, /try \{[\s\S]*?addVisibleMessage\(userMessage\);[\s\S]*?await api\.appendMessage\(session\.id, userMessage\);[\s\S]*?createThinkingMessage/);
+  assert.match(sendCurrentTask, /try \{[\s\S]*?addVisibleMessage\(userMessage\);[\s\S]*?createThinkingMessage[\s\S]*?await api\.appendMessage\(session\.id, userMessage\);/);
   assert.match(sendCurrentTask, /const existingStreamId = activeSendOwners\.get\(session\.id\);[\s\S]*?if \(existingStreamId\) \{/);
   assert.match(sendCurrentTask, /sessionTaskQueue\.enqueue\(session\.id, \{[\s\S]*?autoStart: false/);
   assert.doesNotMatch(sendCurrentTask, /taskFingerprint|activeSendFingerprints|避免重复提交/);
-  assert.match(sendCurrentTask, /thinkingRow = createThinkingMessage\("已接收任务，正在建立执行上下文", \{[\s\S]*?startedAt: taskStartedAt/);
-  assert.match(sendCurrentTask, /id: `product-result:\$\{userMessage\.id\}`,[\s\S]*?raw: \{ uiError: true, clientMessageId: userMessage\.id \}/);
-  assert.match(sendCurrentTask, /await api\.appendMessage\(session\.id, failureMessage\)\.catch/);
+  assert.match(sendCurrentTask, /thinkingRow = createThinkingMessage\("", \{[\s\S]*?startedAt: taskStartedAt,[\s\S]*?waiting: true/);
+  assert.match(sendCurrentTask, /const message = taskFailureText\(error\);/);
+  assert.match(sendCurrentTask, /appendLiveStreamNotice\(liveEntry, `客户端传输失败：\$\{message\}`\)/);
+  assert.match(sendCurrentTask, /updateVisibleProgress\("执行失败", 0\)/);
+  assert.match(sendCurrentTask, /discardLiveChatStream\(streamId\)/);
+  assert.match(sendCurrentTask, /releaseActiveSendOwner\(session\.id, streamId\)/);
 });
 
 test("startup reconciliation gives interrupted user requests a visible non-replayed terminal result", () => {
@@ -643,14 +642,14 @@ test("assistant code remains visible by default with an explicit collapse contro
 
 test("activity copy prefers native Hermes progress and does not infer thought from request keywords", () => {
   assert.match(mainSource, /function initialHmsActivityLabel\(\)/);
-  assert.match(mainSource, /const hmsProgressMapper = new HmsProgressMapper\(\);/);
-  assert.match(mainSource, /emitHmsProgress\(hmsProgressMapper\.consume\(update\)\)/);
+  assert.match(mainSource, /const hmsProgressMapper = new HmsProgressMapper\(\{ segmentPrefix \}\);/);
+  assert.match(mainSource, /const mappedProgress = hmsProgressMapper\.consume\(receivedUpdate, separated\);[\s\S]*?emitHmsProgress\(mappedProgress\);/);
   assert.match(mainSource, /executionLog: buildExecutionLog\(hmsExecutionUpdates\)/);
   assert.match(mainSource, /<baiqiu-progress>/);
   assert.match(mainSource, /new HmsMessageStreamDemux\(\{[\s\S]{0,180}requireFinalEnvelope: false[\s\S]{0,40}\}\)/);
   assert.match(mainSource, /stripHmsProgressEnvelopes\(promptResult\?\.text/);
   assert.match(mainSource, /只要已经发送过 baiqiu-answer，就直接结束，不要再用 baiqiu-final 重复全文/);
-  assert.match(mainSource, /Only when no baiqiu-answer block was emitted may you use exactly one <baiqiu-final>/);
+  assert.match(mainSource, /只有完全没有使用 baiqiu-answer 时，才允许用唯一的 baiqiu-final/);
   assert.match(mainSource, /missing_public_final_envelope/);
   const runtimeBody = mainSource.slice(
     mainSource.indexOf("async function runHermesSessionPrompt"),
@@ -673,7 +672,7 @@ test("activity copy prefers native Hermes progress and does not infer thought fr
 
 test("HMS final text uses the shared progressive typewriter", () => {
   assert.match(rendererSource, /const useTypingAnimation = message\.role === "assistant" && options\.progressive === true/);
-  assert.match(rendererSource, /const ASSISTANT_TYPING_MIN_CHARS_PER_SECOND = 200;/);
+  assert.match(rendererSource, /const ASSISTANT_TYPING_MIN_CHARS_PER_SECOND = 150;/);
   assert.match(rendererSource, /const ASSISTANT_TYPING_MAX_CHARS_PER_SECOND = 500;/);
   assert.match(rendererSource, /const charactersPerSecond = assistantTypingCharsPerSecond\(chars\.length\);/);
   assert.match(rendererSource, /renderProgressiveMarkdown\(rendered, source, \{ final: true \}\);/);
@@ -683,18 +682,19 @@ test("HMS final text uses the shared progressive typewriter", () => {
 
 test("live final chunks incrementally render Markdown without rebuilding the response row", () => {
   assert.match(rendererSource, /function revealLiveChatStreamText\(entry\)/);
-  assert.match(rendererSource, /const LIVE_MARKDOWN_BATCH_MS = 48;/);
-  assert.match(rendererSource, /renderProgressiveMarkdown\(entry\.rendered, entry\.visibleText\)/);
+  assert.match(rendererSource, /const LIVE_MARKDOWN_BATCH_MS = 32;/);
+  assert.match(rendererSource, /const LIVE_MARKDOWN_INPUT_BATCH_MS = 48;/);
+  assert.match(rendererSource, /renderSegmentedLiveAnswer\(entry\)/);
   assert.match(rendererSource, /progressive-markdown-stable/);
   assert.match(rendererSource, /progressive-markdown-tail/);
   assert.match(rendererSource, /const alreadyRendered = rendered\.classList\.contains\("progressive-markdown"\)/);
   assert.match(rendererSource, /if \(!alreadyRendered\) rendered\.innerHTML = renderMarkdown\(source\);/);
   assert.match(rendererSource, /classifyRenderedDataLayout\(rendered, \{ preserveWide: true, source \}\)/);
   assert.match(rendererSource, /if \(frame\.type === "reset"\)/);
-  assert.match(mainSource, /if \(!options\.internalStructuredResponse && !promptOptions\.silent && separated\.visibleDelta\)/);
+  assert.match(mainSource, /if \(!isReasoningUpdate[\s\S]*?!options\.internalStructuredResponse[\s\S]*?!promptOptions\.silent[\s\S]*?&& separated\.visibleDelta\)/);
   assert.doesNotMatch(mainSource, /!promptOptions\.silent && !hmsToolCatalog\.length && separated\.visibleDelta/);
-  assert.match(mainSource, /streamedPublicText \+= separated\.visibleDelta/);
-  assert.match(mainSource, /resetStreamedPublicText\(\);/);
+  assert.match(mainSource, /streamedPublicText \+= visibleDelta/);
+  assert.match(mainSource, /streamedPublicText = "";/);
 });
 
 test("live HMS chunks render immediately and never force a reader back to the bottom", () => {
@@ -711,13 +711,16 @@ test("final stream reconciliation keeps the live row and never repaints a mismat
     rendererSource.indexOf("function discardLiveChatStreamsForSession")
   );
   assert.match(finalize, /entry\.finalizeWhenDrained = applyCompletedRow/);
+  assert.match(finalize, /entry\.elapsedTimer = null;[\s\S]*?hideLiveThinkingLayer\(entry, \{ allStructured: true, respectMinimum: false \}\)/);
+  assert.match(finalize, /const currentRow = entry\.row\?\.isConnected \? entry\.row : ensureLiveStreamRow\(entry\)/);
+  assert.match(finalize, /watchVisibleDrain\(\)/);
   assert.match(finalize, /currentRow\.classList\.remove\("streaming-response"\)/);
   assert.match(finalize, /finalTextDiffers/);
   assert.match(finalize, /if \(rendered && !hasStreamedAnswer\)/);
   assert.doesNotMatch(finalize, /rendered && \(!hasStreamedAnswer \|\| finalTextDiffers\)/);
   assert.match(finalize, /const committedText = hasStreamedAnswer && !finalExtendsStream[\s\S]*?streamedDisplayText/);
   assert.match(mainSource, /protocolFinalMismatch: true/);
-  assert.match(finalize, /entry\.activity = collapseCompletedExecutionActivity\(entry\.activity, completedDurationMs, entry\.activityDetails\)/);
+  assert.match(finalize, /entry\.activity = collapseCompletedExecutionActivity\(entry\.activity, completedDurationMs, \[[\s\S]*?entry\.activityDetails[\s\S]*?entry\.structuredEvents/);
   assert.match(finalize, /if \(responseMessageId\) currentRow\.dataset\.messageId = responseMessageId/);
   assert.doesNotMatch(finalize, /replaceWith\(/);
   assert.doesNotMatch(finalize, /messageList\.scrollTop = previousScrollTop/);
@@ -727,8 +730,13 @@ test("final stream reconciliation keeps the live row and never repaints a mismat
     rendererSource.indexOf("function revealLiveChatStreamText"),
     rendererSource.indexOf("function completedActivityHtml")
   );
-  assert.doesNotMatch(liveReveal, /assistantTypingCharsPerSecond|typingPauseFor|revealCarry \+=/);
+  assert.match(liveReveal, /assistantTypingCharsPerSecond|typingPauseFor|revealCarry/);
   assert.match(rendererSource, /entry\.finalizeWhenDrained\?\.\(\);/);
+  const restoreSegments = rendererSource.slice(
+    rendererSource.indexOf("function restoreLiveStreamSegments"),
+    rendererSource.indexOf("function ensureSessionExecutionMotion")
+  );
+  assert.doesNotMatch(restoreSegments, /segmentCharsById\?\.clear/);
 });
 
 test("final stream reconciliation preserves the running instruction anchor and natural reading position", () => {

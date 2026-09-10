@@ -93,8 +93,8 @@ test("session switching paints selection and messages before selection persisten
 
   assert.ok(select.indexOf("state.selectedSessionId = resolvedSessionId") < select.indexOf("const historyRequest = api.messages"));
   assert.ok(select.indexOf("await renderMessages") < select.indexOf("const prefetchedHistory = await historyRequest"));
-  assert.ok(select.indexOf("const historyRequest = api.messages") < select.indexOf("const selectionRequest = api.selectSession"));
-  assert.ok(select.indexOf("await renderMessages") < select.indexOf("await selectionRequest"));
+  assert.ok(select.indexOf("const historyRequest = api.messages") < select.indexOf("await api.selectSession"));
+  assert.ok(select.indexOf("await renderMessages") < select.indexOf("await api.selectSession"));
   assert.match(select, /prefetchedMessages: \{ sessionId: resolvedSessionId, history: prefetchedHistory \}/);
   assert.doesNotMatch(select, /await Promise\.all/);
   assert.match(select, /currentChatTitle\.textContent = session \? projectSessionDisplayName\(session\) : "新对话"/);
@@ -146,20 +146,30 @@ test("task writes remain bound to the originating session", () => {
   assert.match(mainSource, /persistedSessionId: sessionId/);
 });
 
-test("startup starts both chat and execution ACP lanes but keeps voice on-demand", () => {
+test("startup starts and prewarms the execution lane but keeps chat and voice on-demand", () => {
   const preparation = mainSource.slice(
     mainSource.indexOf("async function prepareBundledHmsRuntime"),
     mainSource.indexOf("function trayIconSourcePath")
   );
   assert.doesNotMatch(preparation, /prewarmVoiceStt\(\)/);
   assert.match(preparation, /ensureHermesClient\(\)\.start\(\)/);
-  assert.match(preparation, /ensureHermesForegroundClient\(\)\.start\(\)/);
-  assert.doesNotMatch(preparation, /prewarmForegroundSession\(\)/);
+  assert.match(preparation, /prewarmExecutionSession\(\)/);
+  assert.doesNotMatch(preparation, /ensureHermesForegroundClient\(\)\.start\(\)/);
   const selectHandler = mainSource.slice(
     mainSource.indexOf('ipcMain.handle("session:select"'),
     mainSource.indexOf('ipcMain.handle("session:rename"')
   );
   assert.doesNotMatch(selectHandler, /prewarmForegroundSession/);
+});
+
+test("execution prewarm uses the full real tool catalog and the same cached session id", () => {
+  const prewarm = mainSource.slice(
+    mainSource.indexOf("async function prewarmExecutionSession"),
+    mainSource.indexOf("function ensureHermesHealthClient")
+  );
+  assert.match(prewarm, /hmsToolCatalogForRequest\(\{ sessionId: session\.id, conversationOnly: false \}\)/);
+  assert.match(prewarm, /client\.ensureSession\(session\.id/);
+  assert.match(prewarm, /signature: JSON\.stringify\(catalog\)/);
 });
 
 test("HMS runtime deployment starts after the initial desktop frame", () => {
@@ -171,6 +181,7 @@ test("HMS runtime deployment starts after the initial desktop frame", () => {
 
 test("foreground chat prewarms asynchronously after render, focus and session selection", () => {
   assert.match(mainSource, /ipcMain\.handle\("chat:prewarm", async \(_event, sessionId = ""\)/);
+  assert.match(mainSource, /ipcMain\.handle\("chat:prewarm"[\s\S]*?void prewarmExecutionSession\(sessionId\)/);
   assert.match(preloadSource, /prewarmChat: \(sessionId = ""\) => ipcRenderer\.invoke\("chat:prewarm", sessionId\)/);
   assert.match(rendererSource, /function scheduleForegroundChatPrewarm\(sessionId = state\.selectedSessionId, delayMs = 500\)/);
   assert.match(rendererSource, /chatInput\.addEventListener\("focus", \(\) => \{\s*scheduleForegroundChatPrewarm\(state\.selectedSessionId, 0\);/);

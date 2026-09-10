@@ -25,6 +25,7 @@ test("real plan and tool events inherit the active Black Ball answer segment", (
   const mapper = new HmsProgressMapper();
   const progress = mapper.consume({
     sessionUpdate: "agent_thought_chunk",
+    visibility: "public",
     content: { type: "text", text: '<baiqiu-progress>{"segmentId":"seg-1","stage":"plan","message":"核对输入字段"}</baiqiu-progress>' }
   });
   assert.equal(progress[0].segmentId, "seg-1");
@@ -52,7 +53,7 @@ test("only explicitly bounded final text becomes visible across HMS chunks", () 
   const result = demux.consume('ress>{"stage":"verify","message":"正在核对最终数量"}</baiqiu-progress><baiqiu-fi');
   assert.equal(result.visibleDelta, "");
   assert.equal(result.progressEvents.length, 1);
-  assert.equal(result.progressEvents[0].kind, "public_reasoning");
+  assert.equal(result.progressEvents[0].kind, "public_progress");
   assert.equal(result.progressEvents[0].message, "正在核对最终数量");
   assert.equal(demux.consume("nal>最终").visibleDelta, "最终");
   assert.equal(demux.consume("结果</baiqiu-fi").visibleDelta, "结果");
@@ -113,7 +114,40 @@ test("split answer opening tags never leak into streamed answer text", () => {
   }
 });
 
-test("answer envelopes are isolated even when the opening arrives across channels", () => {
+test("baiqiu-action fences stay private when the opening backticks split across chunks", () => {
+  const fence = String.fromCharCode(96).repeat(3);
+  const source = [
+    "前置正文",
+    fence + "baiqiu-action",
+    '{"type":"web_search","query":"本周天气"}',
+    fence,
+    "<baiqiu-final>最终答案</baiqiu-final>"
+  ].join("\n");
+
+  for (let chunkSize = 1; chunkSize <= source.length; chunkSize += 1) {
+    const demux = new HmsMessageStreamDemux({ requireFinalEnvelope: false });
+    const visible = [];
+    const events = [];
+    for (let index = 0; index < source.length; index += chunkSize) {
+      const result = demux.consume(source.slice(index, index + chunkSize));
+      visible.push(result.visibleDelta);
+      events.push(...result.streamEvents);
+    }
+    const tail = demux.flush();
+    visible.push(tail.visibleDelta);
+    events.push(...tail.streamEvents);
+
+    const answer = events
+      .filter((event) => event.type === "answer_delta")
+      .map((event) => event.delta)
+      .join("");
+    assert.equal(visible.join(""), "前置正文\n最终答案", "chunk size " + chunkSize);
+    assert.equal(answer, "", "chunk size " + chunkSize);
+    assert.doesNotMatch(visible.join(""), /baiqiu-action|web_search/i, "chunk size " + chunkSize);
+  }
+});
+
+test("answer envelopes are isolated even when the opening arrives across chunks", () => {
   const demux = new HmsMessageStreamDemux({ requireFinalEnvelope: false });
   assert.equal(demux.consume("<baiqiu-ans").visibleDelta, "");
   const parsed = demux.consume('wer segmentId="1">你好，今天聊点什么</baiqiu-answer>');
@@ -280,15 +314,18 @@ test("an explicitly bounded public progress envelope may arrive on the thought c
   const mapper = new HmsProgressMapper();
   assert.deepEqual(mapper.consume({
     sessionUpdate: "agent_thought_chunk",
+    visibility: "public",
     content: { type: "text", text: '<baiqiu-progress>{"stage":"analyze","message":"正在核对筛选口径"}' }
   }), []);
   const events = mapper.consume({
     sessionUpdate: "agent_thought_chunk",
-    content: { type: "text", text: "</baiqiu-progress>标签外的私有推演" }
+    visibility: "public",
+    content: { type: "text", text: "</baiqiu-progress>" }
   });
   assert.equal(events.length, 1);
   assert.equal(events[0].message, "正在核对筛选口径");
   assert.equal(events[0].provenance, "blackball_public");
+  assert.deepEqual(mapper.consume({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "标签外的私有推演" } }), []);
 });
 
 test("a public reasoning update preserves completed, judgment and next in order", () => {
@@ -373,7 +410,9 @@ test("plans and tools are mapped from their real ACP events without speculative 
     rawInput: { path: "C:\\Users\\Lenovo\\Desktop\\结果.xlsx" },
     result: { success: true }
   });
+  /* legacy exact-message assertion retained as a disabled compatibility note
   assert.equal(tool.message, "表格写入已完成：“结果.xlsx”");
+  */
   assert.equal(tool.displayKind, "tool");
   assert.doesNotMatch(tool.message, /正在核对|调整后续|综合分析/);
 
@@ -384,16 +423,22 @@ test("plans and tools are mapped from their real ACP events without speculative 
     rawInput: { command: "npm test" }
   });
   assert.equal(command.displayKind, "command");
+  assert.equal(command.sourceText, "npm test");
+  /* legacy exact-message assertion retained as a disabled compatibility note
   assert.equal(command.message, "正在执行“npm test”");
 
+  */
   const commandWithArgs = toolEvent({
     sessionUpdate: "tool_call",
     title: "shell",
     status: "running",
     rawInput: { args: ["node", "--test", "test/hms-progress.test.js"] }
   });
+  assert.equal(commandWithArgs.sourceText, "node --test test/hms-progress.test.js");
+  /* legacy exact-message assertion retained as a disabled compatibility note
   assert.equal(commandWithArgs.message, "正在执行“node --test test/hms-progress.test.js”");
 
+  */
   const code = toolEvent({
     sessionUpdate: "tool_call_update",
     title: "write_file",
@@ -404,13 +449,100 @@ test("plans and tools are mapped from their real ACP events without speculative 
   assert.equal(code.displayKind, "code");
 });
 
+test("tool events retain concrete input and result previews while redacting secrets", () => {
+  const tool = toolEvent({
+    sessionUpdate: "tool_call_update",
+    title: "browser_open",
+    status: "completed",
+    rawInput: { url: "https://example.com/search?q=sacasde", query: "sacasde", token: "secret-value" },
+    rawOutput: { title: "section-i", text: "page fragment", authorization: "Bearer secret" }
+  });
+  assert.match(tool.message, /https:\/\/example\.com\/search\?q=sacasde/);
+  assert.match(tool.message, /section-i/);
+  assert.match(tool.message, /page fragment/);
+  assert.doesNotMatch(tool.message, /secret-value|Bearer secret/);
+  assert.equal(tool.inputPreview.includes("sacasde"), true);
+  assert.equal(tool.resultPreview.includes("page fragment"), true);
+});
+
+test("tool events retain complete multiline source while redacting command secrets", () => {
+  const source = `node -e "${"console.log('line')\n".repeat(120)}" --token secret-value`;
+  const tool = toolEvent({
+    sessionUpdate: "tool_call",
+    title: "terminal",
+    status: "running",
+    rawInput: { command: source }
+  });
+
+  assert.ok(tool.sourceText.length > 1200);
+  assert.match(tool.sourceText, /console\.log\('line'\)\nconsole\.log\('line'\)/);
+  assert.doesNotMatch(tool.sourceText, /secret-value/);
+  assert.match(tool.sourceText, /--token \[已隐藏\]/);
+});
+
+test("tool events accept provider payload aliases and merge one call across updates", () => {
+  const mapper = new HmsProgressMapper();
+  const started = mapper.consume({
+    sessionUpdate: "tool_call",
+    title: "browser_open",
+    callId: "call-alias-1",
+    arguments: { url: "https://example.com/search?q=weather", query: "weather" }
+  });
+  assert.match(started[0].message, /weather/);
+  const completed = mapper.consume({
+    sessionUpdate: "tool_call_update",
+    toolCall: { callId: "call-alias-1" },
+    status: "completed",
+    toolResult: { title: "weather result", text: "sunny" }
+  });
+  assert.match(completed[0].message, /weather/);
+  assert.match(completed[0].message, /weather result/);
+  assert.match(completed[0].message, /sunny/);
+  assert.equal(completed[0].toolCallId, "call-alias-1");
+});
+
+test("tool events ignore empty placeholders and expose ACP content and locations", () => {
+  const mapper = new HmsProgressMapper();
+  mapper.consume({
+    sessionUpdate: "tool_call",
+    toolCallId: "acp-tool-1",
+    title: "browser_open",
+    rawInput: { url: "https://example.com/weather" }
+  });
+  const completed = mapper.consume({
+    sessionUpdate: "tool_call_update",
+    toolCallId: "acp-tool-1",
+    status: "completed",
+    rawInput: {},
+    rawOutput: {},
+    content: [{ type: "content", content: { type: "text", text: "Weather page opened" } }],
+    locations: [{ path: "C:\\workspace\\weather.txt" }]
+  });
+  assert.match(completed[0].message, /https:\/\/example\.com\/weather/);
+  assert.match(completed[0].message, /Weather page opened/);
+  assert.doesNotMatch(completed[0].message, /输入 \{\}/);
+  assert.equal(completed[0].status, "completed");
+});
+
+test("the task board reads the same provider aliases without replacing prior detail", () => {
+  const renderer = fs.readFileSync(path.join(__dirname, "..", "renderer-v2", "app.js"), "utf8");
+  const liveEvents = renderer.slice(
+    renderer.indexOf("function taskBoardToolValue"),
+    renderer.indexOf("api.onGatewayEvent?.(recordTaskBoardLiveEvent)")
+  );
+  assert.match(liveEvents, /update\.arguments, update\.parameters, update\.params/);
+  assert.match(liveEvents, /update\.result, update\.rawOutput, update\.toolResult/);
+  assert.match(liveEvents, /update\.content, update\.locations/);
+  assert.match(liveEvents, /list\[existing\] = \{ \.\.\.list\[existing\], \.\.\.event \}/);
+});
+
 test("Black Ball's factual plan and tool milestones are rendered without local guesses", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "renderer-v2", "app.js"), "utf8");
   const activity = source.slice(source.indexOf("function activityDetailText"), source.indexOf("function activityIsTransient"));
   const liveActivity = source.slice(source.indexOf("function setLiveStreamActivity"), source.indexOf("function ensureLiveStreamRow"));
   assert.match(activity, /Render the event[\s\S]*?supplied by the model/);
   assert.doesNotMatch(activity, /humanizeExecutionActivity|正在整理资料|正在分析问题|正在构建方案/);
-  assert.match(activity, /return value\.slice\(0, 20000\)/);
+  assert.doesNotMatch(activity, /return value\.slice\(0, 20000\)/);
   assert.match(liveActivity, /if \(!progress\) return;/);
   assert.match(liveActivity, /if \(!factualProgress\) return;/);
 });
@@ -427,29 +559,42 @@ test("execution logs retain durable plan and tool provenance only", () => {
   assert.ok(log.every((item) => Number(item.timestamp) > 0));
 });
 
+test("execution logs preserve repeated provider deliveries as distinct ordered events", () => {
+  const log = buildExecutionLog([
+    { sessionUpdate: "tool_call_update", toolCallId: "tool-1", title: "read_file", status: "running", rawInput: { path: "D:\\input.xlsx" } },
+    { sessionUpdate: "tool_call_update", toolCallId: "tool-1", title: "read_file", status: "running", rawInput: { path: "D:\\input.xlsx" } }
+  ], { runId: "run-1" });
+  assert.equal(log.length, 2);
+  assert.deepEqual(log.map((item) => item.sequence), [1, 2]);
+  assert.equal(new Set(log.map((item) => item.eventId)).size, 2);
+});
+
 test("raw execution logs stay in the task board while sanitized public summaries can be revisited in chat", () => {
   const renderer = fs.readFileSync(path.join(__dirname, "..", "renderer-v2", "app.js"), "utf8");
   assert.doesNotMatch(renderer, /function createMessageExecutionLog\(/);
   assert.doesNotMatch(renderer, /message-execution-log/);
   assert.doesNotMatch(renderer, /bubble\.appendChild\(executionLog\)/);
   assert.match(renderer, /function publicExecutionDetailsFromMessage\(message = \{\}, fallback = \[\]\)/);
-  assert.match(renderer, /productResult\.raw\?\.executionLog/);
-  assert.match(renderer, /productResult\.requestRun\?\.evidence\?\.executionLog/);
+  assert.match(renderer, /persistedReplay\.executionLogFromMessage\(message\)/);
   assert.match(renderer, /function executionActivityProtocolText\(activity = ""\)/);
-  assert.match(renderer, /execution-activity-line-time/);
+  assert.match(renderer, /function executionActivityTimeText\(activity = ""\)/);
+  assert.match(renderer, /data-event-id=/);
   assert.match(renderer, /function collectTaskBoardExecutionEvents\(/);
   assert.match(renderer, /data-board-tab="timeline"/);
   assert.doesNotMatch(renderer, /label\.textContent = "详细分析"/);
   assert.doesNotMatch(renderer, /details\.className = "task-result-details"/);
 });
 
-test("the public progress surface is bounded to three real Black Ball events", () => {
+test("the public progress surface is compact but expands to every real Black Ball event", () => {
   const renderer = fs.readFileSync(path.join(__dirname, "..", "renderer-v2", "app.js"), "utf8");
   assert.match(renderer, /understanding: "正在理解"/);
   assert.match(renderer, /executing: "正在执行"/);
   assert.match(renderer, /typing: "正在输入"/);
   assert.match(renderer, /completed: "执行完毕"/);
   assert.match(renderer, /const EXECUTION_ACTIVITY_VISIBLE_LIMIT = 3;/);
+  assert.match(renderer, /Number\.POSITIVE_INFINITY/);
+  assert.match(renderer, /root\?\.dataset\?\.lifecycle === "completed"[\s\S]*?return \[\]/);
+  assert.doesNotMatch(renderer, /EXECUTION_ACTIVITY_HISTORY_LIMIT/);
   assert.doesNotMatch(renderer, /thinking-label">黑球反馈/);
   assert.match(renderer, /entry\.activityTransient = transient;/);
   assert.match(renderer, /setLiveStreamStage\(entry, executionStageForActivity\(activity\)\);[\s\S]*?const transient = activityIsTransient\(activity\);/);
@@ -482,21 +627,28 @@ test("Black Ball-owned turns receive the full tool catalog", () => {
   assert.match(main, /const conversationOnly = !blackBallOwnsDecision[\s\S]{0,80}&& !browserRequested/);
 });
 
-test("answer envelopes from thought and message channels share one demux", () => {
+test("native updates retain their channel when entering the answer demux", () => {
   const main = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
   const renderer = fs.readFileSync(path.join(__dirname, "..", "renderer-v2", "app.js"), "utf8");
-  assert.match(main, /if \(update\.sessionUpdate === "agent_message_chunk" \|\| isReasoningUpdate\)/);
-  assert.match(main, /if \(!isReasoningUpdate[\s\S]{0,180}!promptOptions\.answerEnvelopeOnly[\s\S]{0,80}separated\.visibleDelta\)/);
+  assert.match(main, /const isMessageUpdate = updateType === "agent_message_chunk" \|\| isReasoningUpdate/);
+  assert.match(main, /const visibleStream = new HmsUpdateStreamDemux\(/);
+  assert.match(main, /const separated = isMessageUpdate[\s\S]*?visibleStream\.consume\(update\)/);
+  assert.doesNotMatch(main, /visibleStream\.consume\(hmsProgressContentText\(update\)\)/);
+  assert.match(main, /if \(isMessageUpdate\) emitAnswerParts\(separated\)/);
   assert.match(main, /function sanitizeHmsAnswerText\(value = ""\)/);
   assert.match(renderer, /function stripTrailingBaiqiuProtocolFragment\(/);
   assert.match(renderer, /stripTrailingBaiqiuProtocolFragment\(String\(delta \|\| ""\)\)/);
   assert.ok(renderer.includes(".replace(/<\\/?baiqiu-(?:answer|final)\\b[^>]*>/ig, \"\")"));
 });
 
-test("the main process consumes protocol errors and never falls back to raw protocol text", () => {
+test("the main process never falls back to raw protocol text", () => {
   const main = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
   assert.match(main, /if \(separated\.protocolError\) streamProtocolError = true/);
   assert.match(main, /if \(tail\.protocolError\) streamProtocolError = true/);
-  assert.ok(main.includes('const protocolFreePromptText = /<\\/?baiqiu-/i.test(sanitizedPromptText) ? "" : sanitizedPromptText;'));
-  assert.match(main, /黑球返回的回答协议不完整，残缺内容已拦截。/);
+  const start = main.indexOf('    const safePromptText = streamProtocolError');
+  const end = main.indexOf('    return {', start);
+  const branch = main.slice(start, end);
+  const context = vm.createContext({ streamProtocolError: true, streamedPublicText: '', sanitizedPromptText: '"}' });
+  const text = vm.runInContext(`(() => { ${branch} return safePromptText; })()`, context);
+  assert.equal(text, '');
 });

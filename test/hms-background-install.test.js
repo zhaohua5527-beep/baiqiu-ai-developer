@@ -26,6 +26,16 @@ test("normal app startup opens the main window before starting HMS", () => {
   assert(startupBlock.indexOf("createWindow();") < startupBlock.indexOf("void ensureHmsRuntimePreparation()"));
 });
 
+test("developer first-run HMS preparation shows progress outside headless probes", () => {
+  const preparationBlock = mainJs.slice(
+    mainJs.indexOf("async function prepareBundledHmsRuntime"),
+    mainJs.indexOf("function ensureHmsRuntimePreparation")
+  );
+  assert.match(preparationBlock, /!isE2ETest && !localToolsProbeOutput && !packagedHermesProbeOutput/);
+  assert.match(preparationBlock, /await createHmsInitializationWindow\(\)/);
+  assert.doesNotMatch(preparationBlock, /if \(!isDevMode\) await createHmsInitializationWindow\(\)/);
+});
+
 test("installed runtime starts the execution ACP lane during startup", () => {
   const preparationBlock = mainJs.slice(
     mainJs.indexOf("async function prepareBundledHmsRuntime"),

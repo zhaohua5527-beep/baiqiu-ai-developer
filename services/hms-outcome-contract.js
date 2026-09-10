@@ -45,6 +45,69 @@ function parseHmsOutcomeEnvelope(text = "") {
   }
 }
 
+function normalizeTrailingOutcome(payload = {}) {
+  const status = normalizeStatus(payload?.status);
+  const kind = cleanText(payload?.kind || payload?.resultType, 80).toLowerCase();
+  if (!["completed", "awaiting_input", "failed", "cancelled"].includes(status)
+    || !["inline_text", "analysis", "file", "system", "delegation", "project", "task"].includes(kind)) return null;
+  return {
+    protocol: "hms-outcome/1.0",
+    kind,
+    status,
+    summary: cleanText(payload?.summary, 2000),
+    evidenceType: cleanText(payload?.evidenceType, 80).toLowerCase(),
+    evidence: payload?.evidence && typeof payload.evidence === "object" ? payload.evidence : null
+  };
+}
+
+function normalizeTrailingClarification(payload = {}) {
+  const question = cleanText(payload?.question, 2000);
+  if (!question || payload?.kind != null || payload?.status != null) return null;
+  const required = (Array.isArray(payload.required) ? payload.required : [])
+    .map((item) => cleanText(item, 240))
+    .filter(Boolean)
+    .slice(0, 12);
+  const options = (Array.isArray(payload.options) ? payload.options : [])
+    .map((item) => typeof item === "string" ? { label: cleanText(item, 160), value: cleanText(item, 160) } : item)
+    .filter((item) => item && cleanText(item.label || item.value, 160))
+    .slice(0, 8);
+  return { cardType: "task_input", question, required, options, preserveTask: true };
+}
+
+function parseTrailingHmsProtocolObjects(text = "") {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  let end = lines.length;
+  let hmsOutcome = null;
+  let clarification = null;
+  let consumed = false;
+  while (end > 0 && !lines[end - 1].trim()) end -= 1;
+  while (end > 0) {
+    const line = lines[end - 1].trim();
+    if (!line.startsWith("{") || !line.endsWith("}")) break;
+    let payload;
+    try {
+      payload = JSON.parse(line);
+    } catch {
+      break;
+    }
+    if (!payload || Array.isArray(payload) || typeof payload !== "object") break;
+    const outcome = normalizeTrailingOutcome(payload);
+    const input = outcome ? null : normalizeTrailingClarification(payload);
+    if (!outcome && !input) break;
+    if (outcome && !hmsOutcome) hmsOutcome = outcome;
+    if (input && !clarification) clarification = input;
+    consumed = true;
+    end -= 1;
+    while (end > 0 && !lines[end - 1].trim()) end -= 1;
+  }
+  if (!consumed) return null;
+  return {
+    text: lines.slice(0, end).join("\n").trim(),
+    hmsOutcome,
+    clarification
+  };
+}
+
 function responseObjects(response = {}) {
   const objects = [];
   const seen = new Set();
@@ -208,5 +271,6 @@ function evaluateHmsResponse(response = {}, { canonicalTask = false } = {}) {
 
 module.exports = {
   evaluateHmsResponse,
-  parseHmsOutcomeEnvelope
+  parseHmsOutcomeEnvelope,
+  parseTrailingHmsProtocolObjects
 };

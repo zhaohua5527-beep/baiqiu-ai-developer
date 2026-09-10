@@ -1,5 +1,8 @@
 "use strict";
 
+const { normalizeProvider } = require("./model-adapter");
+const { providerVerificationMatches } = require("./model-route-policy");
+
 const MODEL_MANAGER_LINK = "baiqiu://open-model-manager";
 
 function clean(value, limit = 500) {
@@ -9,28 +12,23 @@ function clean(value, limit = 500) {
 function selectedModelReadiness(settings = {}) {
   const providerId = clean(settings.defaultProvider).toLowerCase();
   const provider = providerId && settings.providers?.[providerId];
+  const normalized = provider ? normalizeProvider(providerId, provider) : null;
   const missing = [];
 
   if (!providerId || !provider) {
     missing.push("provider");
   } else {
     if (provider.enabled !== true) missing.push("enabled");
-    if (!clean(provider.model)) missing.push("model");
-    if (!clean(provider.baseURL)) missing.push("base_url");
-    if (provider.requiresApiKey !== false && !clean(provider.apiKey, 10000)) missing.push("credential");
-    const verifiedBaseURL = clean(provider.verifiedBaseURL).replace(/\/+$/, "");
-    const currentBaseURL = clean(provider.baseURL).replace(/\/+$/, "");
-    if (!clean(provider.verifiedAt)
-      || clean(provider.verifiedModel) !== clean(provider.model)
-      || verifiedBaseURL !== currentBaseURL) {
-      missing.push("verification");
-    }
+    if (!clean(normalized.model)) missing.push("model");
+    if (!clean(normalized.baseURL)) missing.push("base_url");
+    if (normalized.requiresApiKey !== false && !clean(normalized.apiKey, 10000)) missing.push("credential");
+    if (!providerVerificationMatches(providerId, provider)) missing.push("verification");
   }
 
   return Object.freeze({
     configured: missing.length === 0,
     providerId,
-    providerName: clean(provider?.name || providerId),
+    providerName: clean(normalized?.name || providerId),
     missing: Object.freeze(missing),
     action: Object.freeze({
       label: "前往模型管理",

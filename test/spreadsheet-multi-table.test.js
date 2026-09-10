@@ -47,5 +47,6 @@ test("conversation fallback leaves spreadsheet selection to HMS", () => {
   const segment = mainSource.slice(anchor, anchor + 2400);
   assert.doesNotMatch(segment, /executeSpreadsheetDataAnalysis\(message, attachments/);
   assert.doesNotMatch(segment, /tryHandleSkillShortcut\(message, localContext\)/);
-  assert.match(mainSource, /buildHmsToolProtocolPrompt\(hmsToolCatalog\)/);
+  assert.match(mainSource, /const nativeWhiteBallTools = hmsToolCatalog\.length > 0 && client\.supportsAcpMcp\(\)/);
+  assert.match(mainSource, /transport: nativeWhiteBallTools \? "acp-mcp"/);
 });
