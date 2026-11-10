@@ -85,7 +85,7 @@ test("connection probe accepts non-empty model output and records instruction co
   assert.equal(result.instructionCompliant, false);
 });
 
-test("verification rejects a selected model omitted by the provider account", async () => {
+test("verification rejects a model when the actual completion endpoint denies access", async () => {
   await assert.rejects(() => verifyProviderConnection({
     providerId: "xiaomi",
     provider: {
@@ -96,11 +96,11 @@ test("verification rejects a selected model omitted by the provider account", as
       apiKey: "test"
     },
     fetchImpl: async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ data: [{ id: "mimo-v2.5" }, { id: "mimo-v2.5-pro" }] })
+      ok: false,
+      status: 404,
+      json: async () => ({ error: { message: "model access denied" } })
     })
-  }), /不支持文本模型 mimo-v2\.5-flash/);
+  }), { code: "PROVIDER_HTTP_404", message: "model access denied" });
 });
 
 test("model routing only uses enabled and exactly verified providers", () => {
@@ -171,7 +171,8 @@ test("runtime controls preserve discovered models and distinguish native from pr
   assert.match(main, /reasoningMode === "native"/);
   assert.match(main, /modelCapabilities/);
   assert.match(main, /selectedModelReadiness\(settings\)\.configured/);
-  assert.match(main, /runModelRuntimeTransition\(\s*\(\) => verifiedProviderConfiguration\(/);
+  assert.match(main, /runModelConfigurationOperation\(payload,\s*\(\) => verifiedProviderConfiguration\(/);
+  assert.match(main, /function runModelConfigurationOperation[\s\S]*?return runModelRuntimeTransition/);
   assert.match(main, /enable: true/);
   assert.match(main, /activate: true/);
 });
@@ -182,8 +183,8 @@ test("saved credentials are reconciled into the Black Ball runtime without re-en
 
   assert.match(main, /async function reconcileSelectedModelRuntime\(\)/);
   assert.match(main, /readiness\.missing\.length === 1/);
-  assert.match(main, /if \(!modelRuntimeStartupReconciled\) clearHermesSessionBindings\(next\)/);
-  assert.match(main, /saveDb\(next, \{ immediate: true, requireCommit: true \}\)/);
+  assert.match(main, /if \(!modelRuntimeStartupReconciled\) clearHermesSessionBindings\(current\)/);
+  assert.match(main, /await commitModelSettings\(next.settings/);
   assert.match(main, /ipcMain\.handle\("models:runtime-state", \(\) => runModelRuntimeTransition\(\(\) => reconcileSelectedModelRuntime\(\)\)\)/);
   assert.match(renderer, /await api\.modelRuntimeState\?\.\(\)/);
   assert.doesNotMatch(renderer, /setTimeout\(async \(\) => \{\s*try \{\s*const receipt = await api\.modelRuntimeState/);
@@ -209,9 +210,9 @@ test("composer model switching updates locally without reloading the full databa
   const end = renderer.indexOf("\nfunction closeModelConfigDrawer", start);
   const body = renderer.slice(start, end);
 
-  assert.match(body, /provider\.model = version/);
+  assert.doesNotMatch(body, /provider\.model = version/);
   assert.match(body, /modelVersionSwitchRevision/);
-  assert.match(body, /state\.db\.settings\.providers\[key\] =/);
+  assert.match(body, /acceptModelSettingsResult\(result\)/);
   assert.doesNotMatch(body, /await api\.init\(\)/);
   assert.doesNotMatch(body, /renderSettings\(/);
   assert.doesNotMatch(body, /showCopyToast\(/);

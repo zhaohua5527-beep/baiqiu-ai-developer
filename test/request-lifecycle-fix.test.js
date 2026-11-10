@@ -16,12 +16,15 @@ function watchdog() {
   let nextId = 0;
   const timers = new Map();
   const aborts = [];
+  const queries = [];
+  const notices = [];
   const context = {
     Date: { now: () => now },
     setTimeout(callback, delay) { const id = ++nextId; timers.set(id, { callback, at: now + delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
-    api: { signalAbortChat: event => aborts.push(event) },
-    appendLiveStreamNotice() {},
+    api: { signalAbortChat: event => aborts.push(event), queryRunStatus: async event => { queries.push(event); return { status: "running" }; } },
+    appendLiveStreamNotice(entry, message) { notices.push(message); },
+    reportStartupMetric() {},
     LIVE_STREAM_FIRST_EVENT_TIMEOUT_MS: 30000,
     LIVE_STREAM_NO_PROGRESS_TIMEOUT_MS: 120000,
     LIVE_STREAM_FIRST_PUBLIC_TIMEOUT_MS: 120000,
@@ -36,7 +39,7 @@ function watchdog() {
     for (const [id, timer] of timers) if (timer.at <= now) { timers.delete(id); timer.callback(); }
     context.checkLiveStreamProgress(entry);
   }
-  return { context, entry, advance, timers, aborts };
+  return { context, entry, advance, timers, aborts, queries, notices };
 }
 
 test('active model data survives 30 seconds without pretending public output exists', () => {
@@ -51,28 +54,51 @@ test('active model data survives 30 seconds without pretending public output exi
   assert.equal(view.entry.firstEventReceived, true);
 });
 
-test('no response, ongoing response without public output, stalled stream and total deadline differ', () => {
+test('silence thresholds query runtime without cancelling an ongoing turn', async () => {
   const connection = watchdog();
   connection.advance(30001);
-  assert.equal(connection.aborts[0].timeoutKind, 'connection');
+  assert.equal(connection.aborts.length, 0);
+  assert.equal(connection.notices.length, 1);
+  connection.advance(1000);
+  assert.equal(connection.notices.length, 1);
+  connection.context.markLiveStreamTransportActivity(connection.entry, { kind: 'response_data' });
+  connection.context.markLiveStreamEventReceived(connection.entry);
+  assert.equal(connection.entry.timedOut, undefined);
   const pending = watchdog();
   for (let index = 0; index < 12; index++) {
     pending.context.markLiveStreamTransportActivity(pending.entry, { kind: 'response_data' });
     pending.advance(10000);
   }
-  assert.equal(pending.aborts[0].timeoutKind, 'first_public');
+  await Promise.resolve();
+  assert.equal(pending.queries.length, 1);
+  assert.equal(pending.aborts.length, 0);
+  assert.equal(pending.entry.timedOut, undefined);
   const stalled = watchdog();
   stalled.context.markLiveStreamEventReceived(stalled.entry);
   stalled.advance(120001);
-  assert.equal(stalled.aborts[0].timeoutKind, 'no_progress');
+  assert.equal(stalled.queries.length, 1);
+  assert.equal(stalled.aborts.length, 0);
   const total = watchdog();
   total.context.markLiveStreamEventReceived(total.entry);
   for (let index = 0; index < 30; index++) {
     total.context.markLiveStreamTransportActivity(total.entry, { kind: 'tool_event' });
     total.advance(60000);
   }
-  assert.equal(total.aborts[0].timeoutKind, 'total');
+  assert.equal(total.queries.length, 1);
+  assert.equal(total.aborts.length, 0);
   for (const kind of ['connection', 'first_public', 'total']) assert.equal(userFacingError(timeoutFailure({ timeoutKind: kind })), timeoutFailure({ timeoutKind: kind }).message);
+});
+
+test('runtime preparation is not mislabeled as model connection timeout', () => {
+  const view = watchdog();
+  view.context.clearTimeout(view.entry.firstEventTimer);
+  view.entry.firstEventTimer = null;
+  view.entry.modelRequestDispatchedAt = 0;
+  view.advance(120001);
+  assert.equal(view.aborts.length, 0);
+  view.advance(1800000);
+  assert.equal(view.queries.length, 1);
+  assert.equal(view.aborts.length, 0);
 });
 
 test('terminal turns ignore late activity and activity never enters the event ledger', () => {

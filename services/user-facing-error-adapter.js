@@ -25,6 +25,32 @@ function errorStatus(error) {
   return Number(error.status || error.statusCode || error.response?.status || error.debug?.status || 0) || 0;
 }
 
+function providerAccountErrorText(raw = "", code = "", status = 0) {
+  const source = `${code} ${raw}`;
+  const missingKey = /(?:missing|no|without|empty|undefined|未配置|缺少|为空).{0,40}(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?[_ -]?token|authorization|\btoken\b)|(?:invalid|expired|revoked|not found|not provided).{0,40}(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?[_ -]?token|authorization|\btoken\b)|(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?[_ -]?token|authorization|\btoken\b).{0,40}(?:required|missing|invalid|not provided|not found|未配置|缺失|无效|为空)|unauthori[sz]ed|身份验证失败|鉴权失败/i.test(source);
+  if (missingKey || status === 401) {
+    return "当前没有配置有效的 API Key 或访问令牌，本次请求未执行。请在模型设置中填写正确的密钥后重试。";
+  }
+
+  if (/(?:context[_ -]?length|maximum context|prompt.{0,20}(?:too long|too large)|token.{0,20}(?:limit|长度).{0,20}(?:exceed|过长|超出)|输入内容过长|超过模型 Token 上限)/i.test(source)) {
+    return "本次请求内容过长，超过了当前模型的 Token 上限。请缩短指令或减少上下文后重试。";
+  }
+
+  const insufficientBalance = status === 402 || /(?:insufficient[_ -]?(?:account[_ -]?)?(?:balance|credits?|quota)|quota[_ -]?(?:exhausted|exceeded|depleted)|(?:exceed(?:ed|s)?|exhaust(?:ed|s)?|deplet(?:ed|s)?).{0,30}quota|billing|credits?\s+(?:exhausted|depleted)|account\s+balance|payment\s+required|余额不足|余额已用完|账户余额|额度不足|配额已用完|欠费|充值)/i.test(source);
+  if (insufficientBalance) {
+    return "当前模型供应商的账户余额或额度不足，本次请求未执行。请充值或更新 API Key，也可以切换到其他可用模型后重试。";
+  }
+
+  if (status === 429 || /(?:rate[_ -]?limit|too many requests|限流|请求过于频繁|访问频率过高)/i.test(source)) {
+    return "当前模型供应商请求过于频繁或已触发限流，请稍后重试，或切换到其他可用模型。";
+  }
+
+  if (status === 403 || /(?:forbidden|access denied|permission denied|没有访问权限|拒绝访问)/i.test(source)) {
+    return "当前 API Key 没有访问该模型或接口的权限，请检查密钥权限、模型名称和 Base URL。";
+  }
+  return "";
+}
+
 function isExplicitPermissionError(raw = "", code = "") {
   if (["PERMISSION_DENIED", "ACCESS_DENIED", "EACCES", "EPERM"].includes(String(code || "").toUpperCase())) return true;
   return /\b(?:EACCES|EPERM)\b|\baccess\s+denied\b|权限(?:被)?拒绝|拒绝访问/i.test(String(raw || ""));
@@ -53,14 +79,14 @@ function userFacingError(error, context = {}) {
   if (code === "MODEL_TASK_TIMEOUT") return "本次任务已达到 30 分钟执行时限。";
   if (code === "MODEL_FIRST_EVENT_TIMEOUT") return "模型在 30 秒内没有返回首个内容。";
   if (code === "MODEL_NO_PROGRESS_TIMEOUT") return "连续 2 分钟没有收到模型、工具或正文事件。";
+  if (code === "TOOL_NO_PROGRESS_TIMEOUT") return "工具执行期间连续 2 分钟没有返回进展，本轮已停止；已经生成的文件和内容仍然保留。";
 
   if (/MODEL_FIRST_EVENT_TIMEOUT|MODEL_REQUEST_TIMEOUT/i.test(code)) {
     return "模型在规定时间内没有返回结果，请检查网络、API Key 或模型供应商状态后重试。";
   }
 
-  if (status === 402 || /(?:billing|credit|credits|account\s+balance|insufficient\s+(?:account\s+)?balance|payment\s+required|quota\s+exhausted)/i.test(`${code} ${raw}`)) {
-    return "当前模型供应商的账户余额或额度不足，本次请求未执行。请充值或更新 API Key，也可以切换到其他可用模型后重试。";
-  }
+  const providerAccountMessage = providerAccountErrorText(raw, code, status);
+  if (providerAccountMessage) return providerAccountMessage;
 
   if (/MODEL_POLICY_REMOTE_PROVIDER_REQUIRED/i.test(code) || /禁止本地模型.*远程模型|没有配置可用的远程模型/i.test(raw)) {
     return "当前没有可用的模型服务。请到 [模型管理](baiqiu://open-model-manager) 配置 API Key 或启用本地模型后重试。";
@@ -123,6 +149,9 @@ function userFacingError(error, context = {}) {
   if (/模型接口|chat\/completions|Base URL|choices|output_text|codekey|api key|apiKey/i.test(raw)) return "模型接口连接失败，请检查模型 Base URL、API Key 和模型名称。";
   if (/network|fetch|econn|dns|socket|联网/i.test(firstLine)) return "网络连接失败，请检查网络连接或模型供应商地址。";
   if (/syntax|unexpected token|parse/i.test(firstLine)) return "生成内容格式异常，已停止执行。";
+  if (/^PROVIDER_HTTP_\d+$/.test(code) || (status >= 400 && status < 600 && /^PROVIDER_/.test(code))) {
+    return `模型供应商请求失败（HTTP ${status || "未知"}），请检查模型配置、API Key 和供应商服务状态后重试。`;
+  }
   if (!developerMode && isInternalExecutionError(raw, code)) {
     return "这次请求未能安全完成，我已停止执行且不会声称成功。请重试，或提交诊断日志进一步定位。";
   }

@@ -63,21 +63,26 @@ test("cross payload fields survive renderer normalization", () => {
   assert.equal(normalized.conclusion, event.conclusion);
 });
 
-test("the structured lane keeps cross in its factual panel and omits primary summary duplicates", () => {
+test("the structured lane keeps cross and stage results visible without execution duplicates", () => {
   const helperSource = sourceBetween("function isCrossStructuredEvent", "function mergeAnswerSegmentLists");
-  const { isCrossStructuredEvent } = new Function(`${helperSource}; return { isCrossStructuredEvent };`)();
+  const { isCrossStructuredEvent, isPrimaryExecutionSummaryEvent } = new Function(
+    `${helperSource}; return { isCrossStructuredEvent, isPrimaryExecutionSummaryEvent };`
+  )();
   assert.equal(isCrossStructuredEvent({ semanticType: "cross", message: "核验完成" }), true);
   assert.equal(isCrossStructuredEvent({ semantic_type: "cross", message: "核验完成" }), true);
   assert.equal(isCrossStructuredEvent({ type: "cross", message: "核验完成" }), false);
   assert.equal(isCrossStructuredEvent({ semanticType: "stage_result", message: "核验完成" }), false);
   assert.equal(isCrossStructuredEvent({ message: "已完成交叉核验" }), false);
+  assert.equal(isPrimaryExecutionSummaryEvent({ semanticType: "cross", target: "structured", message: "核验完成" }), false);
+  assert.equal(isPrimaryExecutionSummaryEvent({ semanticType: "stage_result", target: "structured", message: "阶段完成" }), false);
 
   const persisted = sourceBetween("function renderPersistedSegmentPairs", "function snapshotMessageIdentity");
   assert.match(persisted, /\.filter\(\(event\) => !isPrimaryExecutionSummaryEvent\(event\)\)/);
+  assert.doesNotMatch(persisted, /segmentStructuredEvents\.filter\(isStageResultStructuredEvent\)/);
 
   const live = sourceBetween("function appendLiveStructuredResult", "function isPublicStructuredThought");
   const storedAt = live.indexOf("entry.structuredEvents.push");
-  const excludedAt = live.indexOf("if (isPrimaryExecutionSummaryEvent(progress)) return null;");
   const nodeAt = live.indexOf('node = document.createElement("div")');
-  assert.ok(storedAt >= 0 && excludedAt > storedAt && nodeAt > excludedAt);
+  assert.ok(storedAt >= 0 && nodeAt > storedAt);
+  assert.match(live, /!isCrossStructuredEvent\(progress\) && !isStageResultStructuredEvent\(progress\)/);
 });

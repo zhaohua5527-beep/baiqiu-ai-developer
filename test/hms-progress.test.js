@@ -501,6 +501,42 @@ test("tool events accept provider payload aliases and merge one call across upda
   assert.equal(completed[0].toolCallId, "call-alias-1");
 });
 
+test("partial tool output stays running until a terminal update, including nested status aliases", () => {
+  const mapper = new HmsProgressMapper();
+  mapper.consume({ sessionUpdate: "tool_call", toolCallId: "streaming-command", title: "terminal",
+    status: "running", rawInput: { command: "node scan.js" } });
+  for (const status of ["in_progress", "running", "pending", "retrying"]) {
+    const [event] = mapper.consume({ sessionUpdate: "tool_call_update", toolCallId: "streaming-command",
+      status, rawOutput: { stdout: "scanned /work/report.csv" } });
+    assert.equal(event.status, "running");
+    assert.equal(event.type, "tool_call_update");
+    assert.match(event.resultPreview, /report.csv/);
+    assert.equal(event.sourceText, "node scan.js");
+  }
+  const [nested] = mapper.consume({ sessionUpdate: "tool_call_update",
+    toolCall: { toolCallId: "streaming-command", status: "in_progress" }, rawOutput: { stdout: "still working" } });
+  assert.equal(nested.status, "running");
+  const [finished] = mapper.consume({ sessionUpdate: "tool_call_update", toolCallId: "streaming-command", status: "completed" });
+  assert.equal(finished.status, "completed");
+  assert.match(finished.resultPreview, /still working/);
+  assert.equal(toolEvent({ sessionUpdate: "tool_call_update", rawOutput: "legacy final result" }).status, "completed");
+  mapper.consume({ sessionUpdate: "tool_call", toolCallId: "legacy", title: "terminal", status: "running" });
+  assert.equal(mapper.consume({ sessionUpdate: "tool_call_update", toolCallId: "legacy", rawOutput: "done" })[0].status, "completed");
+});
+
+test("public operation targets retain search roots, keywords and concrete file paths", () => {
+  const search = toolEvent({ sessionUpdate: "tool_call", title: "search_files", status: "running",
+    rawInput: { path: "D:/workspace/reports", query: "price" } });
+  assert.match(search.publicSummary, /D:\/workspace\/reports/);
+  assert.match(search.publicSummary, /price/);
+  const read = toolEvent({ sessionUpdate: "tool_call", title: "read_file", status: "running",
+    rawInput: { path: "D:/workspace/reports/price.csv" } });
+  assert.match(read.publicSummary, /D:\/workspace\/reports\/price.csv/);
+  const terminal = toolEvent({ sessionUpdate: "tool_call", title: "terminal", status: "running",
+    rawInput: { command: "node scan.js" } });
+  assert.match(terminal.publicSummary, /node scan.js/);
+});
+
 test("tool events ignore empty placeholders and expose ACP content and locations", () => {
   const mapper = new HmsProgressMapper();
   mapper.consume({
@@ -601,12 +637,12 @@ test("the public progress surface is compact but expands to every real Black Bal
   assert.doesNotMatch(renderer, /createThinkingMessage\("任务仍在执行"/);
 });
 
-test("conversation shows truthful waiting status before Black Ball publishes a factual event", () => {
+test("conversation keeps the theater without a waiting placeholder before factual events", () => {
   const renderer = fs.readFileSync(path.join(__dirname, "..", "renderer-v2", "app.js"), "utf8");
   const main = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
   assert.doesNotMatch(renderer, /INITIAL_PUBLIC_ACTIVITY|正在读取本轮请求，准备当前会话/);
   const thinkingMessage = renderer.slice(renderer.indexOf("function createThinkingMessage"), renderer.indexOf("function removeThinkingMessage"));
-  assert.match(thinkingMessage, /execution-waiting-status/);
+  assert.doesNotMatch(thinkingMessage, /execution-waiting-status|等待黑球真实执行事件/);
   assert.match(thinkingMessage, /row\.hidden = !\(initialThinkingText \|\| options\.waiting === true\)/);
   assert.doesNotMatch(main, /actor: "白球"/);
   assert.doesNotMatch(main, /正在读取本轮请求，准备当前会话/);
@@ -646,7 +682,7 @@ test("the main process never falls back to raw protocol text", () => {
   assert.match(main, /if \(separated\.protocolError\) streamProtocolError = true/);
   assert.match(main, /if \(tail\.protocolError\) streamProtocolError = true/);
   const start = main.indexOf('    const safePromptText = streamProtocolError');
-  const end = main.indexOf('    return {', start);
+  const end = main.indexOf('    const finalized =', start);
   const branch = main.slice(start, end);
   const context = vm.createContext({ streamProtocolError: true, streamedPublicText: '', sanitizedPromptText: '"}' });
   const text = vm.runInContext(`(() => { ${branch} return safePromptText; })()`, context);

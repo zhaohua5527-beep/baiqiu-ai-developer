@@ -10,6 +10,8 @@ class WechatGatewayWorker {
     this.child = null;
     this.runtimeKey = "";
     this.readyPromise = null;
+    this.startPromise = null;
+    this.stopRevision = 0;
     this.pending = new Map();
     this.stdoutBuffer = "";
     this.stderrTail = "";
@@ -20,11 +22,12 @@ class WechatGatewayWorker {
   async qr(runtime = {}) { return this._request(runtime, { action: "qr" }); }
   async qrStatus(runtime = {}) { return this._request(runtime, { action: "qr-status" }); }
   async status(runtime = {}) { return this._request(runtime, { action: "status" }); }
-  async history(runtime = {}) { return this._request(runtime, { action: "history" }); }
+  async history(runtime = {}, after = 0) { return this._request(runtime, { action: "history", after }); }
   async unbind(runtime = {}) { return this._request(runtime, { action: "unbind" }); }
   async send(runtime = {}, payload = {}) { return this._request(runtime, { action: "send", ...payload }); }
 
   stop() {
+    this.stopRevision += 1;
     const child = this.child;
     this.child = null;
     this.runtimeKey = "";
@@ -55,12 +58,29 @@ class WechatGatewayWorker {
   }
 
   async _ensureStarted(runtime = {}) {
+    if (this.startPromise) {
+      await this.startPromise;
+      if (this.child && this.runtimeKey === this._runtimeKey(runtime)) return this.readyPromise;
+      return this._ensureStarted(runtime);
+    }
+    const starting = this._start(runtime);
+    this.startPromise = starting;
+    try {
+      return await starting;
+    } finally {
+      if (this.startPromise === starting) this.startPromise = null;
+    }
+  }
+
+  async _start(runtime = {}) {
     const pythonPath = String(runtime.pythonPath || "").trim();
     const agentRoot = String(runtime.agentRoot || "").trim();
     if (!pythonPath || !agentRoot) throw new Error("HMS 微信运行时不完整");
     const key = this._runtimeKey(runtime);
     if (this.child && this.runtimeKey === key && this.readyPromise) return this.readyPromise;
+    const stopRevision = this.stopRevision + 1;
     await this.stop();
+    if (this.stopRevision !== stopRevision) throw new Error("微信网关启动已取消");
     this.runtimeKey = key;
     const child = this.spawnProcess(pythonPath, [this.scriptPath], {
       cwd: agentRoot,
@@ -71,8 +91,9 @@ class WechatGatewayWorker {
     this.child = child;
     child.stdout?.setEncoding?.("utf8");
     child.stderr?.setEncoding?.("utf8");
-    child.stdout?.on("data", (chunk) => this._handleStdout(chunk));
-    child.stderr?.on("data", (chunk) => { this.stderrTail = `${this.stderrTail}${String(chunk)}`.slice(-4000); });
+    this.stderrTail = "";
+    child.stdout?.on("data", (chunk) => { if (this.child === child) this._handleStdout(chunk); });
+    child.stderr?.on("data", (chunk) => { if (this.child === child) this.stderrTail = `${this.stderrTail}${String(chunk)}`.slice(-4000); });
     child.once("error", (error) => this._handleExit(child, error));
     child.once("close", (code) => this._handleExit(child, new Error(this.stderrTail.trim() || `微信网关进程退出 (${code})`)));
     this.readyPromise = new Promise((resolve, reject) => {

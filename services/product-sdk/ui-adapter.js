@@ -4,6 +4,7 @@ const { TaskExperience } = require("./task-experience");
 const { userFacingError } = require("../user-facing-error-adapter");
 const { preserveFailedOutput } = require("../hms-stream-failure");
 const { evaluateHmsResponse } = require("../hms-outcome-contract");
+const { hasCommittedRuntimeDelivery } = require("../runtime-outcome");
 
 function firstText(...values) {
   const value = values.find((item) => typeof item === "string" && item.trim());
@@ -15,8 +16,8 @@ function structuredResponseEvidence(response = {}) {
     "ceoOrchestration", "integratedCeoDelivery", "projectRunId", "assignments", "results", "employeeResults",
     "report", "reportStatus", "delegationIds", "delegationResults", "delegationEvidence",
     "hermesSessionId", "traceId", "clarification", "presentation", "outline", "knowledgeReferences",
-    "hmsOutcome", "toolCalls", "files", "generatedFiles", "baiqiuToolProtocol", "executionLog",
-    "structuredEvents", "answerSegments"
+    "hmsOutcome", "runtimeOutcome", "toolCalls", "files", "generatedFiles", "baiqiuToolProtocol", "executionLog",
+    "structuredEvents", "answerSegments", "protocolError", "stopReason", "completedDelivery"
   ];
   return keys.reduce((result, key) => {
     if (response[key] !== undefined) result[key] = response[key];
@@ -152,7 +153,7 @@ class UIAdapter {
       success,
       verified: evaluation.verified,
       text: text || firstText(response?.error, "响应未返回可显示文本。"),
-      error: success ? null : (response?.error || evaluation.error || "conversation_response_text_invalid"),
+      error: success || evaluation.status === "unknown" ? null : (response?.error || evaluation.error || "conversation_response_text_invalid"),
       result: response?.result || null,
       ...responseEvidence,
       raw: structuredRaw,
@@ -163,12 +164,14 @@ class UIAdapter {
 
   completeRuntimeTask(task = {}, response = {}) {
     const responseText = firstText(response.text, response.message);
-    const ok = response.ok !== false && Boolean(responseText);
+    const evaluation = evaluateHmsResponse(response);
+    const unknown = evaluation.status === "unknown";
+    const ok = unknown ? undefined : evaluation.success;
     const responseEvidence = structuredResponseEvidence(response);
     const responseRaw = response.raw && typeof response.raw === "object" ? response.raw : {};
     const completed = {
       ...task,
-      status: ok ? "success" : response.status === "blocked" ? "blocked" : "failed",
+      status: unknown ? "unknown" : ok ? "success" : response.status === "blocked" ? "blocked" : evaluation.status,
       runtimeStatus: String(response.runtimeStatus || response.status || ""),
       deliveryStatus: String(response.deliveryStatus || ""),
       presentationStatus: String(response.presentationStatus || ""),
@@ -178,20 +181,20 @@ class UIAdapter {
         normalized: {
           success: ok,
           result: { text: responseText },
-          error: response.error || (ok ? null : "conversation_response_text_invalid")
+          error: response.error || (ok || unknown ? null : "conversation_response_text_invalid")
         },
         raw: Object.keys(responseEvidence).length || Object.keys(responseRaw).length
           ? { ...responseRaw, ...responseEvidence }
           : null
       },
-      error: ok ? null : userFacingError(response.error || "conversation_response_text_invalid", {
+      error: ok || unknown ? null : userFacingError(response.error || "conversation_response_text_invalid", {
         classification: task.classification,
         domain: task.context?.conversationUnderstanding?.domain || ""
       }),
-      technicalError: ok ? null : (response.error || "conversation_response_text_invalid"),
+      technicalError: ok || unknown ? null : (response.error || "conversation_response_text_invalid"),
       updatedAt: new Date().toISOString()
     };
-    completed.experience = TaskExperience.advance(completed, ok ? "completed" : "failed", {
+    completed.experience = unknown ? task.experience : TaskExperience.advance(completed, ok ? "completed" : "failed", {
       message: ok ? "已完成" : completed.error,
       result: completed.result
     });
@@ -230,7 +233,7 @@ class UIAdapter {
       if (typeof result === "string" && result.trim()) return { ok: true, text: result.trim() };
       if (result && typeof result === "object") {
         const text = firstText(result.text, result.message);
-        if (text) return { ...result, ok: result.ok !== false, text };
+        if (text || hasCommittedRuntimeDelivery(result)) return { ...result, ok: result.ok !== false, text };
         return { ...result, ok: false, text: "响应格式错误：模型没有返回可显示文字。", error: result.error || "conversation_response_text_invalid" };
       }
     }
@@ -245,7 +248,7 @@ class UIAdapter {
       taskId: task.taskId,
       productId: task.productId,
       status: task.status,
-      success: task.status === "success",
+      success: task.status === "unknown" ? undefined : task.status === "success",
       text: firstText(result.text, result.userMessage, normalized?.result?.text, task.error),
       result,
       ...(raw.ceoOrchestration !== undefined ? { ceoOrchestration: raw.ceoOrchestration } : {}),

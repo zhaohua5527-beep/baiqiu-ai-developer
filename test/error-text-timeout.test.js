@@ -58,3 +58,27 @@ test("billing text is localized even when an upstream adapter only provides a ra
   assert.match(text, /本次请求未执行/);
   assert.doesNotMatch(text, /Billing|Insufficient|account balance/);
 });
+
+test("missing API keys are localized instead of exposing provider English", () => {
+  const text = userFacingError({
+    code: "PROVIDER_HTTP_401",
+    status: 401,
+    message: "Unauthorized: No API key was provided"
+  });
+  assert.match(text, /没有配置有效的 API Key/);
+  assert.doesNotMatch(text, /Unauthorized|No API key/);
+});
+
+test("quota and rate-limit errors are localized across provider variants", () => {
+  const quota = userFacingError({ code: "PROVIDER_HTTP_400", status: 400, message: "insufficient_quota" });
+  const limited = userFacingError({ code: "PROVIDER_HTTP_429", status: 429, message: "Too Many Requests" });
+  assert.match(quota, /余额或额度不足/);
+  assert.match(limited, /限流/);
+  assert.doesNotMatch(`${quota} ${limited}`, /insufficient_quota|Too Many Requests/);
+});
+
+test("unknown provider HTTP failures keep a Chinese message", () => {
+  const text = userFacingError({ code: "PROVIDER_HTTP_400", status: 400, message: "bad request from upstream" });
+  assert.match(text, /模型供应商请求失败/);
+  assert.doesNotMatch(text, /bad request from upstream/);
+});

@@ -12,12 +12,14 @@ test("switching sessions saves the current viewport before selection", () => {
   const end = source.indexOf("function statusText", start);
   const selectSession = source.slice(start, end);
 
-  assert.ok(selectSession.indexOf("saveSessionScrollPosition(state.selectedSessionId)") < selectSession.indexOf("api.selectSession"));
+  const saveIndex = selectSession.indexOf("saveSessionScrollPosition(previousSessionId)");
+  assert.ok(saveIndex >= 0 && saveIndex < selectSession.indexOf("state.selectedSessionId = resolvedSessionId"));
+  assert.match(selectSession, /saveSessionScrollPosition\(previousSessionId\);\s*pauseOutputFollowing\(\);\s*cancelInstructionAnchorScroll\(\)/);
 });
 
 test("session scroll positions persist an anchor and message window offset", () => {
   assert.match(source, /const SESSION_SCROLL_KEY = "baiqiu\.sessionScrollPositions"/);
-  assert.match(source, /atBottom: !instructionAnchorId\(sessionId\) && isNearBottom\(messageList\)/);
+  assert.match(source, /atBottom: !instructionAnchorId\(sessionId\) && distanceFromBottom <= 4/);
   assert.match(source, /anchorId: anchor\?\.dataset\.messageId \|\| ""/);
   assert.match(source, /windowOffset: Math\.max\(0, Number\(state\.messageWindowOffsets\.get\(sessionId\) \|\| 0\)\)/);
   assert.match(source, /localStorage\.setItem\(SESSION_SCROLL_KEY, JSON\.stringify\(positions\)\)/);
@@ -28,9 +30,10 @@ test("first entry jumps to the bottom and returning restores the saved viewport"
   const end = source.indexOf("function renderAttachments", start);
   const renderMessages = source.slice(start, end);
 
-  assert.match(renderMessages, /if \(sessionChanged && !hasInstructionAnchor\) \{\s*restoreSessionScrollPosition\(session\.id\);/);
-  assert.match(source, /applyMessageScrollPosition\(position, \{ fallbackToBottom: !position \}\)/);
-  assert.match(source, /const restoreBottom = !keepInstructionAnchor && \(fallbackToBottom \|\| position\?\.atBottom === true\)/);
+  assert.match(renderMessages, /if \(sessionChanged\) \{\s*restoreSessionScrollPosition\(session\.id\);/);
+  assert.match(source, /applyMessageScrollPosition\(position, \{ fallbackToBottom: !position, keepInstructionAnchor \}\)/);
+  assert.match(source, /const restoreBottom = !keepInstructionAnchor && fallbackToBottom/);
+  assert.match(source, /if \(position\) releaseInstructionAnchorPosition\(sessionId\)/);
   assert.match(source, /messageList\.style\.scrollBehavior = "auto"/);
   assert.doesNotMatch(renderMessages, /scrollMessagesToBottom\(\{ resume: true \}\)/);
 });
@@ -42,7 +45,7 @@ test("message restoration and follow-output use one scroll write per layout pass
   assert.equal((restoreBody.match(/applyMessageScrollPosition\(position/g) || []).length, 1);
   assert.match(restoreBody, /if \(sessionScrollRestoreFrame\) cancelAnimationFrame\(sessionScrollRestoreFrame\)/);
   assert.match(restoreBody, /state\.selectedSessionId !== sessionId \|\| state\.lastRenderedSessionId !== sessionId/);
-  assert.match(restoreBody, /sessionScrollRestoreFrame = requestAnimationFrame\(\(\) => \{/);
+  assert.doesNotMatch(restoreBody, /requestAnimationFrame/);
 
   const bottomStart = source.indexOf("function scrollMessagesToBottom");
   const bottomEnd = source.indexOf("function hasVisibleLiveChatStream", bottomStart);

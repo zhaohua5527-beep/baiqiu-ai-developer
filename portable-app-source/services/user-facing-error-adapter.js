@@ -1,0 +1,165 @@
+"use strict";
+const { PROVIDER_ERRORS } = require("./hms-stream-failure");
+
+function errorText(error) {
+  if (!error) return "";
+  if (typeof error === "string") return error;
+  if (typeof error.message === "string") return error.message;
+  if (typeof error.error === "string") return error.error;
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
+
+function errorCode(error) {
+  if (error && typeof error === "object") {
+    const direct = String(error.code || error.errorCode || "").trim();
+    if (direct) return direct;
+    // failureResponse 包装后，原始码放在 meta.errorCode（如 "TASK_HARD_TIMEOUT (NC3001)"）
+    const meta = String(error.meta?.errorCode || error.meta?.originalErrorCode || "").trim();
+    if (meta) return meta;
+  }
+  return "";
+}
+
+function errorStatus(error) {
+  if (!error || typeof error !== "object") return 0;
+  return Number(error.status || error.statusCode || error.response?.status || error.debug?.status || 0) || 0;
+}
+
+function providerAccountErrorText(raw = "", code = "", status = 0) {
+  const source = `${code} ${raw}`;
+  const missingKey = /(?:missing|no|without|empty|undefined|未配置|缺少|为空).{0,40}(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?[_ -]?token|authorization|\btoken\b)|(?:invalid|expired|revoked|not found|not provided).{0,40}(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?[_ -]?token|authorization|\btoken\b)|(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?[_ -]?token|authorization|\btoken\b).{0,40}(?:required|missing|invalid|not provided|not found|未配置|缺失|无效|为空)|unauthori[sz]ed|身份验证失败|鉴权失败/i.test(source);
+  if (missingKey || status === 401) {
+    return "当前没有配置有效的 API Key 或访问令牌，本次请求未执行。请在模型设置中填写正确的密钥后重试。";
+  }
+
+  if (/(?:context[_ -]?length|maximum context|prompt.{0,20}(?:too long|too large)|token.{0,20}(?:limit|长度).{0,20}(?:exceed|过长|超出)|输入内容过长|超过模型 Token 上限)/i.test(source)) {
+    return "本次请求内容过长，超过了当前模型的 Token 上限。请缩短指令或减少上下文后重试。";
+  }
+
+  const insufficientBalance = status === 402 || /(?:insufficient[_ -]?(?:account[_ -]?)?(?:balance|credits?|quota)|quota[_ -]?(?:exhausted|exceeded|depleted)|(?:exceed(?:ed|s)?|exhaust(?:ed|s)?|deplet(?:ed|s)?).{0,30}quota|billing|credits?\s+(?:exhausted|depleted)|account\s+balance|payment\s+required|余额不足|余额已用完|账户余额|额度不足|配额已用完|欠费|充值)/i.test(source);
+  if (insufficientBalance) {
+    return "当前模型供应商的账户余额或额度不足，本次请求未执行。请充值或更新 API Key，也可以切换到其他可用模型后重试。";
+  }
+
+  if (status === 429 || /(?:rate[_ -]?limit|too many requests|限流|请求过于频繁|访问频率过高)/i.test(source)) {
+    return "当前模型供应商请求过于频繁或已触发限流，请稍后重试，或切换到其他可用模型。";
+  }
+
+  if (status === 403 || /(?:forbidden|access denied|permission denied|没有访问权限|拒绝访问)/i.test(source)) {
+    return "当前 API Key 没有访问该模型或接口的权限，请检查密钥权限、模型名称和 Base URL。";
+  }
+  return "";
+}
+
+function isExplicitPermissionError(raw = "", code = "") {
+  if (["PERMISSION_DENIED", "ACCESS_DENIED", "EACCES", "EPERM"].includes(String(code || "").toUpperCase())) return true;
+  return /\b(?:EACCES|EPERM)\b|\baccess\s+denied\b|权限(?:被)?拒绝|拒绝访问/i.test(String(raw || ""));
+}
+
+function publicBrandText(value = "") {
+  return String(value)
+    .replace(/Hermes\s+Agent/gi, "黑球")
+    .replace(/\bHMS\b|Hermes|OpenClaw/gi, "黑球");
+}
+
+function isInternalExecutionError(value = "", code = "") {
+  return /(?:system_)?capability_missing|NC\d{3,5}|UnderstandingDecision|Product task failed|UUG_|code_(?:search|read|modify)|test_execute|patch_apply/i.test(`${code} ${value}`);
+}
+
+function userFacingError(error, context = {}) {
+  const raw = errorText(error).replace(/\r/g, "\n");
+  const firstLine = publicBrandText(raw.split("\n").filter(Boolean)[0] || "未知原因");
+  const code = errorCode(error);
+  const status = errorStatus(error);
+  const developerMode = context.developerMode === true;
+
+  if (Object.hasOwn(PROVIDER_ERRORS, code)) return PROVIDER_ERRORS[code];
+  if (code === "MODEL_CONNECTION_TIMEOUT") return "请求发出后 30 秒内未收到模型响应数据。";
+  if (code === "MODEL_PUBLIC_OUTPUT_TIMEOUT") return "模型已响应，但 2 分钟内仍未产生正文或公开执行事件。";
+  if (code === "MODEL_TASK_TIMEOUT") return "本次任务已达到 30 分钟执行时限。";
+  if (code === "MODEL_FIRST_EVENT_TIMEOUT") return "模型在 30 秒内没有返回首个内容。";
+  if (code === "MODEL_NO_PROGRESS_TIMEOUT") return "连续 2 分钟没有收到模型、工具或正文事件。";
+  if (code === "TOOL_NO_PROGRESS_TIMEOUT") return "工具执行期间连续 2 分钟没有返回进展，本轮已停止；已经生成的文件和内容仍然保留。";
+
+  if (/MODEL_FIRST_EVENT_TIMEOUT|MODEL_REQUEST_TIMEOUT/i.test(code)) {
+    return "模型在规定时间内没有返回结果，请检查网络、API Key 或模型供应商状态后重试。";
+  }
+
+  const providerAccountMessage = providerAccountErrorText(raw, code, status);
+  if (providerAccountMessage) return providerAccountMessage;
+
+  if (/MODEL_POLICY_REMOTE_PROVIDER_REQUIRED/i.test(code) || /禁止本地模型.*远程模型|没有配置可用的远程模型/i.test(raw)) {
+    return "当前没有可用的模型服务。请到 [模型管理](baiqiu://open-model-manager) 配置 API Key 或启用本地模型后重试。";
+  }
+  if (code === "SKILL_QUERY_NOT_ACQUISITION") {
+    return "这是在询问我的技能学习能力，不是学习命令；我不会因此创建或安装技能。";
+  }
+  if (code === "SKILL_TARGET_REQUIRED") {
+    return "请先说明要学习的具体技能、要完成的目标和期望产物，我不会把模糊问句当成技能安装命令。";
+  }
+  if (code === "SKILL_TRUSTED_IMPLEMENTATION_REQUIRED") {
+    return "当前只找到了知识说明，没有可执行实现和真实产物验证，因此这项技能没有被标记为 READY。需要接入可信实现或对应工具后，才能继续原始目标。";
+  }
+  if (code === "MEMBERSHIP_REQUIRED") return "此功能需要有效会员。";
+  if (code === "CLIENT_INTEGRITY_REPAIR_REQUIRED") return "客户端完整性校验失败，请使用完整客户端的修复功能后重试。";
+  if (/hms_file_evidence_missing/i.test(`${code} ${raw}`)) {
+    return "黑球声称文件任务已经完成，但没有返回可核验的文件证据，本次未标记为完成。";
+  }
+  if (/hms_effect_evidence_missing/i.test(`${code} ${raw}`)) {
+    return "黑球声称操作已经完成，但没有返回真实工具证据，本次未标记为完成。";
+  }
+  if (/hms_outcome_missing/i.test(`${code} ${raw}`)) {
+    return "黑球没有返回可核验的任务状态，本次未标记为完成。";
+  }
+  if (/NC3001|UnderstandingDecision is required/i.test(raw)) {
+    // TOOL_FAILURE（NC3001）是工具执行失败的兜底前缀。它可能是由超时、
+    // 权限、网络等具体原因引起的——先让更具体的判定透传，不要笼统翻译成
+    // "没有安全地进入执行链"，否则用户看到超时却被说成安全阻断。
+    // 注意：真实超时错误可能不含"超时"二字（如"任务超过最长允许时长"），
+    // 但要按超时语义呈现，不能伪装成安全阻断。
+    if (/TASK_HARD_TIMEOUT|HARD_TIMEOUT|timeout|timed?\s*out|超时|超过最长允许时长|最长允许时长/i.test(`${code} ${raw}`)) return "任务执行超过允许时长，已停止。您可以缩小任务范围或再次尝试。";
+    if (isExplicitPermissionError(raw, code)) return "系统拒绝了该目录的写入操作，请检查该目录的 Windows 权限。";
+    if (/network|fetch|econn|dns|socket|联网/i.test(raw)) return "网络连接失败，请检查网络连接或模型供应商地址。";
+    if (/not\s*found|enoent|不存在|找不到/i.test(raw)) return "所需文件、程序或资源不存在。";
+    if (/weekly[_\s-]*limit|usage[_\s-]*limit|quota|rate[_\s-]*limit|429|配额|额度|限额/i.test(raw)) return "模型供应商额度已用完或触发限流，请更换有额度的 API Key，或等待额度恢复。";
+    return developerMode
+      ? `执行链安全上下文缺失，操作已停止（${firstLine.slice(0, 180)}）。`
+      : "这次请求没有安全地进入执行链，我已停止操作，且没有产生副作用。请重试；若仍失败，请提交诊断日志。";
+  }
+  if (/(?:system_)?capability_missing/i.test(`${code} ${raw}`)) {
+    const domain = String(context.domain || context.classification || "");
+    if (domain === "content" || /writing_agent|text_generation|document_generation/i.test(raw)) {
+      return "当前缺少完成这项内容所需的能力，我没有生成假结果。可以先补充目标和交付格式，或在能力可用后继续。";
+    }
+    if (domain === "development" || /development_task|code_(?:search|read|modify)|test_execute/i.test(raw)) {
+      return "当前缺少完成这项修改所需的开发能力，我没有创建失败任务，也不会假装已经修改。请在开发能力可用后重试。";
+    }
+    return "当前缺少完成这项请求所需的能力，我没有执行或生成假结果。请调整目标，或在相应能力可用后继续。";
+  }
+  if (/\b(?:EACCES|EPERM)\b.*\bmkdir\b.*['"]?[A-Za-z]:[\\/]?['"]?/i.test(raw)) {
+    return "不能直接创建或覆盖磁盘根目录；请在盘符下指定文件夹名称。盘符本身可以作为保存位置。";
+  }
+  if (isExplicitPermissionError(raw, code)) return "系统拒绝了该目录的写入操作，请检查该目录的 Windows 权限。";
+  if (/weekly[_\s-]*limit|usage[_\s-]*limit|quota|rate[_\s-]*limit|429|配额|额度|限额/i.test(raw)) return "模型供应商额度已用完或触发限流，请更换有额度的 API Key，或等待额度恢复。";
+  if (/unsupported model|does not support (?:the )?model|当前账号(?:不支持|没有返回)文本模型/i.test(raw)) {
+    return `当前模型型号不受供应商接口支持：${firstLine.slice(0, 180)}`;
+  }
+  if (/timeout|timed?\s*out|超时/i.test(firstLine)) return "网络或工具响应超时，请稍后重试。";
+  if (/not\s*found|enoent|不存在|找不到/i.test(firstLine)) return "所需文件、程序或资源不存在。";
+  if (/模型接口|chat\/completions|Base URL|choices|output_text|codekey|api key|apiKey/i.test(raw)) return "模型接口连接失败，请检查模型 Base URL、API Key 和模型名称。";
+  if (/network|fetch|econn|dns|socket|联网/i.test(firstLine)) return "网络连接失败，请检查网络连接或模型供应商地址。";
+  if (/syntax|unexpected token|parse/i.test(firstLine)) return "生成内容格式异常，已停止执行。";
+  if (/^PROVIDER_HTTP_\d+$/.test(code) || (status >= 400 && status < 600 && /^PROVIDER_/.test(code))) {
+    return `模型供应商请求失败（HTTP ${status || "未知"}），请检查模型配置、API Key 和供应商服务状态后重试。`;
+  }
+  if (!developerMode && isInternalExecutionError(raw, code)) {
+    return "这次请求未能安全完成，我已停止执行且不会声称成功。请重试，或提交诊断日志进一步定位。";
+  }
+  return firstLine
+    .replace(/^Error:\s*/i, "")
+    .replace(/^Exception:\s*/i, "")
+    .replace(/^Failed:\s*/i, "失败：")
+    .slice(0, 240) || "未知原因";
+}
+
+module.exports = { errorText, errorCode, isInternalExecutionError, publicBrandText, userFacingError };

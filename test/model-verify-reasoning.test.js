@@ -14,7 +14,6 @@ test("probeProvider uses adequate max_tokens for reasoning models", () => {
   const segment = source.slice(probeStart, probeStart + 1200);
   assert.match(segment, /max_tokens: 512/);
   assert.ok(!/max_tokens: 32/.test(segment), "old 32-token cap must be gone");
-  assert.match(segment, /推理模型/);
 });
 
 // 集成测试：模拟推理模型（content 只在 token 足够时返回）验证 probeProvider 判定

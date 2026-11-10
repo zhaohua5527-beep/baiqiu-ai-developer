@@ -112,7 +112,7 @@ function transportToolEvents(streamId, events) {
   return events.map((progress) => publicChatProgress(streamId, { type: "phase", progress }));
 }
 
-test("tool events carry deterministic public summaries without exposing commands", () => {
+test("tool events identify the actual command in their public operation summary", () => {
   const [started, completed] = toolEvents(
     {
       sessionUpdate: "tool_call",
@@ -131,10 +131,10 @@ test("tool events carry deterministic public summaries without exposing commands
   assert.equal(started.publicActionId, "git-check-1");
   assert.equal(started.publicSummaryKind, "action");
   assert.match(started.publicSummary, /^正在执行/);
-  assert.doesNotMatch(started.publicSummary, /rev-parse|--show-toplevel/);
+  assert.match(started.publicSummary, /git rev-parse --show-toplevel/);
   assert.equal(completed.publicActionId, "git-check-1");
   assert.equal(completed.publicSummaryKind, "result");
-  assert.match(completed.publicSummary, /已完成$/);
+  assert.match(completed.publicSummary, /已完成：git rev-parse --show-toplevel$/);
 });
 
 test("writes, verification, failures and retries are marked as visible facts", () => {

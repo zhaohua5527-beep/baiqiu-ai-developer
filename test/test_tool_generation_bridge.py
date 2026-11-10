@@ -10,6 +10,34 @@ from unittest.mock import patch
 
 
 class ToolGenerationBridgeTest(unittest.TestCase):
+    def test_busy_session_waits_for_idle_without_returning_an_answer(self):
+        bridge = self.load_bridge()
+        acp = ModuleType("acp")
+        acp.update_agent_message_text = lambda text: SimpleNamespace(content=SimpleNamespace(text=text), field_meta=None)
+
+        async def run(cancel):
+            state = SimpleNamespace(is_running=True)
+            updates = []
+
+            class Connection:
+                async def session_update(self, session_id, update):
+                    updates.append(update)
+
+            pending = asyncio.create_task(bridge.wait_for_session_idle(state, Connection(), "runtime", "turn-A"))
+            await asyncio.sleep(0)
+            self.assertFalse(pending.done())
+            if cancel:
+                state._baiqiu_cancel_revision = 1
+            state.is_running = False
+            self.assertEqual(await pending, not cancel)
+            self.assertEqual([update.content.text for update in updates], [""] * len(updates))
+            self.assertEqual([update.field_meta["baiqiu_diagnostic"]["phase"] for update in updates], ["waiting"] if cancel else ["waiting", "ready"])
+            self.assertTrue(all(update.field_meta["baiqiu_diagnostic"]["turnId"] == "turn-A" for update in updates))
+
+        with patch.dict(sys.modules, {"acp": acp}):
+            asyncio.run(run(False))
+            asyncio.run(run(True))
+
     def test_skill_preparation_uses_native_cache_keys_without_running_the_agent(self):
         bridge = self.load_bridge()
         calls = []
@@ -254,6 +282,32 @@ class ToolGenerationBridgeTest(unittest.TestCase):
         restore()
         self.assertNotIn("run_conversation", agent.__dict__)
 
+    def test_active_supplement_retains_original_task_and_does_not_revive_old_turns(self):
+        bridge = self.load_bridge()
+        prompt = "[Runtime context]\nrules\n[User request]\n比较三个方案并给出执行顺序"
+        supplement = "[Supplement current]\n[Active task supplement]\n只采用不花钱的方案"
+        system = {"role": "system", "content": "Preserve task context."}
+
+        class Agent:
+            def run_conversation(self, **kwargs):
+                return self._build_api_kwargs([system, {"role": "user", "content": kwargs["user_message"]},
+                    {"role": "assistant", "content": "已完成初步比较，继续核对可行性。"},
+                    {"role": "user", "content": supplement}])
+
+            def _build_api_kwargs(self, messages):
+                return messages
+
+        agent = Agent()
+        restore = bridge.bind_runtime_context(agent)
+        self.addCleanup(restore)
+        messages = agent.run_conversation(user_message=prompt)
+        self.assertIn("比较三个方案并给出执行顺序", messages[1]["content"])
+        self.assertEqual(messages[-1]["content"], supplement)
+        self.assertIn("retain the original goal", messages[0]["content"])
+        self.assertIn("Do not revive tasks from earlier turns", messages[0]["content"])
+        self.assertNotIn("Only the last [User request]", messages[0]["content"])
+        self.assertEqual(system["content"], "Preserve task context.")
+
     def test_real_interruption_status_reaches_system_request_view_only(self):
         bridge = self.load_bridge()
         system = {"role": "system", "content": "Keep all native tool and reasoning instructions."}
@@ -363,6 +417,40 @@ class ToolGenerationBridgeTest(unittest.TestCase):
         self.assertGreater(event["timestamp"], 0)
         self.assertNotEqual(event["eventId"], second.field_meta["baiqiu_execution"]["eventId"])
         self.assertNotIn("toolCallId", event)
+
+    def test_provider_usage_observes_calls_without_counting_nested_fallback_twice(self):
+        bridge = self.load_bridge()
+        sent = []
+        acp = ModuleType("acp")
+        acp.update_agent_message_text = lambda text: SimpleNamespace(content=SimpleNamespace(text=text), field_meta=None)
+        events = ModuleType("acp_adapter.events")
+        events._send_update = lambda conn, session, loop, update: sent.append(update.field_meta["baiqiu_diagnostic"])
+        pricing = ModuleType("agent.usage_pricing")
+        pricing.normalize_usage = lambda usage, **kwargs: SimpleNamespace(prompt_tokens=usage["input"], output_tokens=usage["output"], total_tokens=usage["input"] + usage["output"])
+        class Agent:
+            provider = "fixture"
+            api_mode = "chat"
+            usage = {"input": 900, "output": 100}
+            def _interruptible_api_call(self, **kwargs):
+                return SimpleNamespace(usage=self.usage)
+            def _interruptible_streaming_api_call(self, **kwargs):
+                return self._interruptible_api_call(**kwargs)
+        agent = Agent()
+        with patch.dict(sys.modules, {"acp": acp, "acp_adapter.events": events, "agent.usage_pricing": pricing}):
+            restore = bridge.bind_provider_usage(agent, "conn", "session", None)
+            result = agent._interruptible_streaming_api_call()
+            self.assertEqual(result.usage, agent.usage)
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["totalTokens"], 1000)
+            agent._interruptible_api_call()
+            self.assertEqual(len(sent), 2)
+            self.assertNotEqual(sent[0]["requestId"], sent[1]["requestId"])
+            agent.usage = None
+            agent._interruptible_streaming_api_call()
+            self.assertEqual(len(sent), 2)
+            restore()
+            self.assertNotIn("_interruptible_api_call", agent.__dict__)
+            self.assertNotIn("_interruptible_streaming_api_call", agent.__dict__)
 
     def test_http_timings_observe_without_changing_content_or_leaking_secrets(self):
         import httpx

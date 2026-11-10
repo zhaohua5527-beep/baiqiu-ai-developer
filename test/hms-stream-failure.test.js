@@ -9,10 +9,56 @@ const { HmsMessageStreamDemux } = require("../services/hms-progress");
 const { providerDiagnostic, timeoutFailure, preserveFailedOutput } = require("../services/hms-stream-failure");
 const { userFacingError } = require("../services/user-facing-error-adapter");
 
+test("queue status is metadata and not a provider failure or answer", async () => {
+  const { looksLikeHermesFailure } = require("../services/hermes-acp-client");
+  assert.equal(looksLikeHermesFailure("Queued for the next turn. (1 queued)"), false);
+  const client = new HermesAcpClient();
+  const diagnostic = { type: "session_waiting", phase: "waiting", turnId: "turn-A",
+    eventId: "session-wait:12345678-1234-1234-1234-123456789012", sequence: 1, timestamp: 1000 };
+  const messages = [
+    { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "" }, _meta: { baiqiu_diagnostic: diagnostic } } },
+    { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "actual result" } } },
+    { kind: "stop", stopReason: "end_turn" }
+  ];
+  client.ensureSession = async () => ({ hermesSessionId: "runtime", active: { prompt() {}, nextUpdate: async () => messages.shift() } });
+  const diagnostics = [];
+  const updates = [];
+  const result = await client.prompt("one", "continue", { onDiagnostic: item => diagnostics.push(item), onUpdate: item => updates.push(item) });
+  assert.deepEqual(diagnostics, [diagnostic]);
+  assert.equal(result.text, "actual result");
+  assert.equal(result.status, "done");
+  assert.equal(updates.length, 1);
+});
+
+test("an unfinished tool is identified separately from a model timeout", () => {
+  const result = timeoutFailure({ timeoutKind: "no_progress", toolCalls: [{ sessionUpdate: "tool_call", toolCallId: "word" }] });
+  assert.equal(result.code, "TOOL_NO_PROGRESS_TIMEOUT");
+  assert.match(userFacingError(result), /工具执行/);
+  assert.equal(timeoutFailure({ timeoutKind: "no_progress", toolCalls: [{ status: "completed" }] }).code, "MODEL_NO_PROGRESS_TIMEOUT");
+  assert.equal(timeoutFailure({ timeoutKind: "total", toolCalls: [{ status: "running" }] }).code, "MODEL_TASK_TIMEOUT");
+});
+
 function errorUpdate(code = "HERMES_PROVIDER_OVERLOADED") {
   return { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "" },
     _meta: { baiqiu_diagnostic: { type: "provider_error", code, timestamp: 1000, errorType: "APIError", command: "secret", message: "private" } } };
 }
+
+test("stage delivery audit accepts scoped metadata without exposing tool output", () => {
+  const update = errorUpdate();
+  const diagnostic = { type: "stage_delivery", stage: "authored", turnId: "turn-1",
+    eventId: "stage-delivery:12345678-1234-1234-1234-123456789012", sequence: 2, timestamp: 1000,
+    segmentId: "result-1", goalId: "invoice", toolCount: 1, unassessedCount: 0, pendingCount: 0,
+    contentChars: 1024, evidenceResolved: true };
+  update._meta.baiqiu_diagnostic = { ...diagnostic, message: "private", evidenceToolCallIds: ["tool-1"], apiKey: "private" };
+  assert.deepEqual(providerDiagnostic(update), diagnostic);
+  for (const invalid of [{ stage: "invented" }, { sequence: 0 }, { eventId: "wrong" }, { turnId: null }]) {
+    update._meta.baiqiu_diagnostic = { ...diagnostic, ...invalid };
+    assert.equal(providerDiagnostic(update), null);
+  }
+  update._meta.baiqiu_diagnostic = diagnostic;
+  update.content.text = "user answer";
+  assert.equal(providerDiagnostic(update), null);
+});
 
 test("provider errors preserve typed public reasons without leaking diagnostic payloads", () => {
   const diagnostic = providerDiagnostic(errorUpdate());
@@ -118,14 +164,17 @@ test("prompt failure snapshots retain emitted identities without rebuilding or r
   const source = fs.readFileSync(path.join(__dirname, "../main.js"), "utf8");
   const start = source.indexOf("const partialOutput = (raw = {}) => (");
   const end = source.indexOf("let pendingPlainProtocolText", start);
-  const snapshot = new Function("emittedExecutionEvents", "hmsStructuredEvents", "streamedAnswerSegments", "streamedAnswerTurnSequences", "streamedPublicText", "streamId",
-    `${source.slice(start, end)}; return partialOutput;`)(
+  const snapshot = new Function("runtimeExecutionEvents", "emittedExecutionEvents", "hmsStructuredEvents", "streamedAnswerSegments", "streamedAnswerTurnSequences", "streamedPublicText", "streamId", "buildExecutionLog",
+    `const reportedTokenUsage = null; const hmsExecutionUpdates = []; const streamedAnswerOwners = new Map();
+    ${source.slice(start, end)}; return partialOutput;`)(
+    [{ eventId: "runtime-real", turnSequence: 1, kind: "lifecycle", message: "已接收本次请求" }],
     [{ eventId: "tool-real", turnSequence: 2, sourceText: "print(42)", resultPreview: "42" }],
-    [{ eventId: "stage-real", message: "真实阶段结果" }], new Map([["segment-1", "真实答案"]]), new Map([["segment-1", 4]]), "真实答案", "run-1"
+    [{ eventId: "stage-real", message: "真实阶段结果" }], new Map([["segment-1", "真实答案"]]), new Map([["segment-1", 4]]), "真实答案", "run-1", require("../services/hms-progress").buildExecutionLog
   );
   const result = snapshot({ toolCalls: [{ toolCallId: "tool-1" }] });
-  assert.equal(result.executionLog[0].eventId, "tool-real");
-  assert.equal(result.executionLog[0].sourceText, "print(42)");
+  assert.equal(result.executionLog[0].eventId, "runtime-real");
+  assert.equal(result.executionLog[1].eventId, "tool-real");
+  assert.equal(result.executionLog[1].sourceText, "print(42)");
   assert.equal(result.structuredEvents[0].eventId, "stage-real");
   assert.equal(result.answerSegments[0].turnSequence, 4);
   assert.equal(result.answerSegments[0].text, "真实答案");

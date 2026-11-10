@@ -10,6 +10,7 @@ const blackBallPublicEvents = require("../services/black-ball-public-event-contr
 const root = path.join(__dirname, "..");
 const mainSource = fs.readFileSync(path.join(root, "main.js"), "utf8");
 const rendererSource = fs.readFileSync(path.join(root, "renderer-v2", "app.js"), "utf8");
+const preloadSource = fs.readFileSync(path.join(root, "preload.js"), "utf8");
 
 function sourceBetween(source, start, end) {
   const from = source.indexOf(start);
@@ -47,7 +48,7 @@ function liveFrameHarness(entry) {
     "appendLiveStreamNotice",
     "recycleLiveStructuredProcess",
     "blackBallPublicEvents",
-    `const reportStartupMetric = () => {}; ${sourceBetween(rendererSource, "function reportLiveOutputTiming", 'reportStartupMetric("renderer:script-start")')}\n${eventBoundary}\n${body}; return handleChatStreamFrame;`
+    `const reportStartupMetric = () => {}; ${sourceBetween(rendererSource, "function bindSegmentReplyOwner", "function ensureLiveSegmentBlock")}\n${sourceBetween(rendererSource, "function reportLiveOutputTiming", 'reportStartupMetric("renderer:script-start")')}\n${eventBoundary}\n${body}; return handleChatStreamFrame;`
   );
   return factory(
     liveChatStreams,
@@ -156,7 +157,8 @@ test("the first terminal frame is latched and later frames cannot mutate the ans
 test("durable final text cannot replace a mismatched live answer that is already visible", () => {
   const finalize = sourceBetween(rendererSource, "function finalizeLiveChatStream", "function discardLiveChatStreamsForSession");
   assert.match(finalize, /finalTextDiffers/);
-  assert.match(finalize, /if \(rendered && \(!hasStreamedAnswer \|\| answerPaintIncomplete\)\)/);
+  assert.match(finalize, /if \(rendered && !hasStreamedAnswer\)/);
+  assert.match(finalize, /else if \(rendered && \(finalExtendsStream \|\| answerPaintIncomplete\)\)/);
   assert.doesNotMatch(finalize, /rendered && \(!hasStreamedAnswer \|\| finalTextDiffers\)/);
   assert.match(finalize, /const committedText = hasStreamedAnswer && !finalExtendsStream[\s\S]*?streamedDisplayText/);
   assert.match(finalize, /renderSegmentedLiveAnswer\(entry\)/);
@@ -188,6 +190,16 @@ test("product submissions have one per-session owner, idempotent replay, and a m
   const persistedResult = submit.indexOf("return persistProductResult", commitBarrier);
   assert.ok(runtimeResult >= 0 && commitBarrier > runtimeResult && persistedResult > commitBarrier);
   assert.match(submit, /finishingRun\?\.controller === controller && finishingRun\?\.runId === requestRunId/);
+});
+
+test("a busy product submission does not become a visible assistant reply", () => {
+  const send = sourceBetween(rendererSource, "async function sendCurrentTask", "async function processQueue");
+  assert.match(rendererSource, /function isBusyProductResult\(result = \{\}\)/);
+  assert.match(send, /if \(isBusyProductResult\(productResult\)\)/);
+  assert.match(send, /discardUnstartedProductMessage\(session, userMessage/);
+  assert.match(rendererSource, /removeMessage\?\.\(sessionId, messageId\)/);
+  assert.match(preloadSource, /removeMessage: \(id, messageId\) => ipcRenderer\.invoke\("session:remove-message"/);
+  assert.match(mainSource, /ipcMain\.handle\("session:remove-message"/);
 });
 
 test("runtime-transition waits are abortable and deadlines commit timeout before abort", async () => {
@@ -273,11 +285,24 @@ test("late model success is rejected before assistant persistence", () => {
   assert.match(runtime, /status: timedOut \? "timed_out" : cancelled \? "cancelled" : "failed"/);
 });
 
-test("fast no-progress timeout commits TaskBrain before aborting the transport", () => {
+test("legacy automatic timeout reconciles while manual stop still aborts", () => {
   const abortSignal = sourceBetween(mainSource, 'ipcMain.on("chat:abort-signal"', 'ipcMain.handle("chat:abort"');
-  const taskTimeout = abortSignal.indexOf("markTimedOut(run.taskId, run.timeoutReason)");
-  const transportAbort = abortSignal.indexOf("run.controller.abort");
-  assert.ok(taskTimeout >= 0 && transportAbort > taskTimeout);
+  let handler;
+  let queries = 0;
+  const controller = new AbortController();
+  const run = { runId: "turn", controller, queryRuntimeStatus: () => { queries++; } };
+  new Function("ipcMain", "activeRuns", "cancelRequestTargetsRun", abortSignal)(
+    { on: (_, callback) => { handler = callback; } }, new Map([["session", run]]),
+    (turnId, active) => turnId === active.runId);
+  handler(null, { sessionId: "session", runId: "turn", reason: "timeout" });
+  assert.equal(queries, 1);
+  assert.equal(controller.signal.aborted, false);
+  assert.equal(run.timedOut, undefined);
+  handler(null, { sessionId: "session", runId: "other", reason: "user" });
+  assert.equal(controller.signal.aborted, false);
+  handler(null, { sessionId: "session", runId: "turn", reason: "user" });
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(run.userAborted, true);
 });
 
 test("legacy chat idempotency shares one execution and rejects key reuse with changed content", async () => {
@@ -319,7 +344,7 @@ test("persisted rows are adopted by response identity instead of creating a seco
   assert.match(send, /const persistedRow = responseMessageId \? messageRowForId\(responseMessageId\) : null/);
 });
 
-test("live activity keeps every uniquely identified event and no-progress aborts the owned run", () => {
+test("live activity preserves events and silence only queries the owned run", () => {
   const activity = sourceBetween(rendererSource, "function setLiveStreamActivity", "function ensureLiveStreamRow");
   const progress = sourceBetween(rendererSource, "function checkLiveStreamProgress", "function reasoningSegmentKey");
   assert.match(activity, /\[\.\.\.entry\.activityDetails, activityEntry\]/);
@@ -327,10 +352,11 @@ test("live activity keeps every uniquely identified event and no-progress aborts
   assert.doesNotMatch(activity, /EXECUTION_ACTIVITY_HISTORY_LIMIT/);
   assert.doesNotMatch(activity, /entry\.activityDetails = \[activityEntry\]/);
   assert.match(progress, /handleLiveStreamTimeout\(entry, "连续 2 分钟/);
-  assert.match(progress, /reason: "timeout"/);
+  assert.match(progress, /api\.queryRunStatus/);
+  assert.doesNotMatch(progress, /signalAbortChat|entry\.timedOut = true/);
 });
 
-test("manual queues de-duplicate work and stay bounded", () => {
+test("supplement queues de-duplicate work and stay bounded", () => {
   const queue = new SessionTaskQueue();
   const first = queue.enqueue("session-1", { text: "  Same   task  " });
   const duplicate = queue.enqueue("session-1", { text: "same task" });

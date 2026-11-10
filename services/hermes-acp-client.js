@@ -4,6 +4,8 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { spawn } = require("node:child_process");
 const { Readable, Writable } = require("node:stream");
+const { isDeepStrictEqual } = require("node:util");
+const { createHash } = require("node:crypto");
 const { PROVIDER_ERRORS, providerDiagnostic } = require("./hms-stream-failure");
 const {
   ensureBundledHermesHome,
@@ -23,6 +25,8 @@ const DEFAULT_HERMES_RELATIVE_PATH = path.join(
 const WINDOWS_BASH_PREFLIGHT = `import sys
 
 try:
+    from baiqiu_windows_process import install_windows_probe_guard
+    install_windows_probe_guard()
     from tools.environments.local import _find_bash
     _find_bash()
 except Exception as error:
@@ -121,7 +125,7 @@ function ensureHermesPythonCompat(options = {}) {
     fs.writeFileSync(temp, WINDOWS_BASH_PREFLIGHT, "utf8");
     fs.renameSync(temp, file);
   }
-  for (const bridgeName of ["baiqiu_acp_entry.py", "baiqiu_async_delivery.py"]) {
+  for (const bridgeName of ["baiqiu_acp_entry.py", "baiqiu_async_delivery.py", "baiqiu_run_state.py", "baiqiu_supplements.py", "baiqiu_tool_execution.py", "baiqiu_windows_process.py", "baiqiu_protocol_recovery.py", "baiqiu_stage_delivery.py"]) {
     const bridgeFile = path.join(directory, bridgeName);
     const bridgeSource = fs.readFileSync(path.join(__dirname, bridgeName), "utf8");
     if (!fs.existsSync(bridgeFile) || fs.readFileSync(bridgeFile, "utf8") !== bridgeSource) {
@@ -216,7 +220,7 @@ function toolCallSignature(update = {}) {
 
 function looksLikeHermesFailure(text = "") {
   const value = String(text || "").trim();
-  if (/^(?:Internal error\b|Queued for the next turn\b|HTTP\s+[45]\d\d\s*:|API\s+(?:error\s*:|call failed\b)|authentication\s+(?:failed|required)\b|provider\s+error\s*:)/i.test(value)) {
+  if (/^(?:Internal error\b|HTTP\s+[45]\d\d\s*:|API\s+(?:error\s*:|call failed\b)|authentication\s+(?:failed|required)\b|provider\s+error\s*:)/i.test(value)) {
     return true;
   }
   return /^(?:billing|credits?).{0,80}(?:exhausted|insufficient|balance)|\bHTTP\s*402\b|\binsufficient\s+(?:account\s+)?balance\b/i
@@ -345,6 +349,7 @@ class HermesAcpClient {
     this.sessions = new Map();
     this.sessionBuilds = new Map();
     this.activePrompts = new Map();
+    this.interruptedSessions = new Set();
     this.mcpServers = new Map();
     this.mcpConnections = new Map();
     this.nextMcpConnectionId = 0;
@@ -613,7 +618,8 @@ class HermesAcpClient {
     const cwd = path.resolve(options.cwd || this.defaultCwd);
     let active;
     const persistedHermesSessionId = String(options.hermesSessionId || "").trim();
-    const resumePersistedSessions = options.resumePersistedSession !== false
+    const resumePersistedSessions = !this.interruptedSessions.has(persistedHermesSessionId)
+      && options.resumePersistedSession !== false
       && this.options.resumePersistedSession !== false;
     let hermesSessionId = resumePersistedSessions ? persistedHermesSessionId : "";
     if (persistedHermesSessionId && !resumePersistedSessions) {
@@ -677,11 +683,15 @@ class HermesAcpClient {
 
     const timingStartedAt = Date.now();
     emitPromptTiming(this, options, "clientStart", timingStartedAt, { localSessionId });
-    const session = await this.ensureSession(localSessionId, { ...options, timingStartedAt });
     const signal = options.signal || null;
-    if (signal?.aborted) {
-      const error = new Error("Hermes prompt was cancelled before it started.");
-      error.name = "AbortError";
+    this.activePrompts.set(localSessionId, { permissionContext: options.permissionContext || {} });
+    let session;
+    try {
+      if (signal?.aborted) throw Object.assign(new Error("Hermes prompt was cancelled before it started."), { name: "AbortError" });
+      session = await this.ensureSession(localSessionId, { ...options, timingStartedAt });
+      if (signal?.aborted) throw Object.assign(new Error("Hermes prompt was cancelled before it started."), { name: "AbortError" });
+    } catch (error) {
+      this.activePrompts.delete(localSessionId);
       throw error;
     }
 
@@ -698,6 +708,20 @@ class HermesAcpClient {
     let toolCallsSinceAnswer = 0;
     const updates = [];
     const diagnostics = [];
+    const recoveryEvents = new Map();
+    const deliveredEvents = new Map();
+    const recoveredMessages = [];
+    let wakeRecovery;
+    let recoveryWake = new Promise(resolve => { wakeRecovery = resolve; });
+    const enqueueRecovery = (snapshot) => {
+      for (const update of snapshot.updates || []) recoveredMessages.push({ update });
+      if (["completed", "awaiting_input", "failed", "cancelled", "incomplete"].includes(snapshot.status)) {
+        const { updates: replayedUpdates, ...outcome } = snapshot;
+        recoveredMessages.push({ kind: "stop", stopReason: snapshot.stopReason,
+          recovered: true, response: { _meta: { baiqiuRun: outcome } } });
+      }
+      wakeRecovery({ kind: "recovery_wake" });
+    };
     let lastActivityAt = 0;
     const observeActivity = (kind) => {
       const timestamp = Date.now();
@@ -706,6 +730,15 @@ class HermesAcpClient {
       try { options.onActivity?.({ kind, timestamp }); } catch {}
     };
     let output = "";
+    const deliveredFiles = () => collectToolFileEvidence([...tools.values()], {
+      runStartedAt: timingStartedAt,
+      allowedRoots: options.deliveryRoots || []
+    });
+    const retireSession = () => {
+      this.interruptedSessions.add(session.hermesSessionId);
+      session.active?.dispose?.();
+      if (this.sessions.get(localSessionId) === session) this.sessions.delete(localSessionId);
+    };
     let rejectAbort;
     let timeoutTimer = null;
     const configuredTimeout = options.timeoutMs === undefined
@@ -736,29 +769,61 @@ class HermesAcpClient {
     signal?.addEventListener?.("abort", onAbort, { once: true });
     this.activePrompts.set(localSessionId, {
       hermesSessionId: session.hermesSessionId,
+      turnId: options.turnId || "",
+      enqueueRecovery,
+      deliveredSequence: () => deliveredEvents.size,
       permissionContext: options.permissionContext || {}
     });
+    let lastUpdateAt = Date.now();
+    const statusTimer = options.turnId ? setInterval(() => {
+      if (Date.now() - lastUpdateAt >= 15000) void this.queryRunStatus(localSessionId, options.turnId);
+    }, 15000) : null;
+    statusTimer?.unref?.();
 
     try {
-      session.active.prompt(promptBlocks(text, options.attachments || []));
+      const blocks = promptBlocks(text, options.attachments || []);
+      if (blocks[0] && typeof options.turnId === "string" && options.turnId.length <= 240) {
+        blocks[0]._meta = { ...blocks[0]._meta, baiqiuTurnId: options.turnId };
+      }
+      session.active.prompt(blocks);
       emitPromptTiming(this, options, "promptDispatched", timingStartedAt, {
         localSessionId,
         hermesSessionId: session.hermesSessionId
       });
       let firstUpdateSeen = false;
+      let pendingUpdate = null;
       const firstContentTimings = new Set();
       for (;;) {
         let message;
         try {
-          message = await Promise.race([session.active.nextUpdate(), abortUpdate, timeoutUpdate]);
+          if (recoveredMessages.length) message = recoveredMessages.shift();
+          else {
+            pendingUpdate ||= session.active.nextUpdate().then(value => ({ kind: "live_update", value }));
+            const incoming = await Promise.race([pendingUpdate, recoveryWake, abortUpdate, timeoutUpdate]);
+            if (incoming.kind === "recovery_wake") {
+              recoveryWake = new Promise(resolve => { wakeRecovery = resolve; });
+              continue;
+            }
+            pendingUpdate = null;
+            message = incoming.value;
+            lastUpdateAt = Date.now();
+          }
         } catch (error) {
+          if (/ACP connection closed|Active session disposed|connection.*closed/i.test(String(error?.message || ""))
+            && !signal?.aborted && options.turnId) {
+            const archived = await this.readRunStatus(session.hermesSessionId, options.turnId);
+            if (["completed", "awaiting_input", "failed", "cancelled", "incomplete"].includes(archived.status)) {
+              pendingUpdate = null;
+              enqueueRecovery(archived);
+              continue;
+            }
+            error.code = "HERMES_RUN_STATUS_UNKNOWN";
+          }
           if (error?.code === "HERMES_PROMPT_TIMEOUT") {
-            session.active?.dispose?.();
-            this.sessions.delete(localSessionId);
+            retireSession();
           }
           if (error?.name !== "AbortError") throw error;
-          session.active?.dispose?.();
-          this.sessions.delete(localSessionId);
+          retireSession();
           return {
             status: "cancelled",
             text: output,
@@ -766,7 +831,7 @@ class HermesAcpClient {
             response: null,
             hermesSessionId: session.hermesSessionId,
             toolCalls: [...tools.values()],
-            files: [],
+            files: deliveredFiles(),
             diagnostics,
             updates
           };
@@ -783,19 +848,42 @@ class HermesAcpClient {
             runStartedAt: timingStartedAt,
             allowedRoots: options.deliveryRoots || []
           });
-          const status = message.stopReason === "cancelled"
-            ? "cancelled"
-            : (message.stopReason === "refusal" || looksLikeHermesFailure(output) ? "failed" : "done");
+          const recovery = diagnostics.findLast((item) => item.type === "protocol_recovery");
+          const protocolIncomplete = recovery && !["recovered", "warning"].includes(recovery.phase);
+          const runtimeOutcome = message.response?._meta?.baiqiuRun;
+          if (runtimeOutcome && (runtimeOutcome.turnId !== options.turnId
+            || runtimeOutcome.sessionId !== session.hermesSessionId)) throw new Error("Black Ball terminal identity mismatch");
+          if (runtimeOutcome && (runtimeOutcome.source !== "black_ball_runtime" || !runtimeOutcome.eventId
+            || runtimeOutcome.sequence !== 2 || !Number.isSafeInteger(runtimeOutcome.eventCount)
+            || runtimeOutcome.eventCount < deliveredEvents.size)) throw new Error("Invalid Black Ball terminal metadata");
+          if (runtimeOutcome && deliveredEvents.size < runtimeOutcome.eventCount) {
+            void this.queryRunStatus(localSessionId, options.turnId);
+            continue;
+          }
+          const cancelled = runtimeOutcome ? runtimeOutcome.status === "cancelled" : message.stopReason === "cancelled";
+          const status = cancelled ? "cancelled" : protocolIncomplete ? "failed" : runtimeOutcome
+            ? ({ completed: "done", awaiting_input: "awaiting_input", cancelled: "cancelled", failed: "failed", incomplete: "failed" }[runtimeOutcome.status] || "failed")
+            : (protocolIncomplete || message.stopReason === "refusal" || looksLikeHermesFailure(output) ? "failed" : "done");
           emitPromptTiming(this, options, "final", timingStartedAt, {
             localSessionId,
             hermesSessionId: session.hermesSessionId,
             status,
             stopReason: message.stopReason || ""
           });
+          if (message.recovered) {
+            session.active?.dispose?.();
+            if (this.sessions.get(localSessionId) === session) this.sessions.delete(localSessionId);
+          }
           return {
             status,
+            ...(runtimeOutcome ? { runtimeOutcome } : {}),
             text: output,
             stopReason: message.stopReason,
+            ...(protocolIncomplete && status !== "cancelled" ? { protocolError: true,
+              error: recovery.phase === "failed" && recovery.attempt > 0
+                ? "本次任务未完成：模型返回格式异常，自动恢复未成功。已保留当前结果。"
+                : "本次任务未完成：输出格式异常，恢复尚未完成。已保留当前结果。" } : {}),
+            ...(recovery?.phase === "recovered" ? { protocolRecovered: true } : {}),
             response: message.response,
             hermesSessionId: session.hermesSessionId,
             toolCalls: [...tools.values()],
@@ -807,11 +895,38 @@ class HermesAcpClient {
 
         const update = message.notification?.update || message.update;
         if (!update) continue;
+        const identity = update._meta?.baiqiuRunEvent;
+        if (identity) {
+          if (identity.turnId !== options.turnId) throw new Error("Black Ball event turn mismatch");
+          if (deliveredEvents.has(identity.eventId)) {
+            if (!isDeepStrictEqual(deliveredEvents.get(identity.eventId), update)) throw new Error("Conflicting Black Ball event identity");
+            continue;
+          }
+          if (identity.sequence !== deliveredEvents.size + 1) {
+            void this.queryRunStatus(localSessionId, options.turnId);
+            continue;
+          }
+          deliveredEvents.set(identity.eventId, update);
+        }
         const diagnostic = providerDiagnostic(update);
         if (diagnostic) {
+          if (diagnostic.type === "protocol_recovery") {
+            const previous = recoveryEvents.get(diagnostic.eventId);
+            if (previous) {
+              if (JSON.stringify(previous) === JSON.stringify(diagnostic)) continue;
+              throw new Error("Conflicting protocol recovery event identity");
+            }
+            if (diagnostic.sequence !== recoveryEvents.size + 1) {
+              throw new Error("Protocol recovery event sequence is incomplete");
+            }
+            recoveryEvents.set(diagnostic.eventId, diagnostic);
+            observeActivity("protocol_recovery");
+          }
           diagnostics.push(diagnostic);
           if (["first_byte", "stream_activity"].includes(diagnostic.stage)) observeActivity("response_data");
-          try { options.onDiagnostic?.(diagnostic); } catch {}
+          try { options.onDiagnostic?.(diagnostic); } catch (error) {
+            if (diagnostic.type === "protocol_recovery") throw error;
+          }
           if (diagnostic.code === "HERMES_PROVIDER_OVERLOADED"
             || diagnostic.code === "HERMES_PROVIDER_AUTH_FAILED"
             || diagnostic.code === "HERMES_PROVIDER_RATE_LIMITED") {
@@ -883,7 +998,7 @@ class HermesAcpClient {
     } catch (error) {
       error.hermesResult = {
         status: "failed", text: output, hermesSessionId: session.hermesSessionId,
-        toolCalls: [...tools.values()], updates, diagnostics, files: []
+        toolCalls: [...tools.values()], updates, diagnostics, files: deliveredFiles()
       };
       const lastProviderError = diagnostics.findLast((item) => item.type === "provider_error");
       if (lastProviderError && !String(error.code || "").startsWith("HERMES_PROVIDER_")) {
@@ -891,6 +1006,7 @@ class HermesAcpClient {
       }
       throw error;
     } finally {
+      if (statusTimer) clearInterval(statusTimer);
       if (timeoutTimer) clearTimeout(timeoutTimer);
       signal?.removeEventListener?.("abort", onAbort);
       this.activePrompts.delete(localSessionId);
@@ -904,6 +1020,82 @@ class HermesAcpClient {
       sessionId: session.hermesSessionId
     });
     return true;
+  }
+
+  async supplement(localSessionId, turnId, { supplementId, text, reconcileOnly = false, timeoutMs = 8000 }) {
+    const receiptTimeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 8000;
+    const active = this.activePrompts.get(localSessionId);
+    const fromSnapshot = snapshot => {
+      if (snapshot?.turnId !== turnId || snapshot?.status === "unknown") return null;
+      const item = snapshot.supplements?.[supplementId];
+      if (item?.text === text && ["accepted", "applied", "addressed", "needs_clarification", "failed", "pending", "cancelled"].includes(item.status)) {
+        return { accepted: true, status: item.status, turnId, supplementId };
+      }
+      if (!item && snapshot.status !== "running") return { accepted: false, status: "not_running", turnId, supplementId };
+      return null;
+    };
+    if (!active || active.turnId !== turnId || !this.connection) {
+      if (!reconcileOnly) return { accepted: false, status: "not_running", turnId, supplementId };
+      const runtimeSessionId = this.sessions.get(localSessionId)?.hermesSessionId;
+      const receipt = runtimeSessionId ? fromSnapshot(await this.readRunStatus(runtimeSessionId, turnId)) : null;
+      return receipt || { accepted: null, status: "unknown", turnId, supplementId };
+    }
+    let timer;
+    try {
+      const receipt = await Promise.race([
+        this.connection.agent.request("_baiqiu/supplement", {
+          sessionId: active.hermesSessionId, turnId, supplementId, text
+        }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Supplement receipt unavailable")), receiptTimeoutMs); })
+      ]);
+      if (receipt.sessionId !== active.hermesSessionId || receipt.turnId !== turnId || receipt.supplementId !== supplementId
+        || typeof receipt.accepted !== "boolean") throw new Error("Supplement receipt identity mismatch");
+      const allowed = receipt.accepted ? ["accepted", "applied", "addressed", "needs_clarification", "failed", "pending", "cancelled"]
+        : ["not_running", "not_ready", "unsupported", "queue_required", "invalid", "cancelled"];
+      if (!allowed.includes(receipt.status)) throw new Error("Supplement receipt status mismatch");
+      return receipt;
+    } catch {
+      const snapshot = await this.queryRunStatus(localSessionId, turnId);
+      return fromSnapshot(snapshot) || fromSnapshot(await this.readRunStatus(active.hermesSessionId, turnId))
+        || { accepted: null, status: "unknown", turnId, supplementId };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async queryRunStatus(localSessionId, turnId) {
+    const active = this.activePrompts.get(localSessionId);
+    if (!active || active.turnId !== turnId || !this.connection) return { status: "unknown", turnId };
+    if (active.statusQuery) return active.statusQuery;
+    let timer;
+    active.statusQuery = Promise.race([
+      this.connection.agent.request("_baiqiu/run_status", {
+        sessionId: active.hermesSessionId, turnId, afterSequence: active.deliveredSequence()
+      }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Black Ball status unavailable")), 5000); })
+    ]).then(snapshot => {
+      if (snapshot.sessionId !== active.hermesSessionId || snapshot.turnId !== turnId) {
+        throw new Error("Black Ball status identity mismatch");
+      }
+      if (this.activePrompts.get(localSessionId) === active) active.enqueueRecovery(snapshot);
+      const { updates, ...status } = snapshot;
+      return status;
+    }).catch(() => ({ status: "unknown", turnId })).finally(() => {
+      clearTimeout(timer);
+      active.statusQuery = null;
+    });
+    return active.statusQuery;
+  }
+
+  async readRunStatus(sessionId, turnId) {
+    const identity = createHash("sha256").update(JSON.stringify([sessionId, turnId])).digest("hex");
+    try {
+      const snapshot = JSON.parse(await fs.promises.readFile(path.join(resolveHermesHome(this.options), "baiqiu-runs", `${identity}.json`), "utf8"));
+      if (snapshot.sessionId === sessionId && snapshot.turnId === turnId && Array.isArray(snapshot.updates)) {
+        return { ...snapshot, eventCount: snapshot.updates.length };
+      }
+    } catch {}
+    return { status: "unknown", sessionId, turnId };
   }
 
   sessionIdFor(localSessionId) {

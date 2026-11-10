@@ -200,7 +200,7 @@ class HermesConfigService {
     const modelId = String(model || "").trim();
     const rawEndpoint = String(baseURL || "").trim();
     const endpoint = rawEndpoint
-      ? normalizeProvider(providerId, { baseURL: rawEndpoint }).baseURL
+      ? normalizeProvider(providerId, { baseURL: rawEndpoint, apiStyle }).baseURL
       : "";
     if (!providerId || !modelId || !endpoint) throw new Error("Hermes provider, model and base URL are required.");
     const mapping = resolveHermesProviderConfig({ provider: providerId, baseURL: endpoint, apiStyle });

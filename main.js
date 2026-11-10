@@ -8,6 +8,7 @@ const { Readable } = require("node:stream");
 const { execFileSync, spawn } = require("node:child_process");
 const { createHash, randomUUID } = require("node:crypto");
 const { pathToFileURL } = require("node:url");
+const { structuredEventsFromMessage: persistedStructuredEventsFromMessage } = require("./renderer-v2/persisted-replay");
 const { app, BrowserWindow, WebContentsView, Menu, Tray, ipcMain, nativeImage, shell, clipboard, desktopCapturer, dialog, screen, session: electronSession, safeStorage } = require("electron");
 const {
   canonicalTarget: canonicalPublicEventTarget,
@@ -167,7 +168,9 @@ const {
 } = require("./services/model-route-policy");
 const { modelConfigurationRequiredText, selectedModelReadiness } = require("./services/model-readiness");
 const { publicBrandText, userFacingError } = require("./services/user-facing-error-adapter");
-const { timeoutFailure, preserveFailedOutput } = require("./services/hms-stream-failure");
+const { preserveFailedOutput, failIncompleteProtocol, finalizePublicProtocol } = require("./services/hms-stream-failure");
+const { preserveCommittedOutcome, enforceRuntimeOutcome, hasCommittedRuntimeDelivery } = require("./services/runtime-outcome");
+const { recordUsage } = require("./renderer-v2/token-usage");
 const { SelfHealingEngine } = require("./services/self-healing/self-healing-engine");
 const { HealingMonitor } = require("./services/self-healing/healing-monitor");
 const { IntentAgent, capabilityConsultationReply } = require("./services/intent-agent");
@@ -186,6 +189,11 @@ const { AgentCapabilityContext } = require("./services/agent-capability-context"
 const { ConversationTraceLogger } = require("./services/conversation-trace-logger");
 const { IntentPredictionMonitor } = require("./services/intent-prediction-monitor");
 const { IntentPredictionService } = require("./services/intent-prediction-service");
+const {
+  normalizeGuidanceCard,
+  createGuidanceState,
+  continuationForGuidance
+} = require("./services/black-ball-guidance");
 const {
   isContinuationRequest,
   isInternalRuntimeFailure,
@@ -212,6 +220,7 @@ const {
   HmsProgressMapper,
   buildExecutionLog,
   stripHmsProgressEnvelopes,
+  stripMarkdownProgressEnvelopes,
   extractBareToolActions,
   stripBareToolActionLines,
   toolEvidenceEventId,
@@ -221,7 +230,7 @@ const { buildOutlineFromText, extractHmsOutlineEnvelope } = require("./services/
 const { HMS_VERSION, ensureHmsRuntime, runtimeReady } = require("./services/hms-runtime-installer");
 const { HermesSkillService } = require("./services/hermes-skill-service");
 const { HermesSkillLearningManager, isSkillCapabilityQuestion, skillCapabilityReply } = require("./services/hermes-skill-learning-manager");
-const { HermesConfigService, normalizeHermesReasoningEffort, resolveHermesProtocol } = require("./services/hermes-config-service");
+const { HermesConfigService, normalizeHermesReasoningEffort, resolveHermesProtocol, atomicTextWrite } = require("./services/hermes-config-service");
 const { HermesMemoryService } = require("./services/hermes-memory-service");
 const {
   extractDelegationIds,
@@ -248,6 +257,7 @@ const { extractSpreadsheetColumns: spreadsheetAnalysisExtract, computeBarcodeInt
 const { buildSpreadsheetAiPrompt, buildSpreadsheetProfile, normalizeRows, validateSpreadsheetAiPlan } = require("./services/spreadsheet-ai-patch");
 const { normalizeXlsxSheets, verifyWrittenXlsx } = require("./services/xlsx-write-contract");
 const { enrichAttachmentContent, extractPresentationSlides, inspectProjectArchive } = require("./services/attachment-analysis-service");
+const { prepareQuotedInput } = require("./services/quote-context");
 const { UIAdapter } = require("./services/product-sdk/ui-adapter");
 const { ToolSelector } = require("./services/tool-selector");
 const { ToolExecutionService } = require("./services/tool-execution-service");
@@ -267,8 +277,12 @@ const {
   userRequestedDesktopDelivery
 } = require("./services/hermes-desktop-path-policy");
 const { parseHmsOutcomeEnvelope, parseTrailingHmsProtocolObjects } = require("./services/hms-outcome-contract");
+const { extractAnswerDocumentEnvelope } = require("./services/answer-document");
 const { createRequestRun, cancelRequestTargetsRun } = require("./services/request-run-contract");
 const { writeJsonAtomicSync } = require("./services/atomic-json-file");
+const { BackgroundJsonSnapshot } = require("./services/background-json-snapshot");
+const { ModelSettingsStore, copyModelSettings, assertModelSettingsRevision } = require("./services/model-settings-store");
+const { isDeepStrictEqual } = require("node:util");
 const { inheritDeveloperProfile } = require("./services/developer-profile-inheritance");
 const { VerifiedTaskService } = require("./services/verified-task-service");
 const { VerifierCenter } = require("./services/verifier-center");
@@ -468,6 +482,9 @@ let wechatGatewayWorker;
 let wechatHistorySyncTimer = null;
 let wechatHistorySyncRunning = false;
 const WECHAT_HISTORY_SYNC_INTERVAL_MS = 1000;
+let wechatHistoryCursor = 0;
+let wechatConnectionRevision = 0;
+let wechatUnbindPromise = null;
 let hermesSkillService;
 let hermesSkillLearningManager;
 let hermesConfigService;
@@ -538,11 +555,12 @@ const activeProductSubmissions = new Map();
 const activeChatSubmissions = new Map();
 const completedChatSubmissions = new Map();
 const consciousnessAttachedSessions = new Set();
-const INVITE_SECRET = "baiqiu-ai-owner-signed-invite-v2";
-const DEFAULT_PUBLIC_SERVER = "http://156.239.227.26";
+const INVITE_SECRET = "REPLACE_WITH_PRIVATE_INVITE_SECRET";
+const DEFAULT_PUBLIC_SERVER = "http://107.149.93.41";
 const LEGACY_PUBLIC_SERVER_ORIGINS = new Set([
   "http://47.108.191.67",
-  "http://108.187.15.86"
+  "http://108.187.15.86",
+  "http://156.239.227.26"
 ]);
 
 function configuredPublicServer(value) {
@@ -2156,7 +2174,8 @@ function writeCrossReplyTrace(phase, meta = {}) {
     "hasAnswerText", "hasStructuredEvents", "persistedRowAdopted", "finalized", "finalizing",
     "eventId", "eventType", "observedAt", "producerAt", "requestStartedAt", "elapsedMs", "turnSequence",
     "code", "errorType", "httpStatus", "firstChunkAt", "timestamp",
-    "stage", "requestId", "requestBytes", "bytesReceived", "messageCount", "toolCount", "contextChars", "runtimeContextCount", "visibleHistoryCount", "errorCategory"
+    "stage", "requestId", "requestBytes", "bytesReceived", "messageCount", "toolCount", "contextChars", "runtimeContextCount", "visibleHistoryCount", "errorCategory",
+    "segmentId", "goalId", "contentChars", "displayedChars", "unassessedCount", "pendingCount", "evidenceResolved"
   ]);
   const clean = {};
   for (const [key, value] of Object.entries(meta && typeof meta === "object" ? meta : {})) {
@@ -2322,6 +2341,7 @@ function defaultDb() {
       defaultProvider: "deepseek",
       reasoning: "maximum",
       intentPredict: false,
+      taskGuidanceEnabled: false,
       webSearch: { enabled: true },
       voice: {
         showInComposer: false,
@@ -2548,10 +2568,18 @@ function compactEmbeddedConsciousness(db) {
 
 function compactPersistedExecutionPayload(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const output = { ...value };
-  if (Array.isArray(output.updates)) delete output.updates;
+  let output = value;
+  if (Array.isArray(value.updates)) {
+    output = { ...value };
+    delete output.updates;
+  }
   for (const key of ["raw", "result"]) {
-    if (output[key] && typeof output[key] === "object") output[key] = compactPersistedExecutionPayload(output[key]);
+    if (!value[key] || typeof value[key] !== "object") continue;
+    const nested = compactPersistedExecutionPayload(value[key]);
+    if (nested !== value[key]) {
+      if (output === value) output = { ...value };
+      output[key] = nested;
+    }
   }
   return output;
 }
@@ -2560,22 +2588,22 @@ function compactPersistedMessagePayload(message) {
   if (!message || typeof message !== "object") return false;
   let changed = false;
   if (message.raw && typeof message.raw === "object") {
-    const raw = compactPersistedExecutionPayload(message.raw);
-    const productResult = raw.productResult && typeof raw.productResult === "object"
+    let raw = compactPersistedExecutionPayload(message.raw);
+    let productResult = raw.productResult && typeof raw.productResult === "object"
       ? compactPersistedExecutionPayload(raw.productResult)
       : null;
     if (productResult?.raw && raw.raw && typeof raw.raw === "object") {
-      productResult.raw = { ...raw.raw, ...productResult.raw };
+      productResult = { ...productResult, raw: { ...raw.raw, ...productResult.raw } };
+      raw = { ...raw };
       delete raw.raw;
-      changed = true;
     }
     if (productResult && raw.requestRun && productResult.requestRun) {
+      if (raw === message.raw) raw = { ...raw };
       delete raw.requestRun;
-      changed = true;
     }
-    if (productResult) raw.productResult = productResult;
-    if (JSON.stringify(raw) !== JSON.stringify(message.raw)) changed = true;
-    message.raw = raw;
+    if (productResult && productResult !== raw.productResult) raw = { ...raw, productResult };
+    changed = raw !== message.raw;
+    if (changed) message.raw = raw;
   }
   return changed;
 }
@@ -2611,6 +2639,42 @@ function compactPersistedMessageAttachments(db) {
   return changed;
 }
 
+let modelSettingsStore = null;
+let modelSettingsCommitBarrier = null;
+
+function ensureModelSettingsStore() {
+  const file = userDataPath("model-settings.json");
+  if (!modelSettingsStore || modelSettingsStore.file !== file) modelSettingsStore = new ModelSettingsStore(file);
+  return modelSettingsStore;
+}
+
+async function commitModelSettings(settings, { resetBindings = false } = {}) {
+  const previous = loadDb();
+  const committed = await ensureModelSettingsStore().commit(settings);
+  const current = typeof dbCache === "object" && dbCache ? dbCache : previous;
+  copyModelSettings(committed, current.settings);
+  if (resetBindings) clearHermesSessionBindings(current);
+  return current;
+}
+
+async function applyAndCommitModelSettings(settings, { providerId = settings.defaultProvider, applyRuntime = false } = {}) {
+  if (applyRuntime) await waitForModelRuntimeIdle(providerId);
+  const previous = structuredClone(loadDb().settings);
+  let release;
+  modelSettingsCommitBarrier = new Promise(resolve => { release = resolve; });
+  try {
+    if (applyRuntime) await syncHermesRuntimeConfig(settings, { configurationCommit: true });
+    emitModelConfigurationStage(providerId, "saving");
+    return await commitModelSettings(settings, { resetBindings: applyRuntime });
+  } catch (error) {
+    if (applyRuntime) await syncHermesRuntimeConfig(previous, { configurationCommit: true }).catch(() => null);
+    throw error;
+  } finally {
+    modelSettingsCommitBarrier = null;
+    release();
+  }
+}
+
 function loadDb() {
   ensureDeveloperProfileInheritance();
   migrateLegacyData();
@@ -2633,6 +2697,11 @@ function loadDb() {
   db.messages ||= {};
   db.queue ||= [];
   db.settings ||= base.settings;
+  const storedModelRevision = db.settings.modelConfigRevision;
+  const storedModelFingerprint = fingerprintHermesConfig(selectedHermesConfig(db.settings));
+  ensureModelSettingsStore().apply(db.settings);
+  if (storedModelRevision !== db.settings.modelConfigRevision
+    && storedModelFingerprint !== fingerprintHermesConfig(selectedHermesConfig(db.settings))) clearHermesSessionBindings(db);
   db.settings.defaultProvider ||= "deepseek";
   try {
     const runtime = ensureHermesConfigService().runtime();
@@ -2644,6 +2713,7 @@ function loadDb() {
     console.warn("[HermesConfig] 无法读取运行时模型配置:", error.message || error);
   }
   db.settings.reasoning ||= "maximum";
+  db.settings.taskGuidanceEnabled = false;
   db.settings.intentPredict = false;
   db.settings.webSearch = { ...base.settings.webSearch, ...(db.settings.webSearch || {}), enabled: true };
   db.settings.voice = {
@@ -2954,12 +3024,14 @@ function mergeCachedMessagesIntoDb(db) {
 }
 
 function saveDb(db, { immediate = false, requireCommit = false } = {}) {
+  ensureModelSettingsStore().apply(db.settings);
   mergeCachedMessagesIntoDb(db);
   dbCache = db;
   dbCacheFile = dbPath();
   try { const s = fs.statSync(dbCacheFile); dbCacheMtimeMs = s.mtimeMs; dbCacheSize = s.size; } catch {}
   _messagesRawCache = "";
   saveDbPending = db;
+  dbFlushGeneration += 1;
   if (immediate) {
     const result = flushDbSync();
     if (requireCommit && !result.ok) throw result.error;
@@ -2972,12 +3044,17 @@ function saveDb(db, { immediate = false, requireCommit = false } = {}) {
 let saveDbPending = null;
 let flushDbTimer = null;
 let dbFlushFailureCount = 0;
+let dbFlushInFlight = null;
+let dbFlushInFlightDb = null;
+let dbFlushGeneration = 0;
+let backgroundDbWriter = null;
 
 function dbFlushRetryDelay() {
   return Math.min(30000, 500 * (2 ** Math.min(dbFlushFailureCount, 6)));
 }
 
 function commitDbSnapshot(db) {
+  dbFlushGeneration += 1;
   const file = dbPath();
   try {
     const write = writeJsonAtomicSync(file, dbForStorage(db));
@@ -2999,27 +3076,65 @@ function commitDbSnapshot(db) {
 }
 
 function scheduleFlushDb(delayMs = 300) {
-  if (flushDbTimer) return;
+  if (flushDbTimer || dbFlushInFlight) return;
   flushDbTimer = setTimeout(() => {
     flushDbTimer = null;
-    if (!saveDbPending) return;
-    const db = saveDbPending;
-    saveDbPending = null;
-    mergeCachedMessagesIntoDb(db);
-    const result = commitDbSnapshot(db);
-    if (!result.ok) {
-      saveDbPending ||= db;
-      scheduleFlushDb(dbFlushRetryDelay());
-    }
+    void flushDbAsync();
   }, delayMs);
   flushDbTimer.unref?.();
+}
+
+async function flushDbAsync() {
+  if (dbFlushInFlight) return dbFlushInFlight;
+  clearTimeout(flushDbTimer);
+  flushDbTimer = null;
+  if (!saveDbPending) return { ok: true, skipped: true };
+  dbFlushInFlight = (async () => {
+    let result = { ok: true, skipped: true };
+    while (saveDbPending) {
+      const db = saveDbPending;
+      saveDbPending = null;
+      dbFlushInFlightDb = db;
+      const generation = dbFlushGeneration;
+      const file = dbPath();
+      let staged;
+      try {
+        mergeCachedMessagesIntoDb(db);
+        backgroundDbWriter ||= new BackgroundJsonSnapshot();
+        staged = await backgroundDbWriter.stage(file, dbForStorage(db));
+        if (generation !== dbFlushGeneration) continue;
+        fs.renameSync(staged.temporaryFile, file);
+        const stat = fs.statSync(file);
+        dbCacheMtimeMs = stat.mtimeMs;
+        dbCacheSize = stat.size;
+        _messagesCacheMeta = { file, mtime: stat.mtimeMs, size: stat.size };
+        _messagesRawCache = "";
+        dbFlushFailureCount = 0;
+        result = { ok: true, file, bytes: staged.bytes };
+      } catch (error) {
+        if (generation !== dbFlushGeneration) continue;
+        dbFlushFailureCount += 1;
+        saveDbPending ||= db;
+        console.error("[Database] background snapshot commit failed:", error?.code || "WRITE_FAILED");
+        return { ok: false, file, error };
+      } finally {
+        if (staged?.temporaryFile) await fs.promises.unlink(staged.temporaryFile).catch(() => null);
+      }
+    }
+    return result;
+  })();
+  const result = await dbFlushInFlight;
+  dbFlushInFlight = null;
+  dbFlushInFlightDb = null;
+  if (saveDbPending) scheduleFlushDb(result.ok ? 300 : dbFlushRetryDelay());
+  return result;
 }
 
 function flushDbSync() {
   clearTimeout(flushDbTimer);
   flushDbTimer = null;
-  if (!saveDbPending) return { ok: true, skipped: true };
-  const db = saveDbPending;
+  if (!saveDbPending && !dbFlushInFlightDb) return { ok: true, skipped: true };
+  const db = saveDbPending || dbCache || dbFlushInFlightDb;
   saveDbPending = null;
   mergeCachedMessagesIntoDb(db);
   const result = commitDbSnapshot(db);
@@ -3141,6 +3256,14 @@ function recentVisibleTurnsForIntent(sessionId = "") {
 }
 
 function applyIntentPredictionDecision({ understanding = {}, input = "", sessionId = "", settings = {}, recentTurns = null } = {}) {
+  // 意图判断属于黑球本轮理解的一部分。这里保留旧接口用于兼容历史调用，
+  // 不再让白球的本地规则预测覆盖黑球的路由或把 clarify 强行改成 answer。
+  if (understanding?.semanticOwner === "black_ball" || understanding?.blackBallOwnsDecision === true) {
+    return Object.freeze({
+      ...understanding,
+      interactionMode: understanding.responseMode === "clarify" ? "select_and_fill" : "execute"
+    });
+  }
   const prediction = ensureIntentPredictionService().predict({
     input,
     recentTurns: recentTurns || recentVisibleTurnsForIntent(sessionId),
@@ -3168,28 +3291,12 @@ function applyIntentPredictionDecision({ understanding = {}, input = "", session
     });
   }
   if (understanding.responseMode !== "clarify") {
-    return Object.freeze({ ...understanding, intentPrediction: null });
+    return Object.freeze({ ...understanding, intentPrediction: null, interactionMode: "execute" });
   }
-  const responseMode = "answer";
-  const permissions = permissionsForDecision({ text: input, intentType: understanding.intentType, responseMode });
   return Object.freeze({
     ...understanding,
-    responseMode,
-    routing: "conversation",
-    route: "conversation",
-    permissions,
-    shouldCreateTask: false,
-    execute: false,
-    need_execution: false,
-    need_agent: false,
-    requiredAction: "answer",
-    intentPrediction: null,
-    executionMetadata: Object.freeze({
-      ...(understanding.executionMetadata || {}),
-      responseMode,
-      routing: "conversation",
-      permissions
-    })
+    intentPrediction: prediction || understanding.intentPrediction || null,
+    interactionMode: "select_and_fill"
   });
 }
 
@@ -4255,7 +4362,8 @@ async function productLayerChatRuntime(input = {}) {
     persistedByMain: true,
     persistedSessionId: session.id
   } : responseBinding;
-  const originalText = String(input.message || input.text || input.input || "").trim() || "请分析附件内容。";
+  let originalText = String(input.message || input.text || input.input || "").trim() || "请分析附件内容。";
+  const submittedText = originalText;
   const taskBrainPrompt = String(input.context?.taskBrain?.prompt || "").trim();
   const delegationExpected = delegationExpectedFor(
     session,
@@ -4263,7 +4371,20 @@ async function productLayerChatRuntime(input = {}) {
     input.context?.conversationUnderstanding || {},
     Boolean(input.context?.delegationExpected)
   );
-  const attachments = await enrichAttachments(input.attachments || []);
+  let attachments = await enrichAttachments(input.attachments || []);
+  const clarificationResponse = input.context?.clarificationResponse && typeof input.context.clarificationResponse === "object"
+    ? input.context.clarificationResponse
+    : null;
+  if (clarificationResponse) {
+    const state = session.blackBallGuidance && typeof session.blackBallGuidance === "object"
+      ? session.blackBallGuidance
+      : null;
+    const continuation = continuationForGuidance(state, clarificationResponse);
+    originalText = continuation.text;
+    if (!attachments.length && continuation.attachments.length) {
+      attachments = await enrichAttachments(continuation.attachments);
+    }
+  }
   timing("chat_attachments_enriched");
   const settings = loadDb().settings;
   const knowledgeRetrieval = input.context?.knowledgeRetrieval && typeof input.context.knowledgeRetrieval === "object"
@@ -4363,6 +4484,26 @@ async function productLayerChatRuntime(input = {}) {
     raw = result
       ? { ...result, ...(knowledgeRetrieval.references?.length ? { knowledgeReferences: knowledgeRetrieval.references } : {}) }
       : null;
+    const guidance = normalizeGuidanceCard(result?.clarification, {
+      sessionId: session.id,
+      originalRequest: submittedText,
+      requestId: input.clientMessageId || `${session.id}:${Date.now()}`
+    });
+    const waitingForGuidance = Boolean(guidance);
+    if (guidance && !input.skipPersist) {
+      updateSession(session.id, {
+        status: "waiting",
+        blackBallGuidance: createGuidanceState(guidance, {
+          sessionId: session.id,
+          originalRequest: submittedText,
+          attachments: attachments.map(persistAttachmentForMessage)
+        })
+      });
+    } else if (!guidance && !clarificationResponse && session.blackBallGuidance) {
+      updateSession(session.id, { blackBallGuidance: null });
+    } else if (!guidance && clarificationResponse) {
+      updateSession(session.id, { blackBallGuidance: null });
+    }
     const runtimeSucceeded = !["failed", "cancelled", "aborted", "timed_out", "timeout"].includes(String(result?.status || "").toLowerCase());
     if (!input.skipPersist) {
       appendMessage(session.id, {
@@ -4378,14 +4519,16 @@ async function productLayerChatRuntime(input = {}) {
           ...(raw && !raw.clarification ? { raw } : {})
         }
       });
-      updateSession(session.id, { status: runtimeSucceeded ? "done" : "failed" });
+      updateSession(session.id, { status: waitingForGuidance ? "waiting" : runtimeSucceeded ? "done" : "failed" });
       mainWindow?.webContents.send("session:changed", rendererDbSnapshot(loadDb()));
     }
     return {
       ok: runtimeSucceeded,
       sessionId: session.id,
-      status: String(result?.status || (runtimeSucceeded ? "done" : "failed")),
+      status: waitingForGuidance ? "awaiting_input" : String(result?.status || (runtimeSucceeded ? "done" : "failed")),
       runtimeStatus: String(result?.status || ""),
+      runtimeOutcome: result?.runtimeOutcome,
+      completedDelivery: result?.completedDelivery === true,
       deliveryStatus: String(result?.deliveryStatus || ""),
       presentationStatus: String(result?.presentationStatus || ""),
       text: replyText,
@@ -4403,6 +4546,13 @@ async function productLayerChatRuntime(input = {}) {
     };
   } catch (error) {
     const message = userFacingError(error, { classification: conversationUnderstanding.classification, domain: conversationUnderstanding.domain, developerMode: isDevMode });
+    if (error?.code === "HERMES_RUN_STATUS_UNKNOWN") {
+      const partial = error.hermesResult || {};
+      return { ...partial, ...persistedBinding, ok: true, success: undefined, status: "unknown",
+        executionOutcome: "unknown", deliveryStatus: "pending", presentationStatus: "recovered",
+        text: preserveFailedOutput(partial, "执行连接已中断，本轮是否完成尚未确认。已保留当前结果。"),
+        error: error.code };
+    }
     const timedOut = runWasTimedOut(session.id, runController)
       || error?.code === "HERMES_PROMPT_TIMEOUT"
       || error?.code === "TASK_TIMEOUT";
@@ -4410,7 +4560,8 @@ async function productLayerChatRuntime(input = {}) {
     const failureNotice = cancelled
       ? "任务已终止。"
       : `${timedOut ? "执行超时" : "执行失败"}。\n原因：${message}`;
-    const hermesResult = error?.hermesResult && typeof error.hermesResult === "object" ? error.hermesResult : null;
+    const hermesResult = error?.hermesResult && typeof error.hermesResult === "object"
+      ? error.hermesResult : activeRuns.get(session.id)?.capturePartialOutput?.() || null;
     const publicFailureText = preserveFailedOutput(hermesResult || {}, failureNotice);
     const hermesEvidence = hermesResult ? taskBrainExecutionEvidence(hermesResult) : null;
     if (!input.skipPersist && !cancelled) {
@@ -4425,6 +4576,8 @@ async function productLayerChatRuntime(input = {}) {
           durationMs: Math.max(1, Date.now() - runtimeStartedAt),
           ...persistedBinding,
           ...(hermesResult ? {
+            protocolError: hermesResult.protocolError === true,
+            stopReason: hermesResult.stopReason,
             executionLog: hermesResult.executionLog || [],
             structuredEvents: hermesResult.structuredEvents || [],
             answerSegments: hermesResult.answerSegments || []
@@ -4446,6 +4599,9 @@ async function productLayerChatRuntime(input = {}) {
       error: message,
       ...persistedBinding,
       ...(hermesResult ? {
+        protocolError: hermesResult.protocolError === true,
+        runtimeOutcome: hermesResult.runtimeOutcome,
+        stopReason: hermesResult.stopReason,
         toolCalls: hermesResult.toolCalls || [],
         files: hermesResult.files || [],
         delegationIds: hermesResult.delegationIds || [],
@@ -4519,11 +4675,28 @@ async function submitProductWithTaskBrain(payload = {}) {
     }
   });
   const canonicalTaskId = String(payload.taskId || "").trim();
-  let message = String(payload.message || payload.text || "").trim();
-  let attachments = await enrichAttachments(payload.attachments || []);
+  const quotedInput = await prepareQuotedInput(payload, {
+    loadMessages: async (sourceSessionId) => {
+      const sourceDb = loadDb();
+      if (!sourceDb.sessions.some((item) => item.id === sourceSessionId)) return [];
+      const cached = sourceDb.messages?.[sourceSessionId];
+      return Array.isArray(cached) && cached.length ? cached : loadMessagesForSession(sourceSessionId);
+    },
+    enrichAttachments
+  });
+  let message = quotedInput.message.trim();
+  let attachments = quotedInput.attachments;
   markProductTiming("initial_attachments_enriched");
   const db = loadDb();
   const productSession = db.sessions.find((item) => item.id === sessionId) || ensureSelectedSession();
+  if (payload.quote) {
+    const run = activeRuns.get(sessionId);
+    if (run) {
+      run.payloadText = message;
+      run.payloadAttachments = persistAttachmentsForInterruptedRun(attachments);
+    }
+    markProductTiming("quoted_context_restored", { attachmentCount: attachments.length });
+  }
   const capabilityContext = conversationCapabilityContext(productSession);
   markProductTiming("capability_context_ready");
   const productTraceId = payload.traceId || `conversation-product-${randomUUID()}`;
@@ -4540,7 +4713,7 @@ async function submitProductWithTaskBrain(payload = {}) {
   };
   const finishProductConversation = (inputResult) => {
     let result = normalizeHmsPresentationResult(inputResult);
-    if (runWasTimedOut(sessionId)) {
+    if (runWasTimedOut(sessionId) && result?.runtimeOutcome?.status !== "completed") {
       const taskId = String(result?.taskBrain?.task_id || "").trim();
       if (taskId) ensureTaskBrain().markTimedOut(taskId, activeRuns.get(sessionId)?.timeoutReason || "任务超过允许时长。");
       result = {
@@ -4594,6 +4767,7 @@ async function submitProductWithTaskBrain(payload = {}) {
       cancelled: "aborted",
       aborted: "aborted",
       interrupted: "aborted",
+      unknown: "waiting",
       awaiting_input: "waiting",
       awaiting_confirmation: "waiting",
       pending_confirmation: "waiting"
@@ -4610,11 +4784,11 @@ async function submitProductWithTaskBrain(payload = {}) {
     ensureConversationTraceLogger().finish({ traceId: productTraceId, sessionId, status: result?.status || (result?.success === false ? "failed" : "success"), result });
     return result;
   };
-  ensureConversationTraceLogger().start({ traceId: productTraceId, sessionId, userInput: message });
+  ensureConversationTraceLogger().start({ traceId: productTraceId, sessionId, userInput: String(payload.message || payload.text || "") });
   markProductTiming("trace_started");
   const delegationExpected = payload.context?.delegationExpected === true;
   const context = payload.context && typeof payload.context === "object" ? payload.context : {};
-  const continuationRequested = isContinuationRequest(message);
+  const continuationRequested = !payload.quote && isContinuationRequest(message);
   if (continuationRequested) {
     const requestedInstruction = continuationInstruction(message);
     const db = loadDb();
@@ -4864,7 +5038,7 @@ async function submitProductWithTaskBrain(payload = {}) {
     });
   }
 
-  if (!task && !taskAction && !recoveryAction && !canonicalTaskId) task = ensureTaskBrain().getAwaitingConfirmation(sessionId);
+  if (!payload.quote && !task && !taskAction && !recoveryAction && !canonicalTaskId) task = ensureTaskBrain().getAwaitingConfirmation(sessionId);
   const understandingContext = {
     sessionId,
     projectId: productSession.projectId || "",
@@ -5019,6 +5193,7 @@ async function submitProductWithTaskBrain(payload = {}) {
             ...payload,
             message,
             text: message,
+            attachments,
             sessionId,
             onTiming: markProductTiming,
             context: {
@@ -5033,23 +5208,23 @@ async function submitProductWithTaskBrain(payload = {}) {
       const response = await routeNonExecutionResponse({ ...responseRequest, preserveAnswerResult: true });
       markProductTiming("response_router_completed");
       const text = typeof response === "string" ? response : response?.text;
-      if (typeof text !== "string" || !text.trim()) throw new Error("Conversation response did not contain text");
+      if ((typeof text !== "string" || !text.trim()) && !hasCommittedRuntimeDelivery(response)) throw new Error("Conversation response did not contain text");
       if (response && typeof response === "object" && (response.ok === false
         || ["failed", "cancelled"].includes(String(response.status || response.raw?.status || "").toLowerCase()))) {
-        throw new Error(text);
+        throw Object.assign(new Error(text), { response });
       }
       console.log('[ProductFallback] LLM回复成功, text长度=' + String(text || '').length);
       const responseObject = response && typeof response === "object" ? response : {};
       const responseStatus = conversationResultStatus(responseObject, { hasTask: Boolean(canonicalTaskId) });
-      const responseVerified = responseStatus !== "unverified";
+      const responseVerified = !["unverified", "unknown", "failed", "cancelled"].includes(responseStatus);
       const finalResult = finishProductConversation({
         ...responseObject,
-        success: responseVerified,
+        success: responseStatus === "unknown" ? undefined : responseVerified,
         // 澄清只是"已回复、未执行"，不是完成——外层 task-brain 会据此把任务
         // 置为 awaiting_input，而不是误标 completed（prepare() 从未执行）。
-        status: responseVerified ? responseStatus : "failed",
-        text: responseVerified ? text : "黑球没有返回可验证的任务状态，本次未标记为完成。",
-        ...(responseVerified ? {} : { error: "hms_outcome_missing" }),
+        status: responseStatus === "unverified" ? "failed" : responseStatus,
+        text: responseStatus === "unverified" ? "黑球没有返回可验证的任务状态，本次未标记为完成。" : text,
+        ...(responseStatus === "unverified" ? { error: "hms_outcome_missing" } : {}),
         ...(response?.clarification ? { clarification: response.clarification } : {}),
         conversation: true,
         intentType: routedUnderstanding.intentType
@@ -5060,9 +5235,27 @@ async function submitProductWithTaskBrain(payload = {}) {
       console.error('[ProductFallback] 降级路径异常:', fallbackErr.message, fallbackErr.stack);
       const runtimeRecovered = isInternalRuntimeFailure(fallbackErr);
       if (runtimeRecovered) await invalidateHermesRuntimeSession(sessionId);
+      const failedResponse = fallbackErr?.response && typeof fallbackErr.response === "object"
+        ? fallbackErr.response
+        : fallbackErr?.hermesResult && typeof fallbackErr.hermesResult === "object"
+          ? fallbackErr.hermesResult
+          : null;
       const publicText = runtimeRecovered
         ? "本次运行连接异常，黑球执行会话已自动重置。请重新发送刚才的内容。"
         : `本次请求未完成。\n原因：${userFacingError(fallbackErr, { classification: routedUnderstanding.classification, domain: routedUnderstanding.domain, developerMode: false })}`;
+      if (failedResponse) {
+        const responseText = String(failedResponse.text || "").trim();
+        const responseStatus = String(failedResponse.status || "failed").trim().toLowerCase();
+        return finishProductConversation({
+          ...failedResponse,
+          success: false,
+          status: ["cancelled", "aborted", "timed_out", "timeout"].includes(responseStatus) ? responseStatus : "failed",
+          text: responseText || publicText,
+          error: failedResponse.error || publicText,
+          conversation: true,
+          runtime: "hermes"
+        });
+      }
       return finishProductConversation({
         success: false,
         status: "failed",
@@ -5191,7 +5384,14 @@ async function submitProductWithTaskBrain(payload = {}) {
     if (submissionWasAborted()) {
       if (runWasTimedOut(sessionId)) ensureTaskBrain().markTimedOut(task.task_id, activeRuns.get(sessionId)?.timeoutReason || "任务超过允许时长。");
       else ensureTaskBrain().cancel(task.task_id);
-      return finishProductConversation({ success: false, status: "cancelled", text: "任务已终止。", taskBrain: ensureTaskBrain().executionContext(task.task_id) || taskContext });
+      return finishProductConversation({
+        ...(result && typeof result === "object" ? result : {}),
+        success: false,
+        status: "cancelled",
+        text: preserveFailedOutput(result && typeof result === "object" ? result : {}, "任务已终止。"),
+        error: "任务已终止。",
+        taskBrain: ensureTaskBrain().executionContext(task.task_id) || taskContext
+      });
     }
     const clarification = result?.clarification
       || result?.raw?.clarification
@@ -5199,11 +5399,27 @@ async function submitProductWithTaskBrain(payload = {}) {
       || null;
     if (clarification?.preserveTask === true) {
       const replyText = result?.text || clarification.question || "请补充继续执行所需的信息。";
+      const guidance = normalizeGuidanceCard(clarification, {
+        sessionId,
+        originalRequest: message,
+        requestId: payload.clientMessageId || `${sessionId}:${Date.now()}`
+      });
       ensureTaskBrain().update(task.task_id, {
         status: "awaiting_input",
         current_stage: "awaiting_input",
         current_step: replyText
       });
+      if (guidance) {
+        updateSession(sessionId, {
+          status: "waiting",
+          blackBallGuidance: createGuidanceState(guidance, {
+            sessionId,
+            originalRequest: message,
+            attachments,
+            taskId: task.task_id
+          })
+        });
+      }
       appendBoundAssistant(replyText, { productLayer: true, chatRuntime: true, taskId: task.task_id, clarification });
       updateSession(sessionId, { status: "waiting" });
       mainWindow?.webContents.send("session:changed", rendererDbSnapshot(loadDb()));
@@ -5231,6 +5447,10 @@ async function submitProductWithTaskBrain(payload = {}) {
       mainWindow?.webContents.send("session:changed", rendererDbSnapshot(loadDb()));
       return finishProductConversation({ ...visibleResult, taskBrain: ensureTaskBrain().executionContext(task.task_id) || taskContext });
     }
+    if (result?.status === "unknown") {
+      ensureTaskBrain().update(task.task_id, { status: "unknown", current_stage: "status_unconfirmed" });
+      return finishProductConversation({ ...result, taskBrain: ensureTaskBrain().executionContext(task.task_id) });
+    }
     ensureTaskBrain().fail(task.task_id, result?.text || result?.error || '任务执行失败', {
       evidence: taskBrainExecutionEvidence(result)
     });
@@ -5239,15 +5459,30 @@ async function submitProductWithTaskBrain(payload = {}) {
     if (submissionWasAborted()) {
       if (runWasTimedOut(sessionId)) ensureTaskBrain().markTimedOut(task.task_id, activeRuns.get(sessionId)?.timeoutReason || "任务超过允许时长。");
       else ensureTaskBrain().cancel(task.task_id);
-      return finishProductConversation({ success: false, status: "cancelled", text: "任务已终止。", taskBrain: ensureTaskBrain().executionContext(task.task_id) || taskContext });
+      const interruptedResult = error?.hermesResult && typeof error.hermesResult === "object"
+        ? error.hermesResult
+        : error?.response && typeof error.response === "object" ? error.response : {};
+      return finishProductConversation({
+        ...interruptedResult,
+        success: false,
+        status: "cancelled",
+        text: preserveFailedOutput(interruptedResult, "任务已终止。"),
+        error: "任务已终止。",
+        taskBrain: ensureTaskBrain().executionContext(task.task_id) || taskContext
+      });
     }
+    const failedExecutionResult = error?.hermesResult && typeof error.hermesResult === "object"
+      ? error.hermesResult
+      : error?.response && typeof error.response === "object" ? error.response : {};
+    const failedExecutionText = `执行失败。\n原因：${humanReadableError(error)}`;
     ensureTaskBrain().fail(task.task_id, humanReadableError(error), {
-      evidence: taskBrainExecutionEvidence(error?.hermesResult || {})
+      evidence: taskBrainExecutionEvidence(failedExecutionResult)
     });
     return finishProductConversation({
+      ...failedExecutionResult,
       success: false,
       status: "failed",
-      text: `执行失败。\n原因：${humanReadableError(error)}`,
+      text: preserveFailedOutput(failedExecutionResult, failedExecutionText),
       error: humanReadableError(error),
       taskBrain: ensureTaskBrain().executionContext(task.task_id) || taskContext
     });
@@ -5492,6 +5727,7 @@ function ensureWechatChatSession(options = {}) {
   const db = loadDb();
   const previousSelectedSessionId = db.selectedSessionId;
   let session = db.sessions.find((item) => item?.source === "wechat" || item?.wechatSession === true || item?.systemLocked === true && item?.title === "微信聊天");
+  let changed = false;
   if (!session) {
     session = createSessionRecord(db, "微信聊天", {
       source: "wechat",
@@ -5500,8 +5736,9 @@ function ensureWechatChatSession(options = {}) {
       type: "chat",
       name: "微信聊天"
     });
+    changed = true;
   }
-  Object.assign(session, {
+  const fields = {
     title: "微信聊天",
     name: "微信聊天",
     source: "wechat",
@@ -5509,16 +5746,23 @@ function ensureWechatChatSession(options = {}) {
     systemLocked: true,
     pinned: true,
     archived: false,
-    order: -1,
-    updatedAt: Date.now()
-  });
+    order: -1
+  };
+  for (const [key, value] of Object.entries(fields)) {
+    if (session[key] === value) continue;
+    session[key] = value;
+    changed = true;
+  }
   db.selectedSessionId = options.select === false
     ? (previousSelectedSessionId || db.sessions.find((item) => item.id !== session.id)?.id || session.id)
     : session.id;
-  if (!Array.isArray(db.messages[session.id])) db.messages[session.id] = [];
+  if (!Array.isArray(db.messages[session.id])) db.messages[session.id] = ensureSessionMsgs(session.id);
   session.messages = db.messages[session.id];
-  saveDb(db);
-  return { ok: true, db: rendererDbSnapshot(loadDb()), sessionId: session.id, session: loadDb().sessions.find((item) => item.id === session.id) || session };
+  if (changed) session.updatedAt = Date.now();
+  if (changed || previousSelectedSessionId !== db.selectedSessionId) saveDb(db);
+  if (options.includeSnapshot === false) return { ok: true, sessionId: session.id };
+  const { messages: _runtimeMessages, ...sessionSnapshot } = session;
+  return { ok: true, db: rendererDbSnapshot(db), sessionId: session.id, session: sessionSnapshot };
 }
 
 function currentWechatSession() {
@@ -5546,17 +5790,28 @@ async function ensureWechatGatewayWorker() {
   if (!wechatGatewayWorker) {
     wechatGatewayWorker = new WechatGatewayWorker({
       onEvent: (event) => {
+        if (wechatUnbindPromise) return;
         const text = String(event?.text || "").trim();
-        if (!text || !["user", "assistant"].includes(event?.role)) return;
-        const ensured = ensureWechatChatSession({ select: false });
+        const attachments = Array.isArray(event?.attachments) ? event.attachments : [];
+        if ((!text && !attachments.length) || !["user", "assistant"].includes(event?.role)) return;
+        const ensured = ensureWechatChatSession({ select: false, includeSnapshot: false });
         appendMessage(ensured.sessionId, {
-          id: String(event.messageId || "").trim() || undefined,
+          id: event.messageId ? wechatJournalMessageId(event) : undefined,
           role: event.role,
           text,
-          raw: { wechat: true, chatId: String(event.chatId || ""), userId: String(event.userId || "") }
-        });
-        safeMainWindowSend("session:changed", loadDb());
-        safeMainWindowSend("gateway:event", { type: "wechat", event });
+          createdAt: wechatHistoryTimestampMs(event.timestamp) || Date.now(),
+          attachments,
+          raw: { wechat: true, chatId: String(event.chatId || ""), userId: String(event.userId || ""),
+            wechatSequence: event.sequence,
+            platformMessageId: String(event.messageId || ""), direction: event.role === "assistant" ? "outbound" : "inbound" }
+        }, { deferCommit: true });
+        orderWechatMessages(ensured.sessionId);
+        saveDb(loadDb());
+        void flushDbAsync().then((result) => {
+          if (!result.ok) return;
+          safeMainWindowSend("session:changed", rendererDbSnapshot(loadDb()));
+          safeMainWindowSend("gateway:event", { type: "wechat", event });
+        }).catch((error) => console.error("[WeChat] persistence failed:", error?.code || "WRITE_FAILED"));
       }
     });
   }
@@ -5564,19 +5819,27 @@ async function ensureWechatGatewayWorker() {
 }
 
 async function realWechatGatewayStatus() {
+  if (wechatUnbindPromise) return { stale: true };
+  const revision = wechatConnectionRevision;
   const bridge = await ensureWechatGatewayWorker().catch(() => null);
+  if (revision !== wechatConnectionRevision) return { stale: true };
   if (!bridge) return { connected: false, available: false, reason: "HMS 微信运行时尚未就绪" };
   const result = await bridge.worker.status(bridge.config).catch((error) => ({ connected: false, available: true, reason: error?.message || String(error) }));
+  if (revision !== wechatConnectionRevision) return { stale: true };
   const payload = { ...result, sessionId: currentWechatSession()?.id || "", state: result.connected ? "wechat_connected" : "wechat_disconnected", message: result.reason || "" };
   if (result.connected) startWechatHistorySync();
   safeMainWindowSend("gateway:status", payload);
   return payload;
 }
 
-async function realWechatGatewayQr() {
+async function realWechatGatewayQr({ afterUnbind = false } = {}) {
+  if (wechatUnbindPromise && !afterUnbind) return { stale: true };
+  const revision = ++wechatConnectionRevision;
   const bridge = await ensureWechatGatewayWorker().catch(() => null);
+  if (revision !== wechatConnectionRevision) return { stale: true };
   if (!bridge) return { connected: false, available: false, qrDataUrl: "", reason: "HMS 微信运行时尚未就绪" };
   const qr = await bridge.worker.qr(bridge.config).catch((error) => ({ ok: false, available: true, reason: error?.message || String(error) }));
+  if (revision !== wechatConnectionRevision) return { stale: true };
   if (!qr?.ok || !qr.qrText) {
     const result = { connected: false, available: true, qrDataUrl: "", reason: qr?.reason || "HMS 微信二维码接口没有返回扫码内容" };
     safeMainWindowSend("gateway:status", { ...result, state: "wechat_qr_error", message: result.reason });
@@ -5585,6 +5848,7 @@ async function realWechatGatewayQr() {
   try {
     const qrcode = require(path.join(bridge.runtime.agentRoot, "node_modules", "qrcode"));
     const qrDataUrl = await qrcode.toDataURL(String(qr.qrText), { errorCorrectionLevel: "M", margin: 2, width: 420 });
+    if (revision !== wechatConnectionRevision) return { stale: true };
     const result = {
       connected: false,
       available: true,
@@ -5596,6 +5860,7 @@ async function realWechatGatewayQr() {
     safeMainWindowSend("gateway:status", { ...result, state: "wechat_qr_ready", message: result.reason });
     return result;
   } catch (error) {
+    if (revision !== wechatConnectionRevision) return { stale: true };
     const result = { connected: false, available: true, qrDataUrl: "", qrText: qr.qrText, reason: `二维码生成失败：${error?.message || String(error)}` };
     safeMainWindowSend("gateway:status", { ...result, state: "wechat_qr_error", message: result.reason });
     return result;
@@ -5603,9 +5868,13 @@ async function realWechatGatewayQr() {
 }
 
 async function realWechatGatewayQrStatus() {
+  if (wechatUnbindPromise) return { stale: true };
+  const revision = wechatConnectionRevision;
   const bridge = await ensureWechatGatewayWorker().catch(() => null);
+  if (revision !== wechatConnectionRevision) return { stale: true };
   if (!bridge) return { connected: false, available: false, reason: "HMS 微信运行时尚未就绪" };
   const result = await bridge.worker.qrStatus(bridge.config).catch((error) => ({ connected: false, available: true, reason: error?.message || String(error) }));
+  if (revision !== wechatConnectionRevision) return { stale: true };
   const payload = { ...result, sessionId: currentWechatSession()?.id || "", state: result.connected ? "wechat_connected" : "wechat_qr_status", message: result.reason || "" };
   if (result.connected) startWechatHistorySync();
   safeMainWindowSend("gateway:status", payload);
@@ -5619,30 +5888,75 @@ function wechatHistoryTimestampMs(value) {
 
 function matchesWechatHistoryMessage(existing, incoming) {
   if (!existing?.raw?.wechat || existing.role !== incoming.role) return false;
+  if (incoming.journal) return false;
+  if (String(existing.raw.chatId || "") !== String(incoming.chatId || "")) return false;
+  if (incoming.attachments?.length || existing.attachments?.length) return false;
   if (String(existing.text || "").trim() !== String(incoming.text || "").trim()) return false;
   const incomingAt = wechatHistoryTimestampMs(incoming.timestamp);
   return !incomingAt || Math.abs(Number(existing.createdAt || 0) - incomingAt) <= 15000;
 }
 
+function wechatJournalMessageId(message) {
+  return `wechat:${String(message.chatId || "")}:${message.role}:${String(message.messageId || "")}`;
+}
+
+function orderWechatMessages(sessionId) {
+  const messages = loadDb().messages[sessionId] || [];
+  messages.sort((left, right) => {
+    const leftSequence = left.raw?.wechatSequence;
+    const rightSequence = right.raw?.wechatSequence;
+    if (Number.isSafeInteger(leftSequence) && Number.isSafeInteger(rightSequence)) return leftSequence - rightSequence;
+    return Number(left.createdAt || 0) - Number(right.createdAt || 0);
+  });
+}
+
 async function syncWechatGatewayHistory({ notifyRenderer = true } = {}) {
-  if (wechatHistorySyncRunning) return { ok: true, busy: true, imported: 0 };
+  if (wechatHistorySyncRunning || wechatUnbindPromise) return { ok: true, busy: true, imported: 0 };
+  const revision = wechatConnectionRevision;
   wechatHistorySyncRunning = true;
   try {
     const bridge = await ensureWechatGatewayWorker();
     if (!bridge) return { ok: false, imported: 0, reason: "HMS 微信运行时尚未就绪" };
-    const result = await bridge.worker.history(bridge.config);
+    const result = await bridge.worker.history(bridge.config, wechatHistoryCursor);
+    if (revision !== wechatConnectionRevision) return { ok: true, stale: true, imported: 0 };
     if (!result?.ok || !Array.isArray(result.messages)) {
       return { ok: false, imported: 0, reason: result?.reason || "微信消息记录读取失败" };
     }
-    const ensured = ensureWechatChatSession({ select: false });
+    if (!result.messages.length) {
+      if (result.cursor > wechatHistoryCursor) {
+        const persisted = await flushDbAsync();
+        if (!persisted.ok) throw persisted.error;
+      }
+      if (Number.isSafeInteger(result.cursor)) wechatHistoryCursor = result.cursor;
+      return { ok: true, imported: 0, sessionId: currentWechatSession()?.id || "" };
+    }
+    const ensured = ensureWechatChatSession({ select: false, includeSnapshot: false });
     const known = [...(loadDb().messages[ensured.sessionId] || [])];
     let imported = 0;
+    let changed = false;
     for (const message of result.messages) {
       const role = String(message?.role || "");
       const text = String(message?.text || "").trim();
-      if (!text || !["user", "assistant"].includes(role)) continue;
-      const id = `hms-weixin:${String(message.sessionId || "session")}:${String(message.messageId || "message")}`;
-      if (known.some((item) => item.id === id || matchesWechatHistoryMessage(item, { ...message, role, text }))) continue;
+      const attachments = (Array.isArray(message?.attachments) ? message.attachments : [])
+        .filter((item) => item && typeof item === "object" && String(item.path || "").trim());
+      if ((!text && !attachments.length) || !["user", "assistant"].includes(role)) continue;
+      const id = message.journal ? wechatJournalMessageId(message)
+        : `hms-weixin:${String(message.sessionId || "session")}:${String(message.messageId || "message")}`;
+      const incoming = { ...message, role, text, attachments };
+      const existing = known.find((item) => item.id === id || matchesWechatHistoryMessage(item, incoming));
+      if (existing) {
+        if (attachments.length && (!Array.isArray(existing.attachments) || !existing.attachments.length
+          || /^\[The user sent a document:/i.test(String(existing.text || "")))) {
+          existing.text = text;
+          existing.attachments = attachments.map((item) => persistAttachmentForMessage(item));
+          existing.raw = { ...(existing.raw || {}), wechat: true, hmsHistory: true,
+            hmsSessionId: String(message.sessionId || ""), hmsMessageId: String(message.messageId || ""),
+            chatId: String(message.chatId || ""), userId: String(message.userId || ""),
+            direction: role === "assistant" ? "outbound" : "inbound" };
+          changed = true;
+        }
+        continue;
+      }
       const createdAt = wechatHistoryTimestampMs(message.timestamp) || Date.now();
       const added = appendMessage(ensured.sessionId, {
         id,
@@ -5654,16 +5968,26 @@ async function syncWechatGatewayHistory({ notifyRenderer = true } = {}) {
           hmsHistory: true,
           hmsSessionId: String(message.sessionId || ""),
           hmsMessageId: String(message.messageId || ""),
+          wechatSequence: message.sequence,
           chatId: String(message.chatId || ""),
           userId: String(message.userId || ""),
-          direction: role === "assistant" ? "outbound" : "inbound"
-        }
-      });
+          direction: role === "assistant" ? "outbound" : "inbound" },
+        attachments
+      }, { deferCommit: true });
       known.push(added);
       imported += 1;
     }
+    if (changed || imported) {
+      orderWechatMessages(ensured.sessionId);
+      saveDb(loadDb());
+    }
+    if (changed || imported || result.cursor > wechatHistoryCursor) {
+      const persisted = await flushDbAsync();
+      if (!persisted.ok) throw persisted.error;
+    }
+    if (Number.isSafeInteger(result.cursor)) wechatHistoryCursor = result.cursor;
     const db = rendererDbSnapshot(loadDb());
-    if (imported && notifyRenderer) safeMainWindowSend("session:changed", db);
+    if ((imported || changed) && notifyRenderer) safeMainWindowSend("session:changed", db);
     return { ok: true, imported, db, sessionId: ensured.sessionId };
   } catch (error) {
     return { ok: false, imported: 0, reason: error?.message || String(error) };
@@ -5688,11 +6012,27 @@ function stopWechatHistorySync() {
 }
 
 async function realWechatGatewayUnbind() {
+  if (wechatUnbindPromise) return wechatUnbindPromise;
+  ++wechatConnectionRevision;
+  wechatUnbindPromise = unbindWechatGatewayAndRefresh();
+  try {
+    return await wechatUnbindPromise;
+  } finally {
+    wechatUnbindPromise = null;
+  }
+}
+
+async function unbindWechatGatewayAndRefresh() {
   stopWechatHistorySync();
   const bridge = await ensureWechatGatewayWorker().catch(() => null);
-  if (!bridge) return { connected: false, available: false, unbound: false, reason: "HMS 微信运行时尚未就绪" };
-  const result = await bridge.worker.unbind(bridge.config).catch((error) => ({ connected: false, available: true, unbound: false, reason: error?.message || String(error) }));
-  const payload = { ...result, sessionId: currentWechatSession()?.id || "", state: "wechat_unbound", message: result.reason || "" };
+  if (!bridge) return { ok: false, available: false, unbound: false, reason: "HMS 微信运行时尚未就绪" };
+  const result = await bridge.worker.unbind(bridge.config).catch((error) => ({ ok: false, available: true, unbound: false, reason: error?.message || String(error) }));
+  if (!result?.ok) {
+    startWechatHistorySync();
+    return { ...result, ok: false };
+  }
+  const qr = await realWechatGatewayQr({ afterUnbind: true });
+  const payload = { ...result, ...qr, ok: true, connected: false, qrDataUrl: qr.qrDataUrl || "", sessionId: currentWechatSession()?.id || "", state: "wechat_unbound", message: qr.reason || result.reason || "" };
   safeMainWindowSend("gateway:status", payload);
   return payload;
 }
@@ -7213,7 +7553,9 @@ async function runHmsProjectCeoOrchestration({ session, task, settings, payload,
       let answerEventSequence = 0;
       let plainSegmentPublished = false;
       let protocolError = false;
+      let progressProtocolError = false;
       const emitAnswerParts = (separated = {}) => {
+        if (separated.progressProtocolError) progressProtocolError = true;
         if (!publishAnswer) return;
         if (separated.protocolError) protocolError = true;
         for (const streamEvent of separated.streamEvents || []) {
@@ -7308,12 +7650,7 @@ async function runHmsProjectCeoOrchestration({ session, task, settings, payload,
         ? promptAnswer
         : sanitizedText;
       if (publishAnswer) streamedSummaryAnswer = promptAnswer;
-      return {
-        ...promptResult,
-        text,
-        ...(protocolError ? { protocolError: true,
-          ...(!String(promptAnswer || "").trim() ? { status: "failed", error: "黑球没有返回可交付的回答。" } : {}) } : {})
-      };
+      return finalizePublicProtocol(promptResult, { protocolError, progressProtocolError }, text);
     }
   });
   try {
@@ -7970,7 +8307,7 @@ function compactAssistantExecutionLog(raw = {}) {
   return next;
 }
 
-function appendMessage(sessionId, message, { requireCommit = false } = {}) {
+function appendMessage(sessionId, message, { requireCommit = false, deferCommit = false } = {}) {
   const db = loadDb();
   if (!Array.isArray(db.messages[sessionId])) db.messages[sessionId] = ensureSessionMsgs(sessionId);
   if (!db.messages[sessionId]) db.messages[sessionId] = [];
@@ -8071,8 +8408,8 @@ function appendMessage(sessionId, message, { requireCommit = false } = {}) {
       session.title = String(message.text || "新对话").replace(/\s+/g, " ").slice(0, 30) || "新对话";
     }
   }
-  saveDb(db, { immediate: message.role === "assistant" || requireCommit, requireCommit });
-  if (message.role === "assistant") {
+  saveDb(db, { immediate: requireCommit || message.role === "assistant" && !deferCommit, requireCommit });
+  if (message.role === "assistant" && !deferCommit) {
     writeCrossReplyTrace("main:persist:assistant", {
       sessionId,
       messageId: item.id,
@@ -8081,6 +8418,13 @@ function appendMessage(sessionId, message, { requireCommit = false } = {}) {
       status: dbFlushFailureCount > 0 ? "failed" : "ok",
       hasAnswerText: Boolean(item.text)
     });
+    const structured = persistedStructuredEventsFromMessage(item);
+    for (const event of structured) {
+      if ((event.semanticType || event.type) !== "stage_result") continue;
+      writeCrossReplyTrace("stage:persisted", { sessionId, messageId: item.id, turnId: event.turnId,
+        eventId: event.eventId, segmentId: event.segmentId, contentChars: String(event.message || "").length,
+        status: dbFlushFailureCount > 0 ? "failed" : "ok" });
+    }
   }
   try {
     ensureContextManager().appendMessage(sessionId, item);
@@ -8117,6 +8461,24 @@ function appendMessage(sessionId, message, { requireCommit = false } = {}) {
   return item;
 }
 
+function removeSessionMessage(sessionId, messageId, { role = "" } = {}) {
+  const db = loadDb();
+  const messages = Array.isArray(db.messages?.[sessionId]) ? db.messages[sessionId] : [];
+  const id = String(messageId || "").trim();
+  const index = messages.findIndex((message) => String(message?.id || "") === id
+    && (!role || message?.role === role));
+  if (index < 0) return false;
+  messages.splice(index, 1);
+  const session = db.sessions.find((entry) => entry.id === sessionId);
+  if (session) {
+    session.messages = messages;
+    session.updatedAt = Date.now();
+  }
+  _messagesCache.set(sessionId, messages);
+  saveDb(db, { immediate: true, requireCommit: true });
+  return true;
+}
+
 function canonicalProductUserTurn(payload = {}) {
   const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
   const text = String(payload.userText || payload.message || payload.text || "").trim()
@@ -8127,6 +8489,27 @@ function canonicalProductUserTurn(payload = {}) {
     attachments,
     createdAt: Number(payload.clientMessageCreatedAt || payload.createdAt || 0) || Date.now()
   };
+}
+
+function recordSupplementReceipt(sessionId, turnId, supplementId, receipt, { immediate = true } = {}) {
+  const status = typeof receipt === "string" ? receipt : receipt.stage || receipt.status;
+  const details = typeof receipt === "object" ? receipt : {};
+  const db = loadDb();
+  const message = db.messages?.[sessionId]?.find(item => item.id === supplementId && item.role === "user");
+  const previous = message?.raw?.supplement;
+  if (!previous || previous.turnId !== turnId) return previous;
+  if (details.sequence && previous.sequence >= details.sequence) return previous;
+  const terminal = ["addressed", "needs_clarification", "failed", "cancelled", "pending"];
+  if (terminal.includes(previous.status) && !details.sequence) return previous;
+  if (previous.status === "applied" && !terminal.includes(status)) return previous;
+  if (previous.status === "accepted" && !["applied", ...terminal].includes(status)) return previous;
+  message.raw.supplement = { ...previous, status, updatedAt: Date.now(),
+    ...(details.sequence ? { sequence: details.sequence, eventId: details.eventId } : {}),
+    ...(details.responseSegmentId ? { responseSegmentId: details.responseSegmentId } : {}) };
+  // 过渡态（accepted/applied）走 300ms 合并落盘，避免每个诊断事件都做一次整库
+  // fsync 阻塞主进程；终态必须立刻落盘，保证重启后状态不丢。
+  saveDb(db, { immediate, requireCommit: immediate });
+  return message.raw.supplement;
 }
 
 function ensureProductUserTurn(sessionId, turn = {}, { requireCommit = true } = {}) {
@@ -8238,6 +8621,15 @@ function productRequestFingerprint(payload = {}, { includeContext = true } = {})
     text: String(payload.message ?? payload.text ?? payload.input ?? "").replace(/\r\n?/g, "\n").trim(),
     attachments: (Array.isArray(payload.attachments) ? payload.attachments : []).map(requestAttachmentFingerprint)
   };
+  if (payload.quote && typeof payload.quote === "object") {
+    normalized.quote = {
+      sessionId: String(payload.quote.sessionId || ""),
+      messageId: String(payload.quote.messageId || ""),
+      selectionText: String(payload.quote.selectionText || "").replace(/\r\n?/g, "\n").trim(),
+      text: String(payload.quote.text || "").replace(/\r\n?/g, "\n").trim(),
+      attachments: (Array.isArray(payload.quote.attachments) ? payload.quote.attachments : []).map(requestAttachmentFingerprint)
+    };
+  }
   if (includeContext) normalized.context = stableRequestFingerprintValue(payload.context || null);
   return requestContentDigest(normalized);
 }
@@ -8497,6 +8889,7 @@ function verifyProductUserTurnCommit(sessionId = "", clientMessageId = "") {
 
 function deliveredSessionStatus(result = {}) {
   const status = String(result.status || result.requestRun?.executionOutcome || "").toLowerCase();
+  if (status === "unknown") return "waiting";
   if (["awaiting_input", "awaiting_confirmation", "pending_confirmation", "waiting"].includes(status)) return "waiting";
   if (["cancelled", "aborted", "interrupted"].includes(status)) return "aborted";
   if (["failed", "timed_out", "timeout"].includes(status) || result.success === false) return "failed";
@@ -8574,13 +8967,13 @@ function scheduleProductResultOutboxDrain(delayMs = 1000) {
   productResultOutboxTimer.unref?.();
 }
 
-function persistProductResult({ sessionId = "", taskId = "", clientMessageId = "", userTurn = null, result = {}, assistantMessageIdsBefore = [] } = {}) {
+function persistProductResult({ sessionId = "", taskId = "", clientMessageId = "", userTurn = null, result = {}, assistantMessageIdsBefore = [], deferCommit = false } = {}) {
   const stableResultKey = String(clientMessageId || taskId || "").trim();
   const responseMessageId = stableResultKey
     ? `product-result:${stableResultKey}`
     : `product-result:${randomUUID()}`;
   if (clientMessageId && userTurn) {
-    ensureProductUserTurn(sessionId, { ...userTurn, clientMessageId }, { requireCommit: true });
+    ensureProductUserTurn(sessionId, { ...userTurn, clientMessageId }, { requireCommit: !deferCommit });
   }
   const db = loadDb();
   const messages = Array.isArray(db.messages?.[sessionId]) ? db.messages[sessionId] : [];
@@ -8589,7 +8982,24 @@ function persistProductResult({ sessionId = "", taskId = "", clientMessageId = "
     && (message.id === responseMessageId || assistantCompletesUserMessage(message, String(clientMessageId || "")))
   ));
   const resolvedMessageId = existing?.id || responseMessageId;
+  result = { ...result, tokenUsage: result.tokenUsage || result.raw?.tokenUsage
+    || activeRuns.get(sessionId)?.tokenUsage || existing?.raw?.productResult?.tokenUsage || null };
+  if (hasCommittedRuntimeDelivery(result)) {
+    result = {
+      ...result,
+      ok: true,
+      success: true,
+      status: "completed",
+      executionOutcome: "succeeded",
+      protocolError: false,
+      error: null,
+      failureNotice: "",
+      deliveryStatus: result.deliveryStatus === "degraded" ? "degraded" : "completed",
+      presentationStatus: result.presentationStatus === "recovered" ? "recovered" : "rendered"
+    };
+  }
   const runId = String(result.runId || result.projectRunId || result.traceId || stableResultKey || resolvedMessageId);
+  result = preserveCommittedOutcome(existing?.raw?.productResult, { ...result, runId });
   const requestRun = createRequestRun({
     runId,
     eventId: `${runId}:persisted`,
@@ -8606,13 +9016,66 @@ function persistProductResult({ sessionId = "", taskId = "", clientMessageId = "
   const resultStatus = String(result.status || "").toLowerCase();
   const cancelledResult = requestRun.executionOutcome === "cancelled";
   const failedResult = ["failed", "timed_out"].includes(requestRun.executionOutcome);
+  if (cancelledResult || failedResult) {
+    const failedRun = activeRuns.get(sessionId);
+    const partial = failedRun?.capturePartialOutput?.() || {};
+    const interrupted = failedRun?.interruptedOutput || {};
+    const previous = existing?.raw || {};
+    const previousResult = previous.productResult || {};
+    const mergeEvidence = (...lists) => {
+      const output = [];
+      const seen = new Map();
+      for (const list of lists) {
+        if (!Array.isArray(list)) continue;
+        for (const event of list) {
+          if (!event || typeof event !== "object") continue;
+          const eventId = String(event.eventId || "").trim();
+          let key = eventId;
+          if (!key) {
+            try { key = JSON.stringify(event); } catch { key = `${output.length}`; }
+          }
+          if (seen.has(key)) {
+            if (JSON.stringify(seen.get(key)) !== JSON.stringify(event)) console.error("[PersistedFailure] conflicting event", key);
+            continue;
+          }
+          seen.set(key, event);
+          output.push(event);
+        }
+      }
+      return output.sort((left, right) => (
+        Number(left.turnSequence || left.sequence || 0) - Number(right.turnSequence || right.sequence || 0)
+      ));
+    };
+    result = { ...result };
+    for (const field of ["executionLog", "structuredEvents", "answerSegments"]) {
+      result[field] = mergeEvidence(
+        result[field], result.raw?.[field], interrupted[field], partial[field], previous[field], previousResult[field], previousResult.raw?.[field]
+      );
+    }
+    if (cancelledResult) {
+      result.executionViewState ||= failedRun?.executionViewState || previousResult.executionViewState;
+      delete result.terminationNotice;
+      result.text = preserveFailedOutput(result, "") || [interrupted.text, partial.text, result.text, existing?.text]
+        .find(text => typeof text === "string" && text.trim() && !/^任务已终止。[\s\S]*$/.test(text.trim())) || "";
+    } else result.failureNotice ||= requestRun.executionOutcome === "timed_out"
+      ? "本次任务超时，已保留已经生成的内容。"
+      : "本次任务未完整完成，已保留已经生成的内容。";
+  }
+  if (cancelledResult || failedResult) {
+    requestRun.evidence = {
+      ...(requestRun.evidence && typeof requestRun.evidence === "object" ? requestRun.evidence : {}),
+      executionLog: Array.isArray(result.executionLog) ? result.executionLog : [],
+      structuredEvents: Array.isArray(result.structuredEvents) ? result.structuredEvents : [],
+      answerSegments: Array.isArray(result.answerSegments) ? result.answerSegments : []
+    };
+  }
   const waitingResult = ["awaiting_input", "awaiting_confirmation", "pending_confirmation"].includes(resultStatus);
   const recoveredResult = requestRun.executionOutcome === "succeeded" && requestRun.deliveryStatus === "degraded";
   const failureReason = failedResult
     ? userFacingError(result.error || result.task?.error || result.taskBrain?.error || "任务没有通过结果校验。", { domain: "task", developerMode: isDevMode })
     : "";
   const resolvedText = String(cancelledResult
-    ? "任务已终止。"
+    ? result.text
     : failedResult
       ? (String(result.text || "").trim()
         || `${requestRun.executionOutcome === "timed_out" ? "执行超时" : "执行失败"}。\n原因：${failureReason}`)
@@ -8620,7 +9083,7 @@ function persistProductResult({ sessionId = "", taskId = "", clientMessageId = "
   const persistedResult = compactPersistedExecutionPayload({
     ...result,
     text: resolvedText,
-    success: failedResult || cancelledResult ? false : (waitingResult ? result.success !== false : true),
+    success: resultStatus === "unknown" ? undefined : failedResult || cancelledResult ? false : (waitingResult ? result.success !== false : true),
     status: recoveredResult ? "completed" : result.status,
     runId,
     requestRun,
@@ -8655,7 +9118,7 @@ function persistProductResult({ sessionId = "", taskId = "", clientMessageId = "
     if (existing) {
       existing.text = mergePermanentHmsAnswer(existing.text, resolvedText);
       persistedResult.text = existing.text;
-      const existingRaw = compactPersistedExecutionPayload(existing.raw && typeof existing.raw === "object" ? existing.raw : {});
+      const existingRaw = { ...compactPersistedExecutionPayload(existing.raw && typeof existing.raw === "object" ? existing.raw : {}) };
       if (existingRaw.raw && typeof existingRaw.raw === "object") {
         persistedResult.raw = {
           ...existingRaw.raw,
@@ -8678,14 +9141,14 @@ function persistProductResult({ sessionId = "", taskId = "", clientMessageId = "
         session.messages = messages;
         session.updatedAt = Date.now();
       }
-      saveDb(db, { immediate: true, requireCommit: true });
+      saveDb(db, { immediate: !deferCommit, requireCommit: !deferCommit });
     } else {
-      appendMessage(sessionId, messageToPersist, { requireCommit: true });
+      appendMessage(sessionId, messageToPersist, { requireCommit: !deferCommit, deferCommit });
     }
-    if (!verifyProductResultCommit(sessionId, resolvedMessageId)) {
+    if (!deferCommit && !verifyProductResultCommit(sessionId, resolvedMessageId)) {
       throw Object.assign(new Error("Result commit verification failed"), { code: "DB_RESULT_VERIFY_FAILED" });
     }
-    if (!verifyProductUserTurnCommit(sessionId, String(clientMessageId || ""))) {
+    if (!deferCommit && !verifyProductUserTurnCommit(sessionId, String(clientMessageId || ""))) {
       throw Object.assign(new Error("Result commit verification failed"), { code: "DB_RESULT_VERIFY_FAILED" });
     }
   } catch (error) {
@@ -10883,13 +11346,77 @@ async function previewPresentationData(buffer) {
   return extractPresentationSlides(buffer, { JSZip: zipParser(), XMLParser: presentationXmlParser() });
 }
 
+async function resolveConversationPreviewFile(attachment = {}) {
+  const declared = String(attachment.sourcePath || attachment.path || "");
+  if (!path.isAbsolute(declared) || declared.startsWith("\\\\") || declared.startsWith("//") || declared.includes("\0")) {
+    throw new Error("请使用本机文件的完整路径");
+  }
+  let stat;
+  try { stat = await fs.promises.stat(declared); } catch (error) {
+    if (error.code === "ENOENT") throw new Error("文件不存在或已移动，请检查原文件位置");
+    throw new Error("无法读取这个文件，请检查访问权限");
+  }
+  if (!stat.isFile()) throw new Error("这是文件夹，请使用打开所在位置");
+  return { source: path.resolve(declared), stat };
+}
+
+function isEditableConversationDocument(source = "") {
+  return /\.(md|markdown|txt|json|log|html?|js|css|py|ts|xml|ya?ml)$/i.test(String(source || ""));
+}
+
+async function saveConversationDocument(payload = {}) {
+  const sourcePath = String(payload.sourcePath || "").trim();
+  const content = typeof payload.content === "string" ? payload.content : String(payload.content ?? "");
+  if (!isEditableConversationDocument(sourcePath)) throw new Error("当前文件类型不支持在任务看板中保存");
+  if (Buffer.byteLength(content, "utf8") > 20 * 1024 * 1024) throw new Error("文档超过 20 MB，暂不保存，避免客户端卡顿");
+  const exactFile = await resolveConversationPreviewFile({ sourcePath, strictPath: true });
+  if (!isEditableConversationDocument(exactFile.source)) throw new Error("当前文件类型不支持在任务看板中保存");
+  const expectedModifiedAt = Number(payload.expectedModifiedAt || 0);
+  if (expectedModifiedAt > 0 && Math.abs(Number(exactFile.stat.mtimeMs || 0) - expectedModifiedAt) > 1) {
+    throw new Error("原文件已在其他位置修改，请重新读取后再保存");
+  }
+  atomicTextWrite(exactFile.source, content);
+  const savedStat = await fs.promises.stat(exactFile.source);
+  return {
+    ok: true,
+    file: exactFile.source,
+    modifiedAt: Number(savedStat.mtimeMs || 0),
+    savedAt: new Date().toISOString()
+  };
+}
+
 async function previewAttachmentData(attachment = {}) {
-  const name = path.basename(String(attachment.name || "附件"));
-  const mimeType = sanitizeText(attachment.mimeType || "");
-  const source = resolvePreviewAttachmentPath(attachment);
-  const buffer = attachment.dataUrl
+  const exactFile = attachment.strictPath === true ? await resolveConversationPreviewFile(attachment) : null;
+  const name = exactFile ? path.basename(exactFile.source) : path.basename(String(attachment.name || "附件"));
+  const mimeType = exactFile
+    ? ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" }[path.extname(name).toLowerCase()] || "")
+    : sanitizeText(attachment.mimeType || "");
+  const source = exactFile?.source || resolvePreviewAttachmentPath(attachment);
+  if (exactFile) {
+    attachment = { sourcePath: source, name, strictPath: true };
+    if (/\.pdf$/i.test(name)) return { ok: true, kind: "frame", fileUrl: pathToFileURL(source).toString() };
+    if (!/\.(docx|pptx|png|jpe?g|webp|gif|txt|md|json|log|html?|js|css|csv|py|ts|xml|yaml|yml)$/i.test(name)) {
+      return { ok: false, kind: "binary", previewText: "此格式暂不支持对话内预览，可点击打开原文件。" };
+    }
+    if (exactFile.stat.size > 20 * 1024 * 1024) {
+      return { ok: false, kind: "large", previewText: "文件超过 20 MB，暂不内嵌加载，避免对话卡顿。请打开原文件。" };
+    }
+  }
+  const exactBuffer = exactFile ? await fs.promises.readFile(source) : null;
+  if (exactBuffer && /\.(html?|csv|py|ts|xml|yaml|yml)$/i.test(name)) {
+    const text = exactBuffer.toString("utf8");
+    return {
+      ok: true,
+      kind: "text",
+      previewText: exactFile ? text : text.slice(0, 12000),
+      sourcePath: exactFile?.source || "",
+      modifiedAt: Number(exactFile?.stat?.mtimeMs || 0),
+      truncated: !exactFile && text.length > 12000
+    };
+  }
+  const buffer = exactBuffer || (attachment.dataUrl
     ? Buffer.from(fileBase64(attachment.dataUrl), "base64")
-    : source ? fs.readFileSync(source) : attachment.textContent ? Buffer.from(String(attachment.textContent), "utf8") : null;
+    : source ? fs.readFileSync(source) : attachment.textContent ? Buffer.from(String(attachment.textContent), "utf8") : null);
   if (/^image\//i.test(mimeType) || /\.(png|jpe?g|webp|gif)$/i.test(name)) {
     if (!buffer) return { ok: false, kind: "empty", previewText: "当前图片内容不可用。" };
     return { ok: true, kind: "image", dataUrl: attachment.dataUrl || `data:${mimeType || "image/png"};base64,${buffer.toString("base64")}` };
@@ -10918,7 +11445,15 @@ async function previewAttachmentData(attachment = {}) {
     return { ok: Boolean(slides.length), kind: "slides", slides, metadata: { slides: slides.length } };
   }
   if (/^text\/|json|markdown|xml|javascript|html/i.test(mimeType) || /\.(txt|md|json|log|html?|js|css)$/i.test(name)) {
-    return { ok: true, kind: "text", previewText: buffer ? buffer.toString("utf8").slice(0, 12000) : "当前文本内容不可用。" };
+    const text = buffer ? buffer.toString("utf8") : "当前文本内容不可用。";
+    return {
+      ok: true,
+      kind: "text",
+      previewText: exactFile ? text : text.slice(0, 12000),
+      sourcePath: exactFile?.source || "",
+      modifiedAt: Number(exactFile?.stat?.mtimeMs || 0),
+      truncated: !exactFile && Boolean(buffer && text.length > 12000)
+    };
   }
   return { ok: false, kind: "binary", previewText: "此格式暂不支持内部解析，请使用外部打开。" };
 }
@@ -12424,9 +12959,14 @@ function runWasTimedOut(sessionId, controller = null) {
 function startActiveRunDeadline({ sessionId = "", controller = null, timeoutMs = 0, message = "任务超过允许时长，已自动终止。" } = {}) {
   const duration = Math.max(0, Number(timeoutMs || 0));
   if (!sessionId || !controller || !duration) return { stop: () => {} };
-  const timer = setTimeout(() => {
+  const timer = setTimeout(async () => {
     const run = activeRuns.get(sessionId);
     if (!run || run.controller !== controller || controller.signal.aborted) return;
+    if (run.queryRuntimeStatus) {
+      const status = await run.queryRuntimeStatus().catch(() => null);
+      if (activeRuns.get(sessionId) !== run || controller.signal.aborted) return;
+      if (["completed", "failed", "cancelled", "incomplete"].includes(status?.status)) return;
+    }
     run.timedOut = true;
     run.timedOutAt = new Date().toISOString();
     run.timeoutReason = message;
@@ -13201,12 +13741,13 @@ function sanitizeHmsAnswerText(value = "") {
   // This is the final durable boundary. Protocol tags are transport metadata,
   // not answer content, even when the model omitted baiqiu-final or used the
   // thought channel for an explicit answer segment.
-  const withoutMachineBlocks = stripBareToolActionLines(String(value || "").replace(
+  const withoutMachineBlocks = stripBareToolActionLines(stripMarkdownProgressEnvelopes(value).replace(
     /<baiqiu-(progress|presentation|outcome|clarification|outline)\b[^>]*>[\s\S]*?<\/baiqiu-\1>/gi,
     ""
   ));
-  const recovered = parseTrailingHmsProtocolObjects(withoutMachineBlocks);
-  return stripHmsProgressEnvelopes(recovered?.text ?? withoutMachineBlocks)
+  const answerDocument = extractAnswerDocumentEnvelope(withoutMachineBlocks);
+  const recovered = parseTrailingHmsProtocolObjects(answerDocument.text);
+  return stripHmsProgressEnvelopes(recovered?.text ?? answerDocument.text)
     .replace(/<\/?baiqiu-(?:progress|answer|final|presentation|outcome|clarification|outline)\b[^>]*>/gi, "")
     .trim();
 }
@@ -15450,19 +15991,14 @@ function createToolContext() {
         const allowed = new Set(["off", "minimal", "low", "medium", "high", "extra_high", "maximum"]);
         const value = sanitizeText(reasoning || "maximum");
         if (!allowed.has(value)) throw new Error(`未知推理等级：${value}`);
-        const db = loadDb();
-        db.settings.reasoning = value;
-        saveDb(db);
-        return { reasoning: value };
+        return queueModelSettingsChange(() => configureModelReasoning(value), { reasoning: value });
       },
       switchModel: (providerId) => {
         const id = sanitizeText(providerId || "").toLowerCase();
         const db = loadDb();
         if (!db.settings.providers?.[id]) throw new Error(`模型不存在：${id}`);
-        db.settings.defaultProvider = id;
-        for (const [key, provider] of Object.entries(db.settings.providers)) provider.enabled = key === id;
-        saveDb(db);
-        return { defaultProvider: id, provider: { ...db.settings.providers[id], apiKey: db.settings.providers[id].apiKey ? "***" : "" } };
+        return queueModelSettingsChange(async () => await reuseVerifiedProviderConfiguration({ providerId: id, activate: true })
+          || verifiedProviderConfiguration({ providerId: id, activate: true }), { providerId: id });
       }
     }
   };
@@ -16945,11 +17481,14 @@ function fingerprintHermesConfig(config = {}) {
     .digest("hex");
 }
 
-async function syncHermesRuntimeConfig(settings = {}) {
+async function syncHermesRuntimeConfig(settings = {}, { configurationCommit = false } = {}) {
+  while (hermesConfigSyncPromise || (!configurationCommit && modelSettingsCommitBarrier)) {
+    if (!configurationCommit && modelSettingsCommitBarrier) await modelSettingsCommitBarrier;
+    else await hermesConfigSyncPromise;
+  }
+  if (!configurationCommit) settings = ensureModelSettingsStore().apply({ ...settings });
   const config = selectedHermesConfig(settings);
   const fingerprint = fingerprintHermesConfig(config);
-  if (fingerprint === hermesConfigFingerprint) return ensureHermesConfigService().runtime();
-  if (hermesConfigSyncPromise) await hermesConfigSyncPromise;
   if (fingerprint === hermesConfigFingerprint) return ensureHermesConfigService().runtime();
 
   const configChanged = fingerprint !== hermesConfigFingerprint;
@@ -17055,10 +17594,29 @@ function recentProviderVerification(providerId, provider) {
   return structuredClone(cached.verification);
 }
 
+async function refreshProviderModelCatalog(providerId, provider) {
+  const result = await listProviderModels({ providerId, provider, includeMetadata: true, signal: AbortSignal.timeout(15000) });
+  const current = loadDb();
+  const saved = current.settings.providers?.[providerId];
+  if (saved && providerVerificationCacheKey(providerId, { ...saved, model: "catalog" })
+    === providerVerificationCacheKey(providerId, { ...provider, model: "catalog" })) {
+    await ensureModelSettingsStore().cacheCatalog(current.settings, providerId, provider, {
+      availableModels: result.models,
+      availableModelsAt: result.fetchedAt,
+      modelMetadata: result.modelMetadata,
+      modelCatalogSource: result.catalogSource,
+      modelCatalogWarning: result.metadataWarning
+    });
+    ensureModelSettingsStore().apply(current.settings);
+  }
+  return result;
+}
+
 async function verifiedProviderConfiguration(payload = {}) {
   const providerId = sanitizeText(payload.providerId || "").toLowerCase();
   if (!providerId) throw new Error("请选择模型供应商。");
   const current = loadDb();
+  assertModelSettingsRevision(current.settings, payload.expectedRevision);
   const savedProvider = current.settings.providers?.[providerId] || PRESET_PROVIDERS[providerId] || {};
   const provider = {
     ...savedProvider,
@@ -17072,28 +17630,12 @@ async function verifiedProviderConfiguration(payload = {}) {
   delete provider.activate;
   delete provider.enable;
   delete provider.strictModel;
+  delete provider.expectedRevision;
+  delete provider.requestId;
+  emitModelConfigurationStage(providerId, "verifying");
   let verification = recentProviderVerification(providerId, provider);
   let discovered = verification?.models || [];
-  if (!verification) {
-    try {
-      const listed = await listProviderModels({ providerId, provider, signal: AbortSignal.timeout(15000) });
-      discovered = listed.models || [];
-    } catch (error) {
-      if (!provider.model) throw error;
-    }
-  }
-  const requestedModel = sanitizeText(payload.model || provider.model || "");
-  if (payload.strictModel === true && discovered.length && !discovered.includes(requestedModel)) {
-    throw new Error(`${provider.name || providerId} 当前账号没有返回文本模型 ${requestedModel}。`);
-  }
-  if (discovered.length && !discovered.includes(provider.model)) {
-    provider.model = [
-      PRESET_PROVIDERS[providerId]?.model,
-      savedProvider.verifiedModel,
-      discovered[0]
-    ].find((model) => discovered.includes(model)) || discovered[0];
-  }
-  if (!provider.model) throw new Error("供应商没有返回可用于黑球对话的文本模型。");
+  if (!provider.model) throw new Error("请填写需要验证的模型 ID 或接入点 ID。");
   if (!verification) {
     verification = await verifyProviderConnection({
       providerId,
@@ -17102,7 +17644,7 @@ async function verifiedProviderConfiguration(payload = {}) {
     });
     rememberProviderVerification(providerId, provider, verification);
   }
-  const next = structuredClone(current);
+  const next = { settings: structuredClone(current.settings) };
   const activate = payload.activate === true;
   const activeProvider = current.settings.defaultProvider === providerId;
   next.settings.providers ||= {};
@@ -17134,35 +17676,29 @@ async function verifiedProviderConfiguration(payload = {}) {
   }
   const receipt = blackBallRuntimeReceipt(next.settings, verification, appliesToRuntime);
   if (appliesToRuntime) {
-    clearHermesSessionBindings(next);
     next.settings.modelRuntime = receipt;
   }
-  try {
-    if (appliesToRuntime) await syncHermesRuntimeConfig(next.settings);
-    const saved = saveDb(next, { immediate: true, requireCommit: true });
-    return {
-      ok: true,
-      providerId,
-      defaultProvider: saved.settings.defaultProvider,
-      provider: {
-        ...saved.settings.providers[providerId],
-        apiKey: saved.settings.providers[providerId].apiKey ? "***" : ""
-      },
-      models: verification.models || discovered,
-      verification,
-      runtimeReceipt: receipt
-    };
-  } catch (error) {
-    if (appliesToRuntime) await syncHermesRuntimeConfig(current.settings).catch(() => null);
-    throw error;
-  }
+  const saved = await applyAndCommitModelSettings(next.settings, { providerId, applyRuntime: appliesToRuntime });
+  return {
+    ok: true,
+    settings: saved.settings,
+    providerId,
+    defaultProvider: saved.settings.defaultProvider,
+    provider: {
+      ...saved.settings.providers[providerId],
+      apiKey: saved.settings.providers[providerId].apiKey ? "***" : ""
+    },
+    models: verification.models || discovered,
+    verification,
+    runtimeReceipt: receipt
+  };
 }
 
 async function reuseVerifiedProviderConfiguration({ providerId, activate = false, enable = false } = {}) {
   const current = loadDb();
   const provider = current.settings.providers?.[providerId];
   if (!provider || !providerVerificationMatches(providerId, provider)) return null;
-  const next = structuredClone(current);
+  const next = { settings: structuredClone(current.settings) };
   const activeProvider = current.settings.defaultProvider === providerId;
   next.settings.providers[providerId].enabled = activate || enable || activeProvider || provider.enabled === true;
   next.settings.providers[providerId].verifiedCredentialFingerprint ||= providerCredentialFingerprint(providerId, provider);
@@ -17176,36 +17712,30 @@ async function reuseVerifiedProviderConfiguration({ providerId, activate = false
   }
   const receipt = blackBallRuntimeReceipt(next.settings, null, appliesToRuntime);
   if (appliesToRuntime) {
-    clearHermesSessionBindings(next);
     next.settings.modelRuntime = receipt;
   }
-  try {
-    if (appliesToRuntime) await syncHermesRuntimeConfig(next.settings);
-    const saved = saveDb(next, { immediate: true, requireCommit: true });
-    const savedProvider = saved.settings.providers[providerId];
-    return {
-      ok: true,
+  const saved = await applyAndCommitModelSettings(next.settings, { providerId, applyRuntime: appliesToRuntime });
+  const savedProvider = saved.settings.providers[providerId];
+  return {
+    ok: true,
+    settings: saved.settings,
+    providerId,
+    defaultProvider: saved.settings.defaultProvider,
+    provider: { ...savedProvider, apiKey: savedProvider.apiKey ? "***" : "" },
+    models: savedProvider.availableModels || [],
+    verification: {
       providerId,
-      defaultProvider: saved.settings.defaultProvider,
-      provider: { ...savedProvider, apiKey: savedProvider.apiKey ? "***" : "" },
-      models: savedProvider.availableModels || [],
-      verification: {
-        providerId,
-        providerName: savedProvider.name || providerId,
-        model: savedProvider.verifiedModel,
-        baseURL: savedProvider.verifiedBaseURL,
-        verified: true,
-        verifiedAt: savedProvider.verifiedAt,
-        latencyMs: savedProvider.verificationLatencyMs,
-        models: savedProvider.availableModels || []
-      },
-      runtimeReceipt: receipt,
-      reusedVerification: true
-    };
-  } catch (error) {
-    if (appliesToRuntime) await syncHermesRuntimeConfig(current.settings).catch(() => null);
-    throw error;
-  }
+      providerName: savedProvider.name || providerId,
+      model: savedProvider.verifiedModel,
+      baseURL: savedProvider.verifiedBaseURL,
+      verified: true,
+      verifiedAt: savedProvider.verifiedAt,
+      latencyMs: savedProvider.verificationLatencyMs,
+      models: savedProvider.availableModels || []
+    },
+    runtimeReceipt: receipt,
+    reusedVerification: true
+  };
 }
 
 let modelRuntimeReconcilePromise = null;
@@ -17226,7 +17756,71 @@ function verifiedEnabledModelAlternatives(settings = {}, excludedProviderId = ""
     });
 }
 
+async function configureModelReasoning(value) {
+  const reasoning = sanitizeText(value || "").toLowerCase();
+  if (!BLACK_BALL_REASONING_LEVELS.has(reasoning)) throw new Error("不支持的黑球推理等级。");
+  const current = loadDb();
+  const providerId = current.settings.defaultProvider;
+  const provider = current.settings.providers?.[providerId] || {};
+  const levels = verifiedNativeReasoningLevels(provider);
+  if (levels.length && !levels.includes(reasoning)) throw new Error(`${provider.model || "当前模型"} 不支持该原生推理等级。`);
+  const settings = { ...structuredClone(current.settings), reasoning };
+  const ready = selectedModelReadiness(settings).configured;
+  const receipt = blackBallRuntimeReceipt(settings, null, ready);
+  settings.modelRuntime = receipt;
+  const saved = await applyAndCommitModelSettings(settings, { providerId, applyRuntime: ready });
+  return { ok: true, reasoning, runtimeReceipt: receipt, settings: saved.settings };
+}
+
 let modelRuntimeTransition = Promise.resolve();
+let modelConfigurationOperation = null;
+
+function queueModelSettingsChange(task, requested) {
+  void runModelRuntimeTransition(task).then(() => {
+    safeMainWindowSend("session:changed", rendererDbSnapshot(loadDb()));
+  }).catch(() => {
+    safeMainWindowSend("models:configuration-failed", { message: "后台模型切换失败，原配置已保留。请在模型管理中检查配置后重试。" });
+  });
+  return { ...requested, pending: true, applied: false, message: "切换已排队，等待当前任务结束后应用；尚未切换成功。" };
+}
+
+function emitModelConfigurationStage(providerId, stage) {
+  if (modelConfigurationOperation) modelConfigurationOperation.stages.push({ stage, elapsedMs: Date.now() - modelConfigurationOperation.startedAt });
+  safeMainWindowSend("models:configuration-progress", {
+    providerId, stage, requestId: modelConfigurationOperation?.requestId || ""
+  });
+}
+
+function runModelConfigurationOperation(payload, task) {
+  return runModelRuntimeTransition(async () => {
+    assertModelSettingsRevision(loadDb().settings, payload.expectedRevision);
+    const timing = { requestId: payload.requestId || "", startedAt: Date.now(), success: false, stages: [] };
+    modelConfigurationOperation = timing;
+    try {
+      const result = await task();
+      timing.success = true;
+      if (result?.settings) return { ...result, settings: structuredClone(result.settings) };
+      return result;
+    } finally {
+      console.info("[ModelConfiguration]", JSON.stringify({ requestId: timing.requestId, success: timing.success,
+        durationMs: Date.now() - timing.startedAt, stages: timing.stages }));
+      modelConfigurationOperation = null;
+    }
+  });
+}
+
+async function waitForModelRuntimeIdle(providerId) {
+  const busy = () => [...activeRuns.values()].some(run => run.waitingForModelRuntime !== true)
+    || [hermesClient, hermesForegroundClient, hermesHealthClient]
+      .some(client => Number(client?.health?.().activePrompts || 0) > 0);
+  if (busy()) emitModelConfigurationStage(providerId, "waiting_for_task");
+  const deadline = Date.now() + 120000;
+  while (busy()) {
+    if (Date.now() >= deadline) throw new Error("当前任务尚未结束，本次切换未执行，原配置仍保留。请在任务结束后切换。");
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  emitModelConfigurationStage(providerId, "applying");
+}
 
 function runModelRuntimeTransition(task) {
   const previous = modelRuntimeTransition;
@@ -17279,12 +17873,15 @@ async function reconcileSelectedModelRuntime() {
     const providerId = readiness.providerId;
     const provider = current.settings.providers?.[providerId];
     if (readiness.configured) {
-      const next = structuredClone(current);
-      if (!modelRuntimeStartupReconciled) clearHermesSessionBindings(next);
+      const next = { settings: structuredClone(current.settings) };
+      if (fingerprintHermesConfig(selectedHermesConfig(next.settings)) !== hermesConfigFingerprint) {
+        await waitForModelRuntimeIdle(providerId);
+      }
       await syncHermesRuntimeConfig(next.settings);
       const receipt = blackBallRuntimeReceipt(next.settings, null, true);
       next.settings.modelRuntime = receipt;
-      saveDb(next, { immediate: true, requireCommit: true });
+      if (!modelRuntimeStartupReconciled) clearHermesSessionBindings(current);
+      current.settings.modelRuntime = receipt;
       modelRuntimeStartupReconciled = true;
       return receipt;
     }
@@ -17360,7 +17957,7 @@ function hermesFileAttachments(files = []) {
 
 const chatStreamProgressSequences = new Map();
 const chatStreamFrameSequences = new Map();
-const chatStreamStarted = new Set();
+const chatStreamStarted = new Map();
 
 function isBlackBallPublicProgress(progress = {}) {
   const source = String(progress.source || "").trim().toLowerCase();
@@ -17419,7 +18016,9 @@ function publicChatProgress(streamId = "", frame = {}) {
     : normalizeSemanticType(declaredSemanticType);
   if (declaredSemanticType !== undefined && declaredSemanticType !== null && String(declaredSemanticType).trim() && !semanticType) return null;
   const phase = safeActivitySnippet(supplied.phase || frame.phase || type, 64).toLowerCase();
-  const label = safeActivitySnippet(supplied.message || frame.label || "", 180);
+  const label = ["stage_result", "cross"].includes(semanticType)
+    ? safeReasoningDelta(supplied.message || frame.label || "", Number.MAX_SAFE_INTEGER)
+    : safeActivitySnippet(supplied.message || frame.label || "", 800);
   const source = safeActivitySnippet(supplied.source || "runtime", 32);
   const actor = safeActivitySnippet(supplied.actor || (source === "hms" ? "model" : source === "tool" ? "tool" : "client"), 40);
   const kind = safeActivitySnippet(supplied.kind || "runtime_status", 40);
@@ -17484,6 +18083,9 @@ function publicChatProgress(streamId = "", frame = {}) {
     afterEventId: String(supplied.afterEventId || "").trim().slice(0, 200),
     evidenceEventIds: safeEventReferenceList(supplied.evidenceEventIds),
     evidenceToolCallIds: safeEventReferenceList(supplied.evidenceToolCallIds),
+    goalId: String(supplied.goalId || "").slice(0, 160),
+    nativeSegmentId: String(supplied.nativeSegmentId || "").slice(0, 64),
+    replyToUserMessageId: String(supplied.replyToUserMessageId || "").slice(0, 240),
     completed: Number.isFinite(Number(supplied.completed)) ? Number(supplied.completed) : null,
     total: Number.isFinite(Number(supplied.total)) ? Number(supplied.total) : null,
     segmentId: String(supplied.segmentId || supplied.segment_id || "").trim().slice(0, 160),
@@ -17494,10 +18096,10 @@ function publicChatProgress(streamId = "", frame = {}) {
 
 function emitBlackBallRunStarted(sessionId = "", streamId = "", startedAt = Date.now()) {
   const id = String(streamId || "").trim();
-  if (!id || chatStreamStarted.has(id)) return;
-  chatStreamStarted.add(id);
+  if (!id) return null;
+  if (chatStreamStarted.has(id)) return chatStreamStarted.get(id);
   const timestamp = Number(startedAt || 0) > 0 ? Number(startedAt) : Date.now();
-  emitChatStream(sessionId, id, {
+  const emitted = emitChatStream(sessionId, id, {
     type: "start",
     eventType: "execution_start",
     startedAt: timestamp,
@@ -17508,9 +18110,9 @@ function emitBlackBallRunStarted(sessionId = "", streamId = "", startedAt = Date
       kind: "lifecycle",
       type: "execution_start",
       phase: "blackball-start",
-      action: "read",
+      action: "start",
       status: "running",
-      message: "黑球已接收本次请求",
+      message: "已接收本次请求",
       target: "execution_activity",
       outputType: "execution_activity",
       presentation: "status",
@@ -17521,13 +18123,62 @@ function emitBlackBallRunStarted(sessionId = "", streamId = "", startedAt = Date
       timestamp
     }
   });
+  chatStreamStarted.set(id, emitted);
+  return emitted;
+}
+
+function blackBallRuntimeProgress(stage = "", detail = {}) {
+  const messages = {
+    runtime_wait: "正在检查黑球运行时是否就绪",
+    config_sync: "正在同步当前模型配置",
+    client_start: "正在启动或复用黑球连接",
+    request_context: "黑球连接已就绪，正在准备本轮上下文和工具定义",
+    context_prepare: "正在整理本次模型调用的上下文消息",
+    context_ready: Number.isSafeInteger(detail.messageCount) && detail.messageCount > 0
+      ? `上下文已准备：${detail.messageCount} 条消息；正在提交模型处理` : "本次上下文已准备，正在提交模型处理",
+    sessionBuildWaitStart: "正在等待已启动的会话准备完成",
+    sessionBuildStart: "正在建立黑球会话",
+    sessionBuildEnd: "黑球会话已建立",
+    sessionResumeStart: "正在恢复已有黑球会话",
+    sessionResumeEnd: detail.resumed === false ? "黑球会话恢复失败" : "已有黑球会话已恢复",
+    sessionReused: "已复用当前黑球会话",
+    promptDispatched: "请求已提交黑球，正在准备模型调用",
+    client_prepare: "黑球正在组装模型请求",
+    client_ready: "模型请求客户端已就绪",
+    http_request: "正在向模型接口发送请求",
+    connection_connect_tcp_started: "正在连接模型服务",
+    connection_start_tls_started: "正在与模型服务建立安全连接",
+    http11_send_request_body_complete: "模型请求已发出，正在等待接口响应",
+    http2_send_request_body_complete: "模型请求已发出，正在等待接口响应",
+    http_headers: `模型接口已返回响应（HTTP ${Number(detail.httpStatus) || "未知"}）`,
+    first_byte: "已收到模型接口数据，正在等待正文或工具事件",
+    firstThoughtTextUpdate: "模型正在处理本次请求，尚未返回公开正文或工具调用",
+    answer_stream_started: "正在输出回答"
+  };
+  const message = messages[stage];
+  if (!message) return null;
+  const failed = stage === "sessionResumeEnd" && detail.resumed === false
+    || stage === "http_headers" && Number(detail.httpStatus) >= 400;
+  return {
+    source: "hms",
+    actor: "runtime",
+    provenance: "blackball_runtime",
+    kind: "lifecycle",
+    type: "runtime_status",
+    phase: stage,
+    action: stage,
+    status: failed ? "failed" : "running",
+    message,
+    target: "execution_activity",
+    timestamp: Number(detail.timestamp || detail.at) || Date.now()
+  };
 }
 
 function emitBlackBallModelRequestDispatched(sessionId = "", streamId = "", dispatchedAt = Date.now()) {
   const id = String(streamId || "").trim();
   if (!id) return;
   const timestamp = Number(dispatchedAt || 0) > 0 ? Number(dispatchedAt) : Date.now();
-  emitChatStream(sessionId, id, {
+  return emitChatStream(sessionId, id, {
     type: "phase",
     eventType: "model_request_dispatched",
     progress: {
@@ -17539,7 +18190,7 @@ function emitBlackBallModelRequestDispatched(sessionId = "", streamId = "", disp
       phase: "model-request",
       action: "dispatch",
       status: "running",
-      message: "黑球已连接模型，正在等待首个内容",
+      message: "模型接口请求已开始，正在等待响应",
       target: "execution_activity",
       outputType: "execution_activity",
       presentation: "status",
@@ -17558,6 +18209,10 @@ function emitChatStream(sessionId = "", streamId = "", frame = {}) {
   if (frame.type === "transport_activity") {
     if (!["response_data", "model_data", "tool_event"].includes(frame.kind)) return null;
     const activity = { type: "transport_activity", sessionId: String(sessionId || ""), streamId: id, kind: frame.kind, timestamp: Date.now() };
+    if (Number.isSafeInteger(frame.bytesReceived) && frame.bytesReceived >= 0) {
+      activity.turnId = id;
+      activity.bytesReceived = frame.bytesReceived;
+    }
     mainWindow.webContents?.send("chat:stream", activity);
     return activity;
   }
@@ -17608,6 +18263,10 @@ function emitChatStream(sessionId = "", streamId = "", frame = {}) {
     presentation,
     fontRole
   } : null;
+  const owner = activeRuns.get(sessionId);
+  const replyToUserMessageId = String(frame.replyToUserMessageId || progress?.replyToUserMessageId
+    || (owner && cancelRequestTargetsRun(id, owner) ? owner.replyToUserMessageId : "") || "");
+  if (normalizedProgress) normalizedProgress.replyToUserMessageId = replyToUserMessageId;
   const normalizedFrame = {
     streamId: id,
     sessionId: String(sessionId || ""),
@@ -17620,12 +18279,17 @@ function emitChatStream(sessionId = "", streamId = "", frame = {}) {
     target,
     outputType,
     eventType,
+    replyToUserMessageId,
     ...(semanticType ? { semanticType } : {}),
     presentation,
     fontRole,
     ...(normalizedProgress ? { progress: normalizedProgress } : {})
   };
   mainWindow.webContents?.send("chat:stream", normalizedFrame);
+  if (normalizedProgress?.semanticType === "stage_result") {
+    writeCrossReplyTrace("stage:sent", { sessionId, turnId, eventId, segmentId, turnSequence,
+      contentChars: String(normalizedProgress.message || "").length });
+  }
   if (["done", "error", "cancelled"].includes(String(frame.type || "").toLowerCase())) {
     chatStreamProgressSequences.delete(id);
     chatStreamFrameSequences.delete(id);
@@ -17636,7 +18300,8 @@ function emitChatStream(sessionId = "", streamId = "", frame = {}) {
 
 function safeReasoningDelta(value = "", maxLength = 1200) {
   return publicBrandText(value || "")
-    .replace(/<\/?baiqiu-(?:progress|presentation|outcome|clarification|outline|final)>/gi, "")
+    .replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1|`[^`\n]*`|<\/?baiqiu-(?:progress|presentation|outcome|clarification|outline|final)>/gi,
+      match => match.startsWith("<") ? "" : match)
     .replace(/\bsk-[a-z0-9_-]{8,}\b/gi, "[已隐藏密钥]")
     .replace(/\b(api[_\s-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+/gi, "$1=[已隐藏]")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
@@ -17783,6 +18448,13 @@ async function runE2EMockProductSubmission({ sessionId = "", streamId = "", runI
   }
   const turnId = String(streamId || runId || "e2e-turn");
   const segmentIds = [`${turnId}:answer:1`, `${turnId}:answer:2`];
+  const structuredEvents = [];
+  const answerSegments = [];
+  const activeRun = activeRuns.get(sessionId);
+  if (activeRun) activeRun.capturePartialOutput = () => ({
+    structuredEvents: structuredEvents.map(event => ({ ...event })),
+    answerSegments: answerSegments.map(event => ({ ...event }))
+  });
   const emitPublicReasoning = (sequence, message, segmentId) => emitChatStream(sessionId, turnId, {
     type: "phase",
     phase: "analyze",
@@ -17807,18 +18479,14 @@ async function runE2EMockProductSubmission({ sessionId = "", streamId = "", runI
   });
   emitPublicReasoning(1, "正在核对公开事件与答案边界", segmentIds[0]);
   await e2eMockDelay(1_500, signal);
-  if (/\[e2e:abort\]/i.test(String(payload.message || payload.text || ""))) {
-    await e2eMockDelay(30_000, signal);
-  }
-  const structuredEvents = [];
   const emitStructuredEvent = async (sequence, segmentId) => {
     const event = {
       source: "hms",
       actor: "model",
       provenance: "blackball_public",
       visibility: "public",
-      kind: "public_progress",
-      type: "public_progress",
+      kind: "stage_result",
+      type: "stage_result",
       action: "analyze",
       status: "running",
       turnId,
@@ -17855,6 +18523,11 @@ async function runE2EMockProductSubmission({ sessionId = "", streamId = "", runI
     outputType: "result",
     eventType: "result_delta"
   });
+  answerSegments.push({ turnId, eventId: `${turnId}:answer:1:final`, sequence: 1,
+    segmentId: segmentIds[0], target: "answer", type: "result_segment", text: answerParts[0] + answerParts[1] });
+  if (/\[e2e:abort\]/i.test(String(payload.message || payload.text || ""))) {
+    await e2eMockDelay(30_000, signal);
+  }
   await e2eMockDelay(220, signal);
   emitChatStream(sessionId, turnId, {
     type: "segment",
@@ -17934,6 +18607,7 @@ function extractHmsClarificationEnvelope(text = "") {
       text: visibleText || plainPrompt,
       clarification: {
         cardType: "task_input",
+        interactionMode: "select_and_fill",
         question: plainPrompt,
         required: ["用户确认"],
         options,
@@ -17959,9 +18633,17 @@ function extractHmsClarificationEnvelope(text = "") {
       text: visibleText,
       clarification: {
         cardType: "task_input",
+        interactionMode: String(payload.interactionMode || payload.mode || "select_and_fill").trim() || "select_and_fill",
+        requestId: String(payload.requestId || "").trim(),
+        sessionId: String(payload.sessionId || "").trim(),
+        originalRequest: String(payload.originalRequest || "").trim(),
+        round: Number(payload.round || 1),
+        dimension: String(payload.dimension || "").trim(),
         question,
         required,
         options,
+        input: payload.input && typeof payload.input === "object" ? payload.input : { enabled: true, placeholder: "也可以直接填写你的要求" },
+        reason: String(payload.reason || "").trim(),
         preserveTask: true
       }
     };
@@ -18016,14 +18698,17 @@ function applyHmsResponseEnvelopes(result = {}) {
   const source = String(result?.text || "");
   const trailingProtocol = parseTrailingHmsProtocolObjects(source);
   const protocolSource = trailingProtocol?.text ?? source;
+  const answerDocumentEnvelope = extractAnswerDocumentEnvelope(protocolSource);
+  const answerSource = answerDocumentEnvelope.text;
   let normalized = { ...result };
-  const outlineEnvelope = extractHmsOutlineEnvelope(protocolSource);
+  if (answerDocumentEnvelope.answerDocument) normalized.answerDocument = answerDocumentEnvelope.answerDocument;
+  const outlineEnvelope = extractHmsOutlineEnvelope(answerSource);
   if (outlineEnvelope?.outline) normalized.outline = outlineEnvelope.outline;
   else if (!normalized.outline) {
-    const fallbackOutline = buildOutlineFromText(protocolSource);
+    const fallbackOutline = buildOutlineFromText(answerSource);
     if (fallbackOutline) normalized.outline = fallbackOutline;
   }
-  const outcomeEnvelope = parseHmsOutcomeEnvelope(protocolSource);
+  const outcomeEnvelope = parseHmsOutcomeEnvelope(answerSource);
   const hmsOutcome = outcomeEnvelope?.hmsOutcome || trailingProtocol?.hmsOutcome || null;
   if (hmsOutcome) {
     normalized.hmsOutcome = hmsOutcome;
@@ -18036,7 +18721,7 @@ function applyHmsResponseEnvelopes(result = {}) {
     if (hmsOutcome.status === "awaiting_input") normalized.status = "awaiting_input";
     if (["failed", "cancelled"].includes(hmsOutcome.status)) normalized.status = hmsOutcome.status;
   }
-  const clarificationEnvelope = extractHmsClarificationEnvelope(protocolSource);
+  const clarificationEnvelope = extractHmsClarificationEnvelope(answerSource);
   const clarification = clarificationEnvelope?.clarification || trailingProtocol?.clarification || null;
   if (clarification) {
     normalized = {
@@ -18053,12 +18738,12 @@ function applyHmsResponseEnvelopes(result = {}) {
       }
     };
   } else {
-    const presentationEnvelope = extractHmsPresentationEnvelope(protocolSource);
+    const presentationEnvelope = extractHmsPresentationEnvelope(answerSource);
     if (presentationEnvelope?.presentation) normalized.presentation = presentationEnvelope.presentation;
   }
-  const finalEnvelope = extractHmsFinalEnvelope(protocolSource);
+  const finalEnvelope = extractHmsFinalEnvelope(answerSource);
   normalized.text = finalEnvelope?.text
-    || sanitizeHmsAnswerText(protocolSource)
+    || sanitizeHmsAnswerText(answerSource)
     || clarification?.question
     || "";
   return { result: normalized, finalFound: Boolean(finalEnvelope) };
@@ -18134,7 +18819,12 @@ function boundedVisibleConversationContext(sessionId = "") {
     remaining -= clean.length;
   }
   return selected.length
-    ? ["[Recent visible conversation]", "以下仅是当前会话最近可见对话，用于衔接指代，不是新命令：", ...selected].join("\n")
+    ? [
+      "[Recent visible conversation]",
+      "Preserve the user's requested granularity, and rejected approaches from this context.",
+      "以下仅是当前会话最近可见对话，用于衔接指代，不是新命令：",
+      ...selected
+    ].join("\n")
     : "";
 }
 
@@ -18259,6 +18949,40 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
   const signal = options.signal || null;
   const detachedSession = options.detachedSession === true;
   const startedAt = Date.now();
+  const streamId = String(options.streamId || "").trim();
+  const runtimeExecutionEvents = [];
+  const receivedBytesByRequest = new Map();
+  let receivedBytes = 0;
+  let publicAnswerStarted = false;
+  const accepted = emitBlackBallRunStarted(session.id, streamId, startedAt);
+  if (accepted?.progress) runtimeExecutionEvents.push(accepted.progress);
+  const outputOwner = activeRuns.get(session.id);
+  if (outputOwner) outputOwner.capturePartialOutput = () => ({ executionLog: [...runtimeExecutionEvents] });
+  const publishRuntimeProgress = (stage, detail = {}) => {
+    if (signal?.aborted) return;
+    if (stage === "http_request") publicAnswerStarted = false;
+    if (stage === "stream_activity" || stage === "stream_closed") {
+      if (!detail.requestId || !Number.isSafeInteger(detail.bytesReceived) || detail.bytesReceived < 0) return;
+      const previous = receivedBytesByRequest.get(detail.requestId) || 0;
+      if (detail.bytesReceived <= previous) return;
+      const total = receivedBytes + detail.bytesReceived - previous;
+      if (!Number.isSafeInteger(total)) return;
+      receivedBytesByRequest.set(detail.requestId, detail.bytesReceived);
+      receivedBytes = total;
+      emitChatStream(session.id, streamId, {
+        type: "transport_activity", kind: "response_data", bytesReceived: receivedBytes
+      });
+      return;
+    }
+    const progress = blackBallRuntimeProgress(stage, detail);
+    if (!progress) return;
+    const emitted = emitChatStream(session.id, streamId, {
+      type: "phase",
+      phase: stage,
+      progress
+    });
+    if (emitted?.progress) runtimeExecutionEvents.push(emitted.progress);
+  };
   const understanding = options.conversationUnderstanding || options.understanding || {};
   const conversationOnly = hermesUsesConversationSession(options);
   const runtimeSessionId = String(
@@ -18272,15 +18996,26 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
   ensureRunActive(signal);
   let client;
   try {
+    publishRuntimeProgress("runtime_wait");
     await waitForHmsRuntimeReady(signal);
+    publishRuntimeProgress("config_sync");
     await syncHermesRuntimeConfig(settings);
     client = conversationOnly ? ensureHermesForegroundClient() : ensureHermesClient();
+    if (outputOwner) outputOwner.queryRuntimeStatus = () => client.queryRunStatus(runtimeSessionId, streamId);
+    if (outputOwner) outputOwner.sendSupplement = input => client.supplement(runtimeSessionId, streamId, input);
+    publishRuntimeProgress("client_start");
     await client.start();
+    publishRuntimeProgress("request_context");
     timing("clientLaneSelected", { lane: conversationOnly ? "foreground-chat" : "execution" });
   } catch (error) {
-    if (error?.code === "HERMES_RUNTIME_REQUIRED") throw error;
-    if (isHermesUnavailableError(error)) throw hermesRuntimeRequiredError("runtime_initialization_failed", error);
-    throw error;
+    const failure = error?.code !== "HERMES_RUNTIME_REQUIRED" && isHermesUnavailableError(error)
+      ? hermesRuntimeRequiredError("runtime_initialization_failed", error)
+      : error;
+    failure.hermesResult = {
+      ...(failure.hermesResult || {}),
+      executionLog: runtimeExecutionEvents.map((event) => ({ ...event, target: "execution" }))
+    };
+    throw failure;
   }
   const workspace = hermesWorkspaceForSession(session, settings);
   const taskScratchRoot = path.join(workspace, ".baiqiu-tmp");
@@ -18302,6 +19037,7 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
     : "";
   const browserAutomation = !options.rawPrompt && requestsBrowserAutomation(text);
   const nativeWhiteBallExecutions = [];
+  const successfulEnvelopes = [];
   const whiteBallMcpServer = nativeWhiteBallTools ? {
     name: "Baiqiu White Ball Tools",
     signature: JSON.stringify(hmsToolCatalog),
@@ -18326,6 +19062,7 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
         taskId: options.taskId,
         sessionId: session.id
       });
+      successfulEnvelopes.push(envelope);
       const result = envelope.results[0] || {
         toolId: name,
         success: false,
@@ -18373,6 +19110,8 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
       `Windows desktop directory: ${desktopOutputRoot()}`,
       "Use the task scratch directory for every helper script, cache, parsed fragment, temporary JSON/CSV, log, downloaded working copy, and other intermediate artifact.",
       "The desktop may be read when the user supplies a desktop file. Do not create intermediate files on the desktop.",
+      `For Windows Word-to-PDF validation, use powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${path.join(__dirname, "services", "word-pdf-check.ps1")}" -SourcePath <docx> -OutputPath <new scratch PDF>. This helper bounds the check to 45 seconds and cleans up only its own identified Word process; do not use unbounded Word COM scripts or kill all WINWORD processes.`,
+      "Successful PDF conversion is not visual layout verification; inspect the PDF before claiming layout has been verified. Deliver an already-generated DOCX even if optional PDF layout validation fails. Report file generation and layout validation separately, including the actual failed stage. Do not repeat the same blocked validation on a continuation without a changed approach.",
       allowDesktopDelivery
         ? "The user explicitly requested a desktop delivery. Only the named final deliverable may be written there; all helper files still belong in the task scratch directory."
         : "The user did not explicitly request desktop delivery. Write final deliverables to the configured final-output directory, never to the desktop."
@@ -18400,7 +19139,6 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
     taskId: options.taskId || "",
     ...reasoningTransport
   });
-  const streamId = String(options.streamId || "").trim();
   const hmsExecutionUpdates = [];
   const firstOutputTimings = new Set();
   const emittedExecutionEvents = [];
@@ -18424,13 +19162,22 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
   let streamedSegmentedAnswer = false;
   const streamedAnswerSegments = new Map();
   const streamedAnswerTurnSequences = new Map();
+  const streamedAnswerOwners = new Map();
+  const observedNativeTools = new Map();
+  let reportedTokenUsage = null;
   const partialOutput = (raw = {}) => ({
     ...raw,
+    toolCalls: raw.toolCalls || [...observedNativeTools.values()],
+    tokenUsage: reportedTokenUsage,
     text: streamedPublicText,
-    executionLog: emittedExecutionEvents.map((event) => ({ ...event, target: "execution" })),
+    executionLog: [...runtimeExecutionEvents, ...emittedExecutionEvents,
+      ...buildExecutionLog(hmsExecutionUpdates, { runId: streamId, eventIdRoot: streamId })]
+      .sort((left, right) => left.turnSequence - right.turnSequence)
+      .map((event) => ({ ...event, target: "execution" })),
     structuredEvents: [...hmsStructuredEvents],
     answerSegments: [...streamedAnswerSegments].map(([segmentId, text], index) => ({
       segmentId, text, turnId: streamId,
+      replyToUserMessageId: streamedAnswerOwners.get(segmentId) || "",
       eventId: `${streamId || "turn"}:answer:segment:${index + 1}`,
       sequence: index + 1, type: "answer_segment",
       turnSequence: streamedAnswerTurnSequences.get(segmentId) || 0,
@@ -18438,15 +19185,21 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
     }))
   });
   let pendingPlainProtocolText = "";
+  if (outputOwner) outputOwner.capturePartialOutput = partialOutput;
   let pendingPlainLine = "";
   const appendStreamedAnswerSegment = (segmentId = "", delta = "", turnSequence = 0) => {
     const text = String(delta || "");
     if (!text) return;
+    if (text.trim() && !publicAnswerStarted) {
+      publicAnswerStarted = true;
+      publishRuntimeProgress("answer_stream_started");
+    }
     if (text.trim() && Number(turnSequence) > 0) {
       markFirstOutput("firstAnswerEmitted", { turnSequence });
     }
     const key = String(segmentId || `${streamId || "turn"}:answer:default`).trim();
     streamedAnswerSegments.set(key, `${streamedAnswerSegments.get(key) || ""}${text}`);
+    if (!streamedAnswerOwners.has(key)) streamedAnswerOwners.set(key, outputOwner?.replyToUserMessageId || "");
     if (!streamedAnswerTurnSequences.has(key) && Number(turnSequence) > 0) {
       streamedAnswerTurnSequences.set(key, Number(turnSequence));
     }
@@ -18487,7 +19240,8 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
       // live stream; the renderer decides how to display them and never
       // persists them as an execution log.
       const suppliedSequence = Number(event?.sequence || 0);
-      const sequence = suppliedSequence > 0 ? suppliedSequence : liveProgressSequence + 1;
+      const sequence = suppliedSequence > 0 ? suppliedSequence : Math.max(liveProgressSequence,
+        Number(chatStreamProgressSequences.get(streamId)?.get(publicProgressTarget(event)) || 0)) + 1;
       liveProgressSequence = Math.max(liveProgressSequence, sequence);
       const timestamp = Number(event?.timestamp || 0) || Date.now();
       const target = publicProgressTarget(event);
@@ -18518,6 +19272,10 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
           ? { afterEventId: latestExecutionEvidence.eventId }
           : {})
       };
+      if ((progress.semanticType || progress.type) === "stage_result") {
+        writeCrossReplyTrace("stage:parsed", { sessionId: session.id, turnId: streamId,
+          eventId: progress.eventId, segmentId: progress.segmentId, contentChars: String(progress.message || "").length });
+      }
       const reasoningEvent = ["reasoning_delta", "reasoning_note", "public_reasoning", "thought"]
         .includes(String(progress.kind || progress.type || "").trim().toLowerCase());
       const emitted = emitChatStream(session.id, streamId, {
@@ -18561,13 +19319,39 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
       hmsExecutionUpdates.push({ sessionUpdate: "prompt_boundary", receivedAt: Date.now() });
     }
     const hmsProgressMapper = new HmsProgressMapper({ segmentPrefix });
-    const visibleStream = new HmsUpdateStreamDemux({
+    let visibleStream = new HmsUpdateStreamDemux({
       // Protocol envelopes enrich the stream; they are not a permission
       // boundary. Plain model message chunks must reach the answer surface.
       requireFinalEnvelope: false,
       segmentPrefix
     });
     let streamProtocolError = false;
+    let streamProgressProtocolError = false;
+    const appliedSupplements = new Set();
+    let plainSegmentId = `${segmentPrefix}plain`;
+    const flushVisibleStream = (interrupted = false) => {
+      const openSegments = [visibleStream.messageStream.currentSegmentId,
+        visibleStream.thoughtStream.currentSegmentId, plainSegmentId];
+      const tail = visibleStream.flush();
+      if (!interrupted && tail.protocolError) streamProtocolError = true;
+      if (tail.progressProtocolError) streamProgressProtocolError = true;
+      emitHmsProgress(tail.progressEvents || []);
+      if (options.internalStructuredResponse || promptOptions.silent) return;
+      const plain = routePlainVisibleDelta(tail.visibleDelta, true);
+      for (const answer of [...(tail.answerDeltas || []), { segmentId: plainSegmentId, delta: plain }]) {
+        const delta = String(answer?.delta || "");
+        if (!delta) continue;
+        streamedSegmentedAnswer = true;
+        streamedPublicText += delta;
+        const emitted = emitChatStream(session.id, streamId, { type: "delta", delta, segmentId: answer.segmentId });
+        appendStreamedAnswerSegment(answer.segmentId, delta, emitted?.turnSequence);
+      }
+      for (const segmentId of new Set([...(tail.completedSegments || []), ...(interrupted ? openSegments : [])])) {
+        if (segmentId && streamedAnswerSegments.has(segmentId)) {
+          emitChatStream(session.id, streamId, { type: "segment", segmentId, status: interrupted ? "interrupted" : "completed" });
+        }
+      }
+    };
     const promptController = new AbortController();
     const relayAbort = () => promptController.abort();
     if (signal?.aborted) promptController.abort();
@@ -18575,6 +19359,7 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
     let promptResult;
     try {
       promptResult = await client.prompt(runtimeSessionId, requestText, {
+      turnId: streamId,
       cwd: workspace,
       mcpServer: whiteBallMcpServer,
       deliveryRoots: [workspace, configuredSaveRoot(), ...(allowDesktopDelivery ? [desktopOutputRoot()] : [])],
@@ -18597,11 +19382,100 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
       maxToolCallsWithoutAnswer: HMS_EXECUTION_MAX_TOOL_CALLS_WITHOUT_ANSWER,
       maxRepeatedToolCalls: HMS_EXECUTION_MAX_REPEATED_TOOL_CALLS,
       onDiagnostic: (diagnostic) => {
+        if (diagnostic.type === "supplement") {
+          if (diagnostic.turnId !== streamId) return;
+          try { recordSupplementReceipt(session.id, streamId, diagnostic.supplementId, diagnostic,
+            { immediate: ["addressed", "needs_clarification", "failed", "cancelled", "pending"].includes(diagnostic.stage) }); }
+          catch { writeCrossReplyTrace("supplement:receiptPersistenceFailed", { sessionId: session.id, turnId: streamId, supplementId: diagnostic.supplementId }); }
+          if (diagnostic.stage === "applied" && !appliedSupplements.has(diagnostic.supplementId)) {
+            appliedSupplements.add(diagnostic.supplementId);
+            flushVisibleStream(true);
+            if (outputOwner) outputOwner.replyToUserMessageId = diagnostic.supplementId;
+            emitChatStream(session.id, streamId, { type: "supplement_boundary", supplementId: diagnostic.supplementId,
+              userMessage: loadDb().messages?.[session.id]?.find(message => message.id === diagnostic.supplementId) });
+            const boundary = { sessionUpdate: "prompt_boundary", receivedAt: diagnostic.timestamp };
+            hmsExecutionUpdates.push(boundary);
+            hmsProgressMapper.consume(boundary);
+            const nextPrefix = `${segmentPrefix}s${appliedSupplements.size}:`;
+            visibleStream = new HmsUpdateStreamDemux({ requireFinalEnvelope: false, segmentPrefix: nextPrefix });
+            plainSegmentId = `${nextPrefix}plain`;
+            streamProtocolError = false;
+          }
+          const labels = { accepted: "黑球已接收补充，将在安全节点接入当前任务",
+            applied: "补充已加入下一次模型请求，继续原任务",
+            addressed: "黑球已回应补充", needs_clarification: "黑球需要补充说明，已保留当前结果",
+            failed: "补充尚未完成，已保留当前结果",
+            pending: "补充尚未确认接入，已保留内容", cancelled: "任务已停止，未处理的补充已保留" };
+          emitHmsProgress([{ ...diagnostic, sequence: 0, supplementSequence: diagnostic.sequence,
+            source: "hms", actor: "黑球", provenance: "blackball_runtime", kind: "lifecycle",
+            type: "runtime_status", target: "execution_activity", action: "supplement",
+            status: "running", message: labels[diagnostic.stage] }]);
+          return;
+        }
+        if (diagnostic.type === "stage_delivery") {
+          if (diagnostic.turnId && diagnostic.turnId !== streamId) return;
+          writeCrossReplyTrace(`stage:producer:${diagnostic.stage}`, { ...diagnostic,
+            sessionId: session.id, turnId: streamId,
+            segmentId: diagnostic.segmentId ? visibleStream.messageStream.normalizeSegmentId(diagnostic.segmentId) : "" });
+          return;
+        }
+        if (diagnostic.type === "session_waiting") {
+          emitHmsProgress([{ ...diagnostic, sequence: 0, source: "hms", actor: "黑球",
+            provenance: "blackball_runtime", kind: "lifecycle", target: "execution_activity",
+            status: "running", message: diagnostic.phase === "waiting"
+              ? "等待上一任务结束，随后继续当前请求" : "上一任务已结束，开始处理当前请求" }]);
+          return;
+        }
+        if (diagnostic.type === "protocol_recovery") {
+          if (diagnostic.phase === "warning") {
+            streamProgressProtocolError = true;
+            writeCrossReplyTrace("output:progressProtocolWarning", { sessionId: session.id, turnId: streamId, ...diagnostic });
+            return;
+          }
+          if (diagnostic.phase === "retrying" || diagnostic.phase === "failed") {
+            const partial = visibleStream.flush();
+            if (partial.progressProtocolError) streamProgressProtocolError = true;
+            emitHmsProgress(partial.progressEvents || []);
+            streamProtocolError = partial.protocolError || diagnostic.phase === "failed";
+            if (diagnostic.phase === "retrying") {
+              visibleStream = new HmsUpdateStreamDemux({ requireFinalEnvelope: false,
+                segmentPrefix: `${segmentPrefix}r${diagnostic.attempt}:` });
+              streamProtocolError = false;
+            }
+          }
+          const label = diagnostic.phase === "retrying"
+            ? `模型返回格式异常，正在恢复任务（${diagnostic.attempt}/2）`
+            : diagnostic.phase === "recovered" ? "已收到有效响应，继续当前任务" : "模型返回格式异常，任务未完成，已保留当前结果";
+          emitHmsProgress([{ ...diagnostic, sequence: 0, recoverySequence: diagnostic.sequence,
+            source: "hms", actor: "黑球", provenance: "blackball_runtime",
+            kind: "lifecycle", type: "protocol_recovery", target: "execution_activity", action: "protocol_recovery",
+            status: diagnostic.phase === "failed" ? "failed" : "running", message: label }]);
+          writeCrossReplyTrace("output:protocolRecovery", { sessionId: session.id, turnId: streamId, ...diagnostic });
+          return;
+        }
+        if (diagnostic.type === "provider_usage") {
+          const nextUsage = recordUsage(reportedTokenUsage, diagnostic);
+          if (nextUsage && nextUsage !== reportedTokenUsage) {
+            reportedTokenUsage = nextUsage;
+            if (outputOwner) outputOwner.tokenUsage = nextUsage;
+            emitChatStream(session.id, streamId, { type: "usage", target: "usage", tokenUsage: nextUsage });
+          }
+          return;
+        }
+        if (diagnostic.type === "provider_timing") {
+          publishRuntimeProgress(diagnostic.stage, diagnostic);
+          if (diagnostic.stage === "http_request" && !modelRequestDispatched) {
+            modelRequestDispatched = true;
+            const dispatched = emitBlackBallModelRequestDispatched(session.id, streamId, diagnostic.timestamp);
+            if (dispatched?.progress) runtimeExecutionEvents.push(dispatched.progress);
+          }
+        }
         writeCrossReplyTrace(diagnostic.type === "provider_timing" ? "output:providerTiming" : "output:providerError", {
           sessionId: session.id, turnId: streamId, observedAt: Date.now(), ...diagnostic
         });
       },
         onTiming: (stage, detail) => {
+          publishRuntimeProgress(stage, detail);
           timing(stage, { ...detail, lane: conversationOnly ? "foreground-chat" : "execution" });
           if (["promptDispatched", "firstUpdate", "firstMessageTextUpdate", "firstThoughtTextUpdate",
             "firstToolGenerationUpdate", "firstToolExecutionUpdate"].includes(stage)) {
@@ -18609,10 +19483,6 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
               sessionId: session.id, turnId: streamId, observedAt: detail.at,
               elapsedMs: detail.elapsedMs, eventId: detail.eventId, producerAt: detail.producerAt
             });
-          }
-          if (stage === "promptDispatched" && !modelRequestDispatched) {
-            modelRequestDispatched = true;
-            emitBlackBallModelRequestDispatched(session.id, streamId, detail?.at);
           }
         },
       onUpdate: (update) => {
@@ -18628,6 +19498,7 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
         const mappedProgress = hmsProgressMapper.consume(receivedUpdate, separated);
         if (isMessageUpdate) {
           if (separated.protocolError) streamProtocolError = true;
+          if (separated.progressProtocolError) streamProgressProtocolError = true;
           const emittedProgress = emitHmsProgress(mappedProgress);
           const executionFrame = emittedProgress.find((item) => item.target === "execution_activity");
           if (executionFrame) receivedUpdate.turnSequence = executionFrame.turnSequence;
@@ -18665,8 +19536,8 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
             if (visibleDelta) {
               streamedSegmentedAnswer = true;
               streamedPublicText += visibleDelta;
-              const emitted = emitChatStream(session.id, streamId, { type: "delta", delta: visibleDelta });
-              appendStreamedAnswerSegment("", visibleDelta, emitted?.turnSequence);
+              const emitted = emitChatStream(session.id, streamId, { type: "delta", delta: visibleDelta, segmentId: plainSegmentId });
+              appendStreamedAnswerSegment(plainSegmentId, visibleDelta, emitted?.turnSequence);
             }
           }
         } else {
@@ -18675,6 +19546,9 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
           if (executionFrame) receivedUpdate.turnSequence = executionFrame.turnSequence;
         }
         if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+          if (update.toolCallId) observedNativeTools.set(update.toolCallId, {
+            ...observedNativeTools.get(update.toolCallId), ...update
+          });
           mainWindow?.webContents.send("gateway:event", {
             type: "hermes_tool_update",
             sessionId: session.id,
@@ -18690,55 +19564,33 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
     } finally {
       signal?.removeEventListener?.("abort", relayAbort);
     }
-    const tail = visibleStream.flush();
-    if (tail.protocolError) streamProtocolError = true;
-    if (!options.internalStructuredResponse && !promptOptions.silent) {
-      for (const answer of tail.answerDeltas || []) {
-        const delta = String(answer?.delta || "");
-        if (!delta) continue;
-        streamedSegmentedAnswer = true;
-        streamedPublicText += delta;
-        const emitted = emitChatStream(session.id, streamId, {
-          type: "delta",
-          delta,
-          segmentId: String(answer.segmentId || "")
-        });
-        appendStreamedAnswerSegment(answer.segmentId, delta, emitted?.turnSequence);
-      }
-      for (const segmentId of tail.completedSegments || []) {
-        emitChatStream(session.id, streamId, {
-          type: "segment",
-          segmentId: String(segmentId || ""),
-          status: "completed"
-        });
-      }
-    }
-    if (!options.internalStructuredResponse && !promptOptions.silent) {
-      const visibleDelta = routePlainVisibleDelta(tail.visibleDelta, true);
-      if (visibleDelta) {
-        streamedSegmentedAnswer = true;
-        streamedPublicText += visibleDelta;
-        const emitted = emitChatStream(session.id, streamId, { type: "delta", delta: visibleDelta });
-        appendStreamedAnswerSegment("", visibleDelta, emitted?.turnSequence);
-      }
-    }
+    flushVisibleStream();
     emitHmsProgress(hmsProgressMapper.flush());
     const sanitizedPromptText = stripHmsProgressEnvelopes(promptResult?.text || "");
-    const safePromptText = streamProtocolError
+    const safePromptText = streamProtocolError || streamProgressProtocolError || promptResult?.protocolRecovered || appliedSupplements.size > 0
       ? String(streamedPublicText || "")
       : String(sanitizedPromptText || streamedPublicText || "");
-    return {
-      ...promptResult,
-      text: safePromptText,
-      ...(streamProtocolError ? { protocolError: true,
-        ...(!String(streamedPublicText || "").trim() ? { status: "failed", error: "黑球没有返回可交付的回答。" } : {}) } : {})
-    };
+    const finalized = finalizePublicProtocol({ ...promptResult, runId: streamId,
+      structuredEvents: [...hmsStructuredEvents]
+    }, {
+      protocolError: streamProtocolError, progressProtocolError: streamProgressProtocolError
+    }, safePromptText);
+    if (streamProgressProtocolError) writeCrossReplyTrace("output:progressProtocolWarning", {
+      sessionId: session.id, turnId: streamId, status: finalized.status,
+      reason: "invalid_bounded_progress", answerPreserved: Boolean(safePromptText.trim())
+    });
+    return finalized;
   };
   let result;
   try {
     result = await promptHermes(prompt);
   } catch (error) {
     error.hermesResult = partialOutput(error.hermesResult || {});
+    if (signal?.aborted || error?.code === "HERMES_PROMPT_TIMEOUT") {
+      if (detachedSession) await client.deleteSession(runtimeSessionId).catch(() => false);
+      else await invalidateHermesRuntimeSession(session.id, { conversationOnly });
+    }
+    if (error?.code === "HERMES_RUN_STATUS_UNKNOWN") throw error;
     if (isHermesUnavailableError(error)) throw hermesRuntimeRequiredError("runtime_initialization_failed", error);
     emitChatStream(session.id, streamId, {
       type: "error",
@@ -18773,7 +19625,6 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
     throw error;
   }
   const localBaiqiuToolCalls = [];
-  const successfulEnvelopes = [];
   if (!options.internalStructuredResponse && result.status === "done") {
     let missingTerminalRecoveryCount = 0;
     let round = 0;
@@ -18788,25 +19639,28 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
           || parseTrailingHmsProtocolObjects(result.text || "")?.hmsOutcome
           || parseTrailingHmsProtocolObjects(result.text || "")?.clarification
           || extractHmsClarificationEnvelope(result.text || "")
-          || extracted.text.trim()
         );
         const completedToolCalls = localBaiqiuToolCalls.length + nativeWhiteBallExecutions.length;
-        if (completedToolCalls && !terminalFound && missingTerminalRecoveryCount < 1) {
+        const hasToolEvidenceWithoutTerminal = completedToolCalls > 0 && !terminalFound;
+        if (hasToolEvidenceWithoutTerminal && missingTerminalRecoveryCount < 2) {
           missingTerminalRecoveryCount += 1;
           hadInternalContinuationRound = true;
           result = await promptHermes([
             "[Black Ball terminal protocol recovery]",
             "上一轮已经收到真实工具证据，但没有给出任务终态。",
-            "请只基于本会话已经返回的真实工具证据补全本轮：先发送一个 baiqiu-progress，随后用普通中文正文给出事实性的最终答复。不要使用 baiqiu-answer、baiqiu-final、baiqiu-outcome、XML、DSML 或 JSON 包裹正文。目标尚未完成时可继续调用原生工具；不得只回复计划、状态或‘操作已完成’。"
+            "请只基于本会话已经返回的真实工具证据，用普通中文给出最终答复。不要发送任何 baiqiu-progress、baiqiu-answer、baiqiu-final、baiqiu-outcome、XML、DSML 或 JSON 协议标签，也不要重复调用已经完成的工具；不得只回复计划、状态或‘操作已完成’。"
           ].join("\n\n"), { answerEnvelopeOnly: true });
           if (result.status !== "done") break;
           continue;
         }
-        const finalText = extracted.text || result.text || successfulToolCompletionText(successfulEnvelopes.at(-1)) || "";
+        const fallbackToolText = successfulToolCompletionText(successfulEnvelopes.at(-1));
+        const finalText = result.protocolError && completedToolCalls
+          ? (fallbackToolText || extracted.text || result.text || "")
+          : (extracted.text || result.text || fallbackToolText || "");
         result = {
           ...result,
           text: finalText,
-          ...(!terminalFound && localBaiqiuToolCalls.length ? {
+          ...(!terminalFound && completedToolCalls ? {
             status: "partial",
             executionOutcome: "unknown",
             deliveryStatus: "degraded",
@@ -18906,18 +19760,11 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
   if (!options.internalStructuredResponse) {
     let publicOutput = applyHmsResponseEnvelopes(result);
     result = publicOutput.result;
-    if (result.protocolError && !String(streamedPublicText || "").trim() && !publicOutput.finalFound) {
+    if (result.protocolError) {
       publicFinalMissing = true;
-      result = {
-        ...result,
-        status: "failed",
-        success: false,
-        executionOutcome: "failed",
-        error: "黑球返回的回答协议不完整，本次请求未正常完成。",
-        deliveryStatus: "degraded",
-        presentationStatus: "failed",
-        stopReason: "invalid_public_protocol"
-      };
+      result = failIncompleteProtocol({ ...result, structuredEvents: hmsStructuredEvents }, streamedPublicText);
+      publicFinalFound = result.protocolWarning === true;
+      publicFinalMissing = !publicFinalFound;
     } else if (publicOutput.finalFound) {
       const parsedFinalText = String(publicOutput.result?.text || "").trim();
       const streamedAnswerText = String(streamedPublicText || "").trim();
@@ -18935,6 +19782,12 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
       publicFinalFound = true;
       result.deliveryStatus = "completed";
       result.presentationStatus = "completed";
+    } else if (hasCommittedRuntimeDelivery({ ...result, structuredEvents: hmsStructuredEvents })) {
+      publicFinalFound = true;
+      result = { ...result, text: streamedPublicText,
+        deliveryStatus: result.deliveryStatus === "degraded" ? "degraded" : "completed",
+        presentationStatus: result.deliveryStatus === "degraded" ? "recovered" : "completed",
+        stopReason: "committed_runtime_delivery", completedDelivery: true };
     } else if (result.recoveredFromToolEvidence) {
       result = { ...result, text: String(result.text || successfulToolCompletionText(successfulEnvelopes.at(-1)) || "任务结果已返回。").trim() };
     } else {
@@ -18974,8 +19827,8 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
           : (!streamedText.trim() ? finalText : "");
         if (appendDelta) {
           streamedPublicText += appendDelta;
-          const emitted = emitChatStream(session.id, streamId, { type: "delta", delta: appendDelta });
-          appendStreamedAnswerSegment("", appendDelta, emitted?.turnSequence);
+          const emitted = emitChatStream(session.id, streamId, { type: "delta", segmentId: plainSegmentId, delta: appendDelta });
+          appendStreamedAnswerSegment(plainSegmentId, appendDelta, emitted?.turnSequence);
         }
       }
     }
@@ -18991,23 +19844,30 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
       eventId: `${streamId || "turn"}:answer:segment:${index + 1}`,
       sequence: index + 1,
       turnSequence: Number(streamedAnswerTurnSequences.get(segmentId) || 0),
+      replyToUserMessageId: streamedAnswerOwners.get(segmentId) || "",
       segmentId,
       target: "answer",
       type: "answer_segment",
-      text: stripBareToolActionLines(segmentText)
+      text: sanitizeHmsAnswerText(stripBareToolActionLines(segmentText)),
+      ...(result.answerDocument ? { answerDocument: result.answerDocument } : {})
     }))
     .filter((item) => item.text.trim());
   if (!answerSegments.length && durableAnswerText) {
-    const fallbackSegmentId = String(hmsStructuredEvents.at(-1)?.segmentId || `${streamId || "turn"}:answer:final`);
+    const replyToUserMessageId = outputOwner?.replyToUserMessageId || "";
+    const lastStructuredEvent = hmsStructuredEvents.at(-1);
+    const fallbackSegmentId = String((lastStructuredEvent?.replyToUserMessageId || "") === replyToUserMessageId
+      ? lastStructuredEvent?.segmentId || plainSegmentId : plainSegmentId);
     answerSegments.push({
       turnId: String(streamId || ""),
       eventId: `${streamId || "turn"}:answer:final`,
+      replyToUserMessageId,
       sequence: 1,
       turnSequence: Number(chatStreamFrameSequences.get(streamId) || 0),
       segmentId: fallbackSegmentId,
       target: "answer",
       type: "answer_segment",
-      text: durableAnswerText
+      text: durableAnswerText,
+      ...(result.answerDocument ? { answerDocument: result.answerDocument } : {})
     });
   } else if (answerSegments.length) {
     const streamedAnswerText = answerSegments.map((item) => item.text).join("");
@@ -19088,7 +19948,7 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
       stopReason: "missing_delegation_evidence"
     };
   }
-  if (!detachedSession) {
+  if (!detachedSession && result.status !== "cancelled" && !signal?.aborted) {
     updateSession(session.id, conversationOnly ? {
       conversationHermesSessionId: result.hermesSessionId,
       lastConversationRunId: result.hermesSessionId,
@@ -19101,22 +19961,6 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
   }
   const executionRunId = String(options.runId || streamId || result.hermesSessionId || "");
   const executionLog = [];
-  if (!options.internalStructuredResponse && streamId) {
-    executionLog.push({
-      source: "hms",
-      actor: "黑球",
-      provenance: "blackball_runtime",
-      kind: "lifecycle",
-      action: "connect",
-      status: "completed",
-      message: "黑球已接收请求",
-      timestamp: startedAt,
-      runId: executionRunId,
-      eventId: executionRunId ? `${executionRunId}:execution:0` : "execution:0",
-      sequence: 0,
-      turnSequence: 1
-    });
-  }
   executionLog.push(...buildExecutionLog(hmsExecutionUpdates, {
     runId: executionRunId,
     eventIdRoot: streamId || executionRunId
@@ -19162,15 +20006,18 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
   }
   result = {
     ...result,
-    executionLog: executionLog.map((event, index) => ({
+    executionLog: [...runtimeExecutionEvents, ...executionLog]
+      .sort((left, right) => Number(left.turnSequence || 0) - Number(right.turnSequence || 0))
+      .map((event, index) => ({
       ...event,
       turnId: String(event.turnId || executionRunId || streamId || ""),
       eventId: String(event.eventId || `${executionRunId || streamId || "turn"}:execution:${index + 1}`),
-      sequence: index + 1,
+      sequence: Number(event.sequence) > 0 ? Number(event.sequence) : index + 1,
       turnSequence: Number(event.turnSequence || 0),
       target: "execution",
       type: String(event.type || event.kind || "execution")
     })),
+    tokenUsage: reportedTokenUsage,
     structuredEvents: hmsStructuredEvents,
     answerSegments,
     reasoningTransport
@@ -19178,8 +20025,10 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
   if (!options.internalStructuredResponse) {
     result = { ...result, text: sanitizeHmsAnswerText(result.text) };
   }
+  result = enforceRuntimeOutcome(result);
   if (result.status === "cancelled") {
     if (detachedSession) await client.deleteSession(runtimeSessionId).catch(() => false);
+    else await invalidateHermesRuntimeSession(session.id, { conversationOnly });
     emitChatStream(session.id, streamId, { type: "cancelled" });
     const error = new Error("黑球任务已取消。");
     error.name = "AbortError";
@@ -19192,8 +20041,8 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
     throw error;
   }
   if (result.status === "failed") {
-    const error = new Error(result.text || `黑球未返回结果（${result.stopReason || "未知原因"}）。`);
-    error.code = "HERMES_PROMPT_FAILED";
+    const error = new Error((result.protocolError && result.error) || result.text || `黑球未返回结果（${result.stopReason || "未知原因"}）。`);
+    error.code = result.protocolError ? "INVALID_PUBLIC_PROTOCOL" : "HERMES_PROMPT_FAILED";
     error.hermesResult = result;
     const deferRecoverableSignal = options.deferRecoverableProtocolFailure === true
       && options.selfHealingRecoveryAttempt !== true
@@ -19204,8 +20053,7 @@ async function runHermesSessionPrompt(session, text, attachments, settings, opti
       message: userFacingError(error, { domain: "task", developerMode: false })
     });
     if (detachedSession) await client.deleteSession(runtimeSessionId).catch(() => false);
-    else if (conversationOnly) await invalidateHermesRuntimeSession(session.id, { conversationOnly: true });
-    else await invalidateHermesRuntimeSession(session.id, { conversationOnly });
+    else if (!result.protocolError) await invalidateHermesRuntimeSession(session.id, { conversationOnly });
     throw error;
   }
   emitChatStream(session.id, streamId, { type: "done", durationMs: Date.now() - startedAt });
@@ -19566,16 +20414,37 @@ function wireIpc() {
     emitBlackBallRunStarted(sessionId, payload.streamId || requestRunId, productStartedAt);
     const taskContext = payload.context && typeof payload.context === "object" ? payload.context : {};
     const conversationOnlyRequest = taskContext.conversationOnly === true || payload.templateId === "desktop.chat";
-    const message = String(payload.message || payload.text || "").trim();
+    let message = String(payload.message || payload.text || "").trim();
+    const incomingAttachments = Array.isArray(payload.attachments) ? payload.attachments : [];
     const modelReadiness = selectedModelReadiness(loadDb().settings);
     if (!modelReadiness.configured && !isE2ETest) {
       return modelConfigurationRequiredResult({ sessionId, runId: requestRunId });
     }
-    const isTaskControlAction = Boolean(taskContext.taskAction || taskContext.recoveryAction || isContinuationRequest(message));
+    const clarificationResponse = taskContext.clarificationResponse && typeof taskContext.clarificationResponse === "object"
+      ? taskContext.clarificationResponse
+      : null;
+    const storedGuidance = submissionDb.sessions.find((item) => item.id === sessionId)?.blackBallGuidance;
+    if (clarificationResponse && storedGuidance) {
+      const continuation = continuationForGuidance(storedGuidance, clarificationResponse);
+      message = continuation.text;
+      payload = {
+        ...payload,
+        taskId: String(storedGuidance.taskId || payload.taskId || "").trim(),
+        message: continuation.text,
+        text: continuation.text,
+        attachments: incomingAttachments.length ? incomingAttachments : continuation.attachments,
+        context: {
+          ...taskContext,
+          guidanceContinuation: true,
+          canonicalTask: Boolean(storedGuidance.taskId)
+        }
+      };
+      updateSession(sessionId, { blackBallGuidance: null });
+    }
+    const isTaskControlAction = Boolean(taskContext.taskAction || taskContext.recoveryAction || clarificationResponse || isContinuationRequest(message));
     const brain = ensureTaskBrain();
     let canonicalTaskId = String(payload.taskId || "").trim();
-    const incomingAttachments = Array.isArray(payload.attachments) ? payload.attachments : [];
-    const awaitingInputTask = !canonicalTaskId && !isTaskControlAction && incomingAttachments.length === 0
+    const awaitingInputTask = !payload.quote && !canonicalTaskId && !isTaskControlAction && incomingAttachments.length === 0
       ? brain.getAwaitingInput(sessionId)
       : null;
     let timing = timingForTask({ message, intent: taskContext?.conversationUnderstanding?.intentType || "", routing: taskContext?.conversationUnderstanding?.routing || "", route: taskContext?.conversationUnderstanding?.route || taskContext?.conversationUnderstanding?.routing || "", executionMode: taskContext?.conversationUnderstanding?.executionMode || "" });
@@ -19693,6 +20562,7 @@ function wireIpc() {
     const blackBallStartedAt = Date.now();
     activeRuns.set(sessionId, {
       runId: requestRunId,
+      waitingForModelRuntime: true,
       abortSignalId: requestRunId,
       controller,
       startedAt: blackBallStartedAt,
@@ -19725,6 +20595,7 @@ function wireIpc() {
         })
         : await (async () => {
           await waitForModelRuntimeTransition(controller.signal);
+          if (activeRun) activeRun.waitingForModelRuntime = false;
           return submitProductWithTaskBrain(payload);
         })();
       const resultStatus = String(result?.status || "").toLowerCase();
@@ -19745,7 +20616,7 @@ function wireIpc() {
           task: taskBrainUiResult(finalTask || {}),
           taskBrain: brain.executionContext(finalTask || resolvedTaskId)
         } : {}),
-        ...(finalTask?.status === "timed_out" ? {
+        ...(finalTask?.status === "timed_out" && result?.runtimeOutcome?.status !== "completed" ? {
           success: false,
           status: "timed_out",
           text: `执行超时。原因：${finalTask.error || "任务超过最长允许时长。"}`,
@@ -19798,12 +20669,16 @@ function wireIpc() {
         task: finalTask ? taskBrainUiResult(finalTask) : null,
         taskBrain: finalTask ? brain.executionContext(finalTask) : null,
         ...(hermesFailure ? {
+          protocolError: hermesFailure.protocolError === true,
+          stopReason: hermesFailure.stopReason,
           toolCalls: hermesFailure.toolCalls || [],
           files: hermesFailure.files || [],
           delegationIds: hermesFailure.delegationIds || [],
           delegationResults: hermesFailure.delegationResults || [],
           delegationEvidence: hermesFailure.delegationEvidence || [],
           executionLog: hermesFailure.executionLog || [],
+          structuredEvents: hermesFailure.structuredEvents || [],
+          answerSegments: hermesFailure.answerSegments || [],
           deliveryStatus: hermesFailure.deliveryStatus || "failed",
           presentationStatus: hermesFailure.presentationStatus || "failed"
         } : {}),
@@ -20258,9 +21133,8 @@ function wireIpc() {
     if (!target || sessionIsTrashed(target)) throw new Error("该会话位于垃圾箱，请先恢复后再打开");
     db.selectedSessionId = id;
     attachProjectConsciousness(db, target);
-    const saved = saveDb({ ...db, sessions: sortedSessions(db) });
     clearCompletedTaskTrayCount(id);
-    return rendererDbSnapshot(saved);
+    return rendererDbSnapshot({ ...db, sessions: sortedSessions(db) });
   });
   ipcMain.handle("session:rename", (_event, id, title) => {
     const safeTitle = sanitizeText(title) || "新对话";
@@ -20324,6 +21198,11 @@ function wireIpc() {
     mainWindow?.webContents.send("session:changed", rendererDbSnapshot(db));
     return db.messages[id] || [];
   });
+  ipcMain.handle("session:remove-message", (_event, id, messageId) => {
+    const removed = removeSessionMessage(id, messageId, { role: "user" });
+    if (removed) mainWindow?.webContents.send("session:changed", rendererDbSnapshot(loadDb()));
+    return { ok: removed };
+  });
   ipcMain.handle("user-profile:get", () => userProfileSnapshot(loadDb().settings));
   ipcMain.handle("onboarding:first-use-guide-complete", () => {
     const db = loadDb();
@@ -20353,13 +21232,14 @@ function wireIpc() {
     saveDb(db);
     return knowledgeMotion;
   });
-  ipcMain.handle("settings:save", async (_event, settings) => {
+  ipcMain.handle("settings:save", async (_event, settings) => runModelRuntimeTransition(async () => {
     const current = loadDb();
-    const db = structuredClone(current);
+    const db = { ...current, settings: structuredClone(current.settings) };
     const completedProfile = current.settings.customerProfile?.completed ? current.settings.customerProfile : null;
     const authoritativeLicense = { ...(current.settings.license || {}) };
     const incomingLicense = { ...(settings?.license || {}) };
     db.settings = structuredClone(settings || {});
+    copyModelSettings(current.settings, db.settings);
     delete db.settings.permissions;
     db.settings.license = {
       ...authoritativeLicense,
@@ -20371,8 +21251,13 @@ function wireIpc() {
       userProfile: settings?.userProfile || current.settings.userProfile
     });
     db.settings.webSearch = { ...(db.settings.webSearch || {}), enabled: true };
+    db.settings.taskGuidanceEnabled = false;
     db.settings.intentPredict = false;
+    if (isDeepStrictEqual(db.settings, current.settings)) return structuredClone(current.settings);
     try {
+      if (fingerprintHermesConfig(selectedHermesConfig(db.settings)) !== hermesConfigFingerprint) {
+        await waitForModelRuntimeIdle(db.settings.defaultProvider);
+      }
       await syncHermesRuntimeConfig(db.settings);
       const locked = normalizePersonaMemory(db.settings);
       db.settings.personaMemory = {
@@ -20383,7 +21268,9 @@ function wireIpc() {
         persona: sanitizeText(db.settings.persona?.personality || locked.persona || "")
       };
       syncPersonaMemory(db.settings);
-      const saved = saveDb(db).settings;
+      const latest = loadDb();
+      latest.settings = db.settings;
+      const saved = saveDb(latest).settings;
       refreshCapabilities();
       resetKnowledgeRuntime();
       return { ...saved, hermesRuntime: ensureHermesConfigService().runtime() };
@@ -20391,7 +21278,7 @@ function wireIpc() {
       await syncHermesRuntimeConfig(current.settings).catch(() => null);
       throw error;
     }
-  });
+  }));
   ipcMain.handle("customer-profile:complete", (_event, payload = {}) => {
     const name = sanitizeText(payload.name || "");
     const phone = sanitizeText(payload.phone || "").replace(/\s+/g, "");
@@ -20426,7 +21313,7 @@ function wireIpc() {
       model: sanitizeText(payload.model || saved.model || ""),
       apiStyle: sanitizeText(payload.apiStyle || saved.apiStyle || "openai")
     };
-    return listProviderModels({ providerId, provider, signal: AbortSignal.timeout(15000) });
+    return refreshProviderModelCatalog(providerId, provider);
   });
   ipcMain.handle("models:readiness", () => selectedModelReadiness(loadDb().settings));
   ipcMain.handle("models:verify", async (_event, payload = {}) => {
@@ -20448,10 +21335,11 @@ function wireIpc() {
     });
     return rememberProviderVerification(providerId, provider, verification);
   });
-  ipcMain.handle("models:configure", async (_event, payload = {}) => runModelRuntimeTransition(
+  ipcMain.handle("models:settings", () => structuredClone(loadDb().settings));
+  ipcMain.handle("models:configure", async (_event, payload = {}) => runModelConfigurationOperation(payload,
     () => verifiedProviderConfiguration(payload)
   ));
-  ipcMain.handle("models:set-enabled", async (_event, payload = {}) => runModelRuntimeTransition(async () => {
+  ipcMain.handle("models:set-enabled", async (_event, payload = {}) => runModelConfigurationOperation(payload, async () => {
     const providerId = sanitizeText(payload.providerId || "").toLowerCase();
     const enabled = payload.enabled === true;
     const current = loadDb();
@@ -20474,11 +21362,12 @@ function wireIpc() {
     }
 
     if (current.settings.defaultProvider !== providerId) {
-      const next = structuredClone(current);
+      const next = { settings: structuredClone(current.settings) };
       next.settings.providers[providerId].enabled = false;
-      const saved = saveDb(next);
+      const saved = await commitModelSettings(next.settings);
       return {
         ok: true,
+        settings: saved.settings,
         providerId,
         enabled: false,
         defaultProvider: saved.settings.defaultProvider,
@@ -20491,72 +21380,39 @@ function wireIpc() {
       throw new Error("当前模型没有可接管的备用模型，请先启用并验证另一个模型。");
     }
 
-    const next = structuredClone(current);
+    const next = { settings: structuredClone(current.settings) };
     next.settings.providers[providerId].enabled = false;
     next.settings.defaultProvider = replacementId;
     next.settings.providers[replacementId].enabled = true;
-    clearHermesSessionBindings(next);
     const receipt = blackBallRuntimeReceipt(next.settings, null, true);
     next.settings.modelRuntime = receipt;
-    try {
-      await syncHermesRuntimeConfig(next.settings);
-      const saved = saveDb(next);
-      return {
-        ok: true,
-        providerId,
-        enabled: false,
-        defaultProvider: replacementId,
-        switchedFrom: providerId,
-        switchedTo: replacementId,
-        replacement: {
-          name: saved.settings.providers[replacementId].name || replacementId,
-          model: saved.settings.providers[replacementId].model || ""
-        },
-        runtimeReceipt: receipt
-      };
-    } catch (error) {
-      await syncHermesRuntimeConfig(current.settings).catch(() => null);
-      throw error;
-    }
-  }));
-  ipcMain.handle("models:set-reasoning", async (_event, value) => {
-    const reasoning = sanitizeText(value || "").toLowerCase();
-    if (!BLACK_BALL_REASONING_LEVELS.has(reasoning)) throw new Error("不支持的黑球推理等级。");
-    const current = loadDb();
-    const activeProvider = current.settings.providers?.[current.settings.defaultProvider] || {};
-    const nativeLevels = verifiedNativeReasoningLevels(activeProvider);
-    if (nativeLevels.length && !nativeLevels.includes(reasoning)) {
-      throw new Error(`${activeProvider.model || "当前模型"} 不支持该原生推理等级。`);
-    }
-    if (current.settings.reasoning === reasoning) {
-      return { ok: true, reasoning, runtimeReceipt: current.settings.modelRuntime || blackBallRuntimeReceipt(current.settings) };
-    }
-    const next = {
-      ...current,
-      settings: { ...current.settings, reasoning },
-      sessions: (current.sessions || []).map((session) => ({ ...session }))
+    const saved = await applyAndCommitModelSettings(next.settings, { providerId, applyRuntime: true });
+    return {
+      ok: true,
+      settings: saved.settings,
+      providerId,
+      enabled: false,
+      defaultProvider: replacementId,
+      switchedFrom: providerId,
+      switchedTo: replacementId,
+      replacement: {
+        name: saved.settings.providers[replacementId].name || replacementId,
+        model: saved.settings.providers[replacementId].model || ""
+      },
+      runtimeReceipt: receipt
     };
-    const ready = selectedModelReadiness(next.settings).configured;
-    const receipt = blackBallRuntimeReceipt(next.settings, null, ready);
-    if (ready) clearHermesSessionBindings(next);
-    next.settings.modelRuntime = receipt;
-    return runModelRuntimeTransition(async () => {
-      try {
-        if (ready) await syncHermesRuntimeConfig(next.settings);
-        const saved = saveDb(next);
-        return { ok: true, reasoning, runtimeReceipt: receipt, settings: saved.settings };
-      } catch (error) {
-        await syncHermesRuntimeConfig(current.settings).catch(() => null);
-        throw error;
-      }
-    });
-  });
+  }));
+  ipcMain.handle("models:set-reasoning", async (_event, value) => runModelConfigurationOperation(
+    typeof value === "object" ? value : {},
+    () => configureModelReasoning(typeof value === "object" ? value.reasoning : value)
+  ));
   ipcMain.handle("models:runtime-state", () => runModelRuntimeTransition(() => reconcileSelectedModelRuntime()));
   ipcMain.handle("models:activate", async (_event, providerIdValue) => {
-    const providerId = sanitizeText(providerIdValue || "").toLowerCase();
-    const provider = loadDb().settings.providers?.[providerId];
-    if (!provider) throw new Error(`模型不存在：${providerId}`);
-    return runModelRuntimeTransition(async () => {
+    const payload = typeof providerIdValue === "string" ? { providerId: providerIdValue } : providerIdValue || {};
+    const providerId = sanitizeText(payload.providerId || "").toLowerCase();
+    return runModelConfigurationOperation(payload, async () => {
+      const provider = loadDb().settings.providers?.[providerId];
+      if (!provider) throw new Error(`模型不存在：${providerId}`);
       const reused = await reuseVerifiedProviderConfiguration({ providerId, activate: true });
       return reused || verifiedProviderConfiguration({
         ...provider,
@@ -20566,6 +21422,20 @@ function wireIpc() {
       });
     });
   });
+  ipcMain.handle("models:delete", (_event, payload = {}) => runModelConfigurationOperation(payload, async () => {
+    const current = loadDb();
+    const providerId = sanitizeText(payload.providerId || "").toLowerCase();
+    const provider = current.settings.providers?.[providerId];
+    if (!provider) throw new Error("模型配置不存在。");
+    const active = current.settings.defaultProvider === providerId;
+    if (payload.removeProvider && (active || PRESET_PROVIDERS[providerId])) throw new Error("当前模型或预置模型不可删除。");
+    const settings = structuredClone(current.settings);
+    if (payload.removeProvider) delete settings.providers[providerId];
+    else settings.providers[providerId] = { ...provider, apiKey: "", enabled: false, verifiedAt: "", verifiedCredentialFingerprint: "" };
+    if (active) settings.modelRuntime = blackBallRuntimeReceipt(settings, null, false);
+    const saved = await applyAndCommitModelSettings(settings, { providerId, applyRuntime: active });
+    return { ok: true, settings: saved.settings };
+  }));
   ipcMain.handle("settings:choose-save-location", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: "选择白球默认保存位置",
@@ -20802,6 +21672,7 @@ function wireIpc() {
     recordRequestTiming("run_accepted");
     activeRuns.set(session.id, {
       runId: requestRunId,
+      waitingForModelRuntime: true,
       abortSignalId: requestRunId,
       controller,
       startedAt: blackBallStartedAt,
@@ -20820,6 +21691,7 @@ function wireIpc() {
     try {
       recordRequestTiming("runtime_transition_wait_start");
       await waitForModelRuntimeTransition(controller.signal);
+      if (activeRuns.get(session.id)?.controller === controller) activeRuns.get(session.id).waitingForModelRuntime = false;
       recordRequestTiming("runtime_transition_wait_end");
       const licenseStatus = currentLicenseStatus();
       if (licenseStatus.securityBlocked) {
@@ -21314,6 +22186,19 @@ function wireIpc() {
         message: String(error?.message || error || "").slice(0, 240)
       });
       devLogError("chat:send", error, true);
+      if (error?.code === "HERMES_RUN_STATUS_UNKNOWN") {
+        const partial = error.hermesResult || {};
+        traceStatus = "unknown";
+        traceResult = { ...partial, status: "unknown", success: undefined, executionOutcome: "unknown",
+          runId: requestRunId, text: preserveFailedOutput(partial, "执行连接已中断，本轮是否完成尚未确认。已保留当前结果。") };
+        if (taskBrainTask?.task_id) ensureTaskBrain().update(taskBrainTask.task_id, {
+          status: "unknown", current_stage: "status_unconfirmed"
+        });
+        persistProductResult({ sessionId: session.id, taskId: taskBrainTask?.task_id || "",
+          clientMessageId: payload.clientMessageId || "", result: traceResult });
+        mainWindow?.webContents.send("session:changed", rendererDbSnapshot(loadDb()));
+        return { ok: true, sessionId: session.id, status: "unknown", result: traceResult };
+      }
       const timedOut = runWasTimedOut(session.id, controller);
       const terminalStatus = timedOut ? "timeout" : queueTerminalStatus(error);
       const userAborted = runWasAbortedByUser(session.id, controller);
@@ -21358,24 +22243,102 @@ function wireIpc() {
     }
     });
   });
+  // 新提交的补充不再把 IPC 往返挂满黑球回执的超时窗口：可靠落盘后即可回执，
+  // 权威状态由黑球的 accepted/applied/addressed 诊断事件补充落库。
+  const SUPPLEMENT_FAST_RECEIPT_TIMEOUT_MS = 1500;
+  function logSupplementTiming(details = {}) {
+    try { console.info("[SupplementTiming]", JSON.stringify({ ...details, at: new Date().toISOString() })); } catch { /* 观测失败不影响主流程 */ }
+  }
+  ipcMain.handle("chat:supplement", async (_event, request = {}) => {
+    const supplementStartedAt = Date.now();
+    const sessionId = String(request.sessionId || "");
+    const turnId = String(request.runId || "");
+    const supplementId = String(request.supplementId || "");
+    const text = String(request.text || "").trim();
+    if (!sessionId || !turnId || !/^[A-Za-z0-9:_-]{1,240}$/.test(supplementId) || !text || text.length > 100000) {
+      return { accepted: false, status: "invalid", supplementId };
+    }
+    const messages = loadDb().messages?.[sessionId] || [];
+    const stored = messages.find(item => item.id === supplementId);
+    if (stored && (stored.text !== text || stored.raw?.supplement?.turnId !== turnId)) throw new Error("Supplement identity conflict");
+    if (["accepted", "applied", "addressed", "needs_clarification", "failed", "pending", "cancelled"].includes(stored?.raw?.supplement?.status)) {
+      return { accepted: true, ...stored.raw.supplement, supplementId };
+    }
+    const run = activeRuns.get(sessionId);
+    if (!run || !cancelRequestTargetsRun(turnId, run)) {
+      const rejected = ["not_running", "unsupported", "queue_required", "not_ready", "invalid"].includes(stored?.raw?.supplement?.status);
+      return { accepted: stored && !rejected ? null : false, status: stored && !rejected ? "unknown" : "not_running", supplementId };
+    }
+    if (run.userAborted || run.controller?.signal.aborted) return { accepted: false, status: "cancelled", supplementId };
+    if (!run.sendSupplement) return { accepted: false, status: "not_ready", supplementId };
+    if (request.attachments?.length || request.quote) return { accepted: false, status: "queue_required", supplementId };
+    run.supplementRequests ||= new Map();
+    const pending = run.supplementRequests.get(supplementId);
+    if (pending) {
+      if (pending.text !== text) throw new Error("Supplement identity conflict");
+      return pending.promise;
+    }
+    appendMessage(sessionId, { id: supplementId, role: "user", text, createdAt: request.createdAt || Date.now(),
+      raw: { supplement: { supplementId, turnId, taskId: run.taskId || "", status: "saved" } } }, { requireCommit: true });
+    const persistedAt = Date.now();
+    const promise = (async () => {
+      const reconcileOnly = Boolean(stored);
+      let receipt;
+      try { receipt = await run.sendSupplement({ supplementId, text, reconcileOnly,
+        timeoutMs: reconcileOnly ? 8000 : SUPPLEMENT_FAST_RECEIPT_TIMEOUT_MS }); }
+      catch { receipt = { accepted: null, status: "unknown", supplementId }; }
+      if (!reconcileOnly && receipt?.accepted == null) {
+        // 点击路径到此结束：原文已可靠落盘，界面先显示"提交中"。
+        // 后台继续对账，拿到结果只补写状态，不再阻塞渲染进程。
+        void run.sendSupplement({ supplementId, text, reconcileOnly: true })
+          .then(late => {
+            if (!late?.status) return;
+            try { recordSupplementReceipt(sessionId, turnId, supplementId, late, { immediate: false }); }
+            catch { writeCrossReplyTrace("supplement:lateReceiptPersistenceFailed", { sessionId, turnId, supplementId }); }
+          })
+          .catch(() => {});
+        logSupplementTiming({ sessionId, supplementId, phase: "fast-return",
+          persistedMs: persistedAt - supplementStartedAt, receiptMs: Date.now() - persistedAt });
+        return { accepted: null, status: "submitting", supplementId, turnId, persistedByMain: true };
+      }
+      const persisted = recordSupplementReceipt(sessionId, turnId, supplementId, receipt.status, {
+        immediate: ["addressed", "needs_clarification", "failed", "cancelled", "pending"].includes(receipt.status)
+      });
+      if (["applied", "accepted", "addressed", "needs_clarification", "failed", "pending", "cancelled"].includes(persisted?.status)) receipt = { ...receipt, accepted: true, status: persisted.status };
+      logSupplementTiming({ sessionId, supplementId, phase: "receipt", status: receipt.status,
+        persistedMs: persistedAt - supplementStartedAt, receiptMs: Date.now() - persistedAt });
+      return { ...receipt, persistedByMain: true };
+    })();
+    run.supplementRequests.set(supplementId, { text, promise });
+    try { return await promise; }
+    finally { run.supplementRequests.delete(supplementId); }
+  });
+  ipcMain.handle("chat:run-status", async (_event, request = {}) => {
+    const sessionId = String(request.sessionId || "");
+    const runId = String(request.runId || "");
+    const run = activeRuns.get(sessionId);
+    if (!runId || (run && !cancelRequestTargetsRun(runId, run))) return { status: "unknown", turnId: runId };
+    if (run?.queryRuntimeStatus) return run.queryRuntimeStatus();
+    const result = (loadDb().messages?.[sessionId] || []).findLast(message =>
+      message.raw?.productResult?.runId === runId)?.raw?.productResult;
+    return result?.runtimeOutcome || { status: "unknown", turnId: runId };
+  });
   ipcMain.on("chat:abort-signal", (_event, id) => {
     const abortRequest = id && typeof id === "object" ? id : { sessionId: id };
     const requestedId = String(abortRequest.sessionId || abortRequest.id || "").trim();
     const requestedRunId = String(abortRequest.runId || "").trim();
     const run = activeRuns.get(requestedId);
     if (!run || (requestedRunId && !cancelRequestTargetsRun(requestedRunId, run))) return;
+    if (abortRequest.executionViewState) {
+      run.executionViewState = { expanded: abortRequest.executionViewState.expanded === true };
+    }
     const timeoutRequested = String(abortRequest.reason || "").toLowerCase() === "timeout";
     if (timeoutRequested) {
-      const failure = timeoutFailure(abortRequest);
-      run.timedOut = true;
-      run.timedOutAt ||= new Date().toISOString();
-      run.timeoutReason ||= failure.message;
-      run.timeoutCode ||= failure.code;
-      if (run.taskId) {
-        try { ensureTaskBrain().markTimedOut(run.taskId, run.timeoutReason); } catch {}
-      }
+      void run.queryRuntimeStatus?.();
+      return;
     } else {
       run.userAborted = true;
+      run.interruptedOutput ||= run.capturePartialOutput?.();
       run.userAbortedAt ||= new Date().toISOString();
       run.cancelAudit = {
         requested: true,
@@ -21386,7 +22349,7 @@ function wireIpc() {
       };
     }
     if (run.controller && !run.controller.signal.aborted) {
-      run.controller.abort(timeoutRequested ? { code: run.timeoutCode || "TASK_TIMEOUT", message: run.timeoutReason } : undefined);
+      run.controller.abort();
     }
   });
   ipcMain.handle("chat:abort", async (_event, id) => {
@@ -21419,6 +22382,9 @@ function wireIpc() {
         activeRunId: String(run.runId || ""),
         reason: "终止请求不属于当前运行轮次。"
       };
+    }
+    if (run && abortRequest.executionViewState) {
+      run.executionViewState = { expanded: abortRequest.executionViewState.expanded === true };
     }
     const pendingBrainTask = ensureTaskBrain().getAwaitingConfirmation(targetId);
     if (!run && !pendingBrainTask && !["running", "executing", "planning"].includes(String(session?.status || "").toLowerCase())) {
@@ -21462,10 +22428,11 @@ function wireIpc() {
           clientMessageId: String(interruptedUserMessage.id),
           interruptionNotice: true
         }
-      });
+      }, { deferCommit: true });
     }
     if (run) {
       run.userAborted = true;
+      run.interruptedOutput ||= run.capturePartialOutput?.();
       run.userAbortedAt = new Date().toISOString();
       run.cancelAudit = {
         requested: true,
@@ -21489,7 +22456,9 @@ function wireIpc() {
           sessionId: targetId,
           taskId: String(run?.taskId || ""),
           clientMessageId: interruptedUserMessage.id,
+          deferCommit: true,
           result: {
+            ...(run?.capturePartialOutput?.() || {}),
             success: false,
             status: "cancelled",
             runId: String(run?.runId || requestedRunId || ""),
@@ -21513,6 +22482,8 @@ function wireIpc() {
       interruptedCheckpoint,
       lastCancelAudit: run?.cancelAudit || null
     });
+    const persisted = await flushDbAsync();
+    if (!persisted.ok) console.error("[Abort] 中断结果后台保存失败:", persisted.error?.code || "WRITE_FAILED");
     // Broadcast only after the terminal status is persisted. Sending the
     // pre-update snapshot lets a queued renderer refresh resurrect a running
     // row and hide the cancellation/result message.
@@ -21542,8 +22513,10 @@ function wireIpc() {
   });
   ipcMain.handle("system:open-attachment", (_event, attachment = {}) => openAttachmentView(attachment));
   ipcMain.handle("system:open-original-attachment", (_event, attachment = {}) => openOriginalAttachment(attachment));
-  ipcMain.handle("system:show-attachment-in-folder", (_event, attachment = {}) => {
-    const source = resolvePreviewAttachmentPath(attachment);
+  ipcMain.handle("system:show-attachment-in-folder", async (_event, attachment = {}) => {
+    const source = attachment.strictPath === true
+      ? (await resolveConversationPreviewFile(attachment)).source
+      : resolvePreviewAttachmentPath(attachment);
     if (!source) return { ok: false, message: "当前内容没有可定位的原文件" };
     shell.showItemInFolder(source);
     return { ok: true, file: source };
@@ -21555,6 +22528,7 @@ function wireIpc() {
   });
   ipcMain.handle("system:spreadsheet-ai-plan", (_event, payload = {}) => createSpreadsheetAiPlan(payload));
   ipcMain.handle("system:spreadsheet-save", (_event, payload = {}) => saveSpreadsheetAttachment(payload));
+  ipcMain.handle("system:document-save", (_event, payload = {}) => saveConversationDocument(payload));
   ipcMain.handle("system:preview-attachment", (_event, attachment = {}) => previewAttachmentData(attachment));
   ipcMain.handle("system:preview-webpage", async (_event, target = "") => {
     const response = await ensureToolRegistry().execute("webpage_read", { url: sanitizeText(target) }, { provider: "black-ball-browser", userInitiated: true });

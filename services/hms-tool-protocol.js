@@ -183,21 +183,12 @@ function successfulToolDelivery(envelope = {}) {
     });
   });
   const files = [...fileMap.values()];
-  const evidenceLines = results.map((item) => {
-    const toolId = cleanText(item.toolId, 120) || "tool";
-    const status = item.success ? "成功" : "失败";
-    const evidence = item.error || item.result || null;
-    let detail = "";
-    try { detail = cleanText(typeof evidence === "string" ? evidence : JSON.stringify(evidence), 1200); } catch {}
-    detail = detail
-      .replace(/\bsk-[a-z0-9_-]{8,}\b/gi, "[已隐藏密钥]")
-      .replace(/\b(api[_\s-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+/gi, "$1=[已隐藏]");
-    return `- ${toolId}：${status}${detail ? `；${detail}` : ""}`;
-  });
+  const failedCount = results.length - successful.length;
   return {
     text: [
       "工具证据已返回，但黑球未完成最终结论。",
-      ...evidenceLines,
+      successful.length ? `已完成 ${successful.length} 项操作。` : "没有操作成功完成。",
+      ...(failedCount ? [`有 ${failedCount} 项操作失败。`] : []),
       ...(files.length ? ["相关文件：", ...files.map((file) => `- ${file.path}`)] : [])
     ].join("\n"),
     files

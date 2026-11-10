@@ -39,14 +39,17 @@ test("structured local prediction objects are normalized without JSON string coe
   assert.equal(stage.options.length, 2);
 });
 
-test("prediction remains shadow-only and cannot alter the production route", () => {
+test("Black Ball decision code remains available while guidance is rolled back", () => {
   const start = mainSource.indexOf("function applyIntentPredictionDecision");
   const end = mainSource.indexOf("function ensureTaskQueue", start);
   const block = mainSource.slice(start, end);
   assert.match(mainSource, /const INTENT_PREDICTION_EXTERNAL_MODE = "shadow";/);
   assert.match(block, /event: "shadow_prediction"/);
   assert.match(block, /source: "whiteball_shadow"/);
-  assert.match(block, /intentPrediction: null/);
-  assert.doesNotMatch(block, /intentPrediction: prediction/);
+  assert.match(block, /semanticOwner === "black_ball"/);
+  assert.match(block, /interactionMode: understanding\.responseMode === "clarify" \? "select_and_fill" : "execute"/);
+  assert.match(mainSource, /intentPredict: false/);
+  assert.match(mainSource, /taskGuidanceEnabled: false/);
+  assert.match(mainSource, /db\.settings\.taskGuidanceEnabled = false;/);
   assert.match(mainSource, /db\.settings\.intentPredict = false;/);
 });

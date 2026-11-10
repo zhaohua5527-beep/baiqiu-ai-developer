@@ -48,7 +48,55 @@ function writeJsonAtomicSync(file, value, options = {}) {
   throw error;
 }
 
+async function writeJsonAtomic(file, value, options = {}) {
+  const target = path.resolve(file);
+  const io = options.fs || fs.promises;
+  const temporary = `${target}.pending-${process.pid}-${require("node:crypto").randomUUID()}`;
+  const serialized = JSON.stringify(value);
+  const serializedBytes = Buffer.byteLength(serialized);
+  await io.mkdir(path.dirname(target), { recursive: true });
+  let descriptor;
+  try {
+    descriptor = await io.open(temporary, "wx", 0o600);
+    await descriptor.writeFile(serialized, "utf8");
+    await descriptor.sync();
+    await descriptor.close();
+    descriptor = null;
+    if (typeof options.beforeRename === "function" && !options.beforeRename()) {
+      return { ok: false, skipped: true, file: target };
+    }
+    if (options.renameSync) {
+      const syncIo = options.syncFs || fs;
+      let lastError = null;
+      for (let attempt = 1; attempt <= Math.max(1, Number(options.attempts || 6)); attempt += 1) {
+        try {
+          syncIo.renameSync(temporary, target);
+          return { ok: true, file: target, bytes: serializedBytes, attempts: attempt };
+        } catch (error) {
+          lastError = error;
+          if (!RETRYABLE_RENAME_CODES.has(String(error?.code || "")) || attempt === Math.max(1, Number(options.attempts || 6))) throw error;
+          await new Promise(resolve => setTimeout(resolve, Math.max(1, Number(options.retryDelayMs || 8)) * (2 ** (attempt - 1))));
+        }
+      }
+      throw lastError || new Error(`Unable to replace ${target}`);
+    }
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await io.rename(temporary, target);
+        return { ok: true, file: target };
+      } catch (error) {
+        if (!RETRYABLE_RENAME_CODES.has(error.code) || attempt >= 5) throw error;
+        await new Promise(resolve => setTimeout(resolve, 8 * (2 ** attempt)));
+      }
+    }
+  } finally {
+    await descriptor?.close().catch(() => null);
+    await io.unlink(temporary).catch(() => null);
+  }
+}
+
 module.exports = {
   RETRYABLE_RENAME_CODES,
-  writeJsonAtomicSync
+  writeJsonAtomicSync,
+  writeJsonAtomic
 };

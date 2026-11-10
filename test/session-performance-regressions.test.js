@@ -16,7 +16,7 @@ test("session history IPC is lightweight and windowed", () => {
   assert.match(mainSource, /hasEarlier: start > 0/);
   assert.match(mainSource, /hasNewer: end < messages\.length/);
   assert.match(preloadSource, /messages: \(id, query = null\) => ipcRenderer\.invoke\("session:messages", id, query\)/);
-  assert.match(mainSource, /return rendererDbSnapshot\(saved\);/);
+  assert.match(mainSource, /mainWindow\?\.webContents\.send\("session:changed", rendererDbSnapshot\(db\)\);/);
 });
 
 test("message cache warming removes synchronous session-switch fallback reads", () => {
@@ -39,7 +39,7 @@ test("app initialization preloads disk only once and cannot overwrite pending me
 
 test("every database flush preserves authoritative cached session messages", () => {
   assert.match(mainSource, /function mergeCachedMessagesIntoDb\(db\)/);
-  assert.match(mainSource, /function saveDb\(db(?:, [^)]*)?\) \{\s*mergeCachedMessagesIntoDb\(db\);/);
+  assert.match(mainSource, /function saveDb\(db(?:, [^)]*)?\) \{[\s\S]*?mergeCachedMessagesIntoDb\(db\);/);
   const asyncFlush = mainSource.slice(mainSource.indexOf("function scheduleFlushDb"), mainSource.indexOf("function flushDbSync"));
   const syncFlush = mainSource.slice(mainSource.indexOf("function flushDbSync"), mainSource.indexOf("function ensureIntentAgent"));
   assert.match(asyncFlush, /mergeCachedMessagesIntoDb\(db\);/);
@@ -54,7 +54,7 @@ test("message append promotes the live session array into the authoritative cach
   assert.match(append, /_messagesCache\.get\(sessionId\) !== db\.messages\[sessionId\]/);
   assert.match(append, /_messagesCache\.set\(sessionId, db\.messages\[sessionId\]\);/);
   assert.ok(append.indexOf("_messagesCache.set") < append.indexOf("db.messages[sessionId].push(item)"));
-  assert.match(append, /saveDb\(db, \{ immediate: message\.role === "assistant" \|\| requireCommit, requireCommit \}\);/);
+  assert.match(append, /saveDb\(db, \{ immediate: requireCommit \|\| message\.role === "assistant" && !deferCommit, requireCommit \}\);/);
 });
 
 test("session activity never changes the user-controlled sidebar order", () => {
@@ -99,6 +99,20 @@ test("session switching paints selection and messages before selection persisten
   assert.doesNotMatch(select, /await Promise\.all/);
   assert.match(select, /currentChatTitle\.textContent = session \? projectSessionDisplayName\(session\) : "新对话"/);
   assert.doesNotMatch(select, /session-transitioning/);
+});
+
+test("session selection stays UI-only and restores the last local session", () => {
+  const selectStart = mainSource.indexOf('ipcMain.handle("session:select"');
+  const selectEnd = mainSource.indexOf('ipcMain.handle("session:rename"', selectStart);
+  const selectHandler = mainSource.slice(selectStart, selectEnd);
+  assert.doesNotMatch(selectHandler, /saveDb\(/);
+  assert.match(selectHandler, /return rendererDbSnapshot\(\{ \.\.\.db, sessions: sortedSessions\(db\) \}\);/);
+
+  assert.match(rendererSource, /const SELECTED_SESSION_KEY = "baiqiu\.selectedSessionId"/);
+  assert.match(rendererSource, /function readSelectedSessionId\(\)/);
+  assert.match(rendererSource, /function saveSelectedSessionId\(sessionId\)/);
+  assert.match(rendererSource, /state\.selectedSessionId = storedSessionStillExists\s*\? storedSelectedSessionId\s*:\s*state\.db\.selectedSessionId/);
+  assert.match(rendererSource, /saveSelectedSessionId\(resolvedSessionId\);/);
 });
 
 test("visited sessions paint from a bounded renderer cache while fresh history loads", () => {
@@ -181,7 +195,7 @@ test("HMS runtime deployment starts after the initial desktop frame", () => {
 
 test("foreground chat prewarms asynchronously after render, focus and session selection", () => {
   assert.match(mainSource, /ipcMain\.handle\("chat:prewarm", async \(_event, sessionId = ""\)/);
-  assert.match(mainSource, /ipcMain\.handle\("chat:prewarm"[\s\S]*?void prewarmExecutionSession\(sessionId\)/);
+  assert.match(mainSource, /ipcMain\.handle\("chat:prewarm"[\s\S]*?prewarmExecutionSession\(sessionId\),/);
   assert.match(preloadSource, /prewarmChat: \(sessionId = ""\) => ipcRenderer\.invoke\("chat:prewarm", sessionId\)/);
   assert.match(rendererSource, /function scheduleForegroundChatPrewarm\(sessionId = state\.selectedSessionId, delayMs = 500\)/);
   assert.match(rendererSource, /chatInput\.addEventListener\("focus", \(\) => \{\s*scheduleForegroundChatPrewarm\(state\.selectedSessionId, 0\);/);
@@ -215,7 +229,7 @@ test("tray popup renderer is created on first use", () => {
 
 test("persisted HMS streams are compacted and not stored twice", () => {
   assert.match(mainSource, /function compactPersistedExecutionPayload\(value\)/);
-  assert.match(mainSource, /if \(Array\.isArray\(output\.updates\)\) delete output\.updates/);
+  assert.match(mainSource, /if \(Array\.isArray\(value\.updates\)\)[\s\S]*?delete output\.updates/);
   assert.match(mainSource, /if \(productResult\?\.raw && raw\.raw/);
   assert.match(mainSource, /delete existingRaw\.raw/);
 });

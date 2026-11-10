@@ -63,7 +63,7 @@ test("execution phases alternate public progress and exact result events", () =>
   assert.doesNotMatch(JSON.stringify(phases.flatMap((phase) => phase.progressEvents)), /python command --secret|final answer/);
 });
 
-test("running phases exclude lifecycle and retain complete sanitized tool source", () => {
+test("running phases display actual runtime lifecycle and retain complete sanitized tool source", () => {
   const helper = sourceBetween("function executionThreeRowViewModel", "function paintExecutionStageView");
   const phasesFor = new Function(`${helper}; return executionThreeRowViewModel;`)();
   const phases = phasesFor({ events: [
@@ -97,9 +97,10 @@ test("running phases exclude lifecycle and retain complete sanitized tool source
   ] });
 
   assert.deepEqual(phases[0].progressEvents.map((item) => item.text), [
+    "黑球已接收本次请求",
     "python -c \"print('完整命令')\"\nprint('第二行')"
   ]);
-  assert.deepEqual(phases[0].progressEvents.map((item) => item.semanticType), ["tool"]);
+  assert.deepEqual(phases[0].progressEvents.map((item) => item.semanticType), ["lifecycle", "tool"]);
   assert.doesNotMatch(JSON.stringify(phases[0].progressEvents), /secret-command|token|正在读取 package\.json/);
 });
 
@@ -158,14 +159,14 @@ test("each real result boundary closes one phase before later public progress", 
   ]);
 });
 
-test("phase-owned events stay out of the legacy main paragraph lane", () => {
+test("temporary process stays in execution while stage results remain in the structured lane", () => {
   const persisted = sourceBetween("function renderPersistedSegmentPairs", "function snapshotMessageIdentity");
   const live = sourceBetween("function appendLiveStructuredResult", "function isPublicStructuredThought");
   const helpers = sourceBetween("function isCrossStructuredEvent", "function mergeAnswerSegmentLists");
   const { isPrimaryExecutionSummaryEvent } = new Function(`${helpers}; return { isPrimaryExecutionSummaryEvent };`)();
 
   assert.match(persisted, /filter\(\(event\) => !isPrimaryExecutionSummaryEvent\(event\)\)/);
-  assert.match(persisted, /segmentStructuredEvents\.filter\(isStageResultStructuredEvent\)/);
+  assert.doesNotMatch(persisted, /segmentStructuredEvents\.filter\(isStageResultStructuredEvent\)/);
   assert.equal(isPrimaryExecutionSummaryEvent({
     semanticType: "thinking",
     target: "structured",
@@ -339,7 +340,7 @@ test("live public progress retains its typewriter and three-event visual limit",
   assert.match(painter, /paintExecutionPhaseResult\(root, textNode, item\)/);
   assert.match(styles, /\.execution-event-text\[data-typing="1"\]::after/);
   assert.match(styles, /\.execution-phase-event-window\[data-overflow="1"\][\s\S]*mask-image:\s*linear-gradient/);
-  assert.match(styles, /\.execution-phase-event-window\s*\{[\s\S]*max-height:\s*62px;/);
+  assert.match(styles, /\.execution-phase-event-window\s*\{[\s\S]*max-height:\s*3lh;/);
   assert.match(styles, /\.execution-phase-group:not\(\[data-expanded="1"\]\) \.execution-phase-event\[data-collapsed-hidden="1"\]\s*\{\s*display:\s*none;/);
   assert.doesNotMatch(painter, /progress\.text\.slice|substring\(|substr\(|getBoundingClientRect/);
   assert.match(sourceBetween("function paintExecutionPhaseResult", "function paintExecutionStageView"), /if \(!node\.closest\(".execution-phase-event"\)\) scheduleStreamingScroll\(\)/);

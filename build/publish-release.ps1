@@ -19,7 +19,8 @@ param(
 
     [switch]$ForceUpdate,
 
-    [string]$HostName = '156.239.227.26',
+    [string]$HostName = '107.149.93.41',
+    [int]$Port = 12998,
     [string]$UserName = 'baiqiu-deploy',
     [string]$KeyPath = "$env:USERPROFILE\.ssh\baiqiu-jiuniu-ed25519"
 )
@@ -58,16 +59,17 @@ $remote = "$UserName@$HostName"
 $remoteZip = "baiqiu-upload-$Version.zip"
 $remoteInstaller = "baiqiu-upload-$Version.exe"
 $remoteManifest = "baiqiu-upload-$Version.json"
-$sshOptions = @('-i', $key, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new')
+$sshOptions = @('-i', $key, '-p', [string]$Port, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new')
+$scpOptions = @('-i', $key, '-P', [string]$Port, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new')
 
 Write-Host "Uploading ZIP for v$Version..."
-Invoke-Checked 'scp.exe' ($sshOptions + @($zip, "${remote}:/opt/baiqiu-update/incoming/$remoteZip"))
+Invoke-Checked 'scp.exe' ($scpOptions + @($zip, "${remote}:/opt/baiqiu-update/incoming/$remoteZip"))
 
 Write-Host "Uploading installer for v$Version..."
-Invoke-Checked 'scp.exe' ($sshOptions + @($installer, "${remote}:/opt/baiqiu-update/incoming/$remoteInstaller"))
+Invoke-Checked 'scp.exe' ($scpOptions + @($installer, "${remote}:/opt/baiqiu-update/incoming/$remoteInstaller"))
 
 Write-Host "Uploading signed manifest for v$Version..."
-Invoke-Checked 'scp.exe' ($sshOptions + @($signedManifest, "${remote}:/opt/baiqiu-update/incoming/$remoteManifest"))
+Invoke-Checked 'scp.exe' ($scpOptions + @($signedManifest, "${remote}:/opt/baiqiu-update/incoming/$remoteManifest"))
 
 $publishArgs = @(
     'sudo', '/usr/local/sbin/baiqiu-publish',

@@ -102,7 +102,9 @@
     const nestedEvidence = objectValue(nested.requestRun?.evidence);
     const productEvidence = objectValue(product.requestRun?.evidence);
     const productRawEvidence = objectValue(productRaw.requestRun?.evidence);
-    return [
+    const output = [];
+    const seen = new Map();
+    for (const event of [
       message.executionLog,
       raw.executionLog,
       nested.executionLog,
@@ -113,7 +115,24 @@
       productEvidence.executionLog,
       productRawEvidence.executionLog,
       product.taskBrain?.execution_log
-    ].flatMap(arrayValue);
+    ].flatMap(arrayValue)) {
+      if (!event || typeof event !== "object") {
+        output.push(event);
+        continue;
+      }
+      const eventId = String(event.eventId || "").trim();
+      let key = eventId;
+      if (!key) {
+        try { key = JSON.stringify(event); } catch { key = `${output.length}`; }
+      }
+      if (seen.has(key)) {
+        if (JSON.stringify(seen.get(key)) !== JSON.stringify(event)) console.error("[ExecutionEvent] conflicting duplicate eventId", key);
+        continue;
+      }
+      seen.set(key, event);
+      output.push(event);
+    }
+    return output;
   }
 
   function replaySegmentModel(message = {}, processDetails = executionLogFromMessage(message)) {
@@ -203,7 +222,62 @@
     return { ...current, ...incoming, text, raw: mergedRaw };
   }
 
+  function supplementReplyMessages(message = {}) {
+    if (message.role !== "assistant" || message.raw?.replyPart) return [message];
+    const originalResult = objectValue(message.raw?.productResult);
+    const originalUserId = originalResult.clientMessageId || message.raw?.clientMessageId || originalResult.requestRun?.userMessageId || "";
+    const lists = { answerSegments: answerSegmentsFromMessage(message), structuredEvents: structuredEventsFromMessage(message),
+      executionLog: executionLogFromMessage(message) };
+    const allEvents = Object.values(lists).flat().filter(event => event && typeof event === "object").sort((left, right) => Number(left.turnSequence || left.sequence || 0)
+      - Number(right.turnSequence || right.sequence || 0));
+    const ownerOf = event => event?.replyToUserMessageId && event.replyToUserMessageId !== originalUserId ? event.replyToUserMessageId : "";
+    const owners = [...new Set(["", ...allEvents.map(ownerOf)])];
+    if (owners.length === 1) return [message];
+    const fullAnswer = lists.answerSegments.map(event => String(event.text || "")).join("");
+    const fullText = String(message.text || "");
+    if (fullText.trim() && fullText.trim() !== fullAnswer.trim() && !fullText.startsWith(fullAnswer)) return [message];
+    const suffix = fullText.trim() === fullAnswer.trim() ? "" : fullText.startsWith(fullAnswer) ? fullText.slice(fullAnswer.length) : "";
+    return owners.map((owner, index) => {
+      const text = lists.answerSegments.filter(event => ownerOf(event) === owner).map(event => String(event.text || "")).join("")
+        + (index === owners.length - 1 ? suffix : "");
+      const select = (value, depth = 0) => {
+        const selected = { ...objectValue(value) };
+        for (const key of Object.keys(lists)) if (Array.isArray(selected[key])) selected[key] = selected[key].filter(event => ownerOf(event) === owner);
+        if (Array.isArray(selected.execution_log)) selected.execution_log = selected.execution_log.filter(event => ownerOf(event) === owner);
+        for (const key of ["raw", "productResult", "requestRun", "evidence", "taskBrain"]) {
+          if (selected[key] && depth < 6) selected[key] = select(selected[key], depth + 1);
+        }
+        return selected;
+      };
+      const id = owner ? String(message.id) + ":reply:" + encodeURIComponent(owner) : message.id;
+      const raw = { ...select(message.raw), replyPart: true, replyToUserMessageId: owner || originalUserId };
+      if (raw.productResult) raw.productResult = { ...raw.productResult, text, responseMessageId: id };
+      return { ...message, id, text, raw,
+        ...Object.fromEntries(Object.entries(lists).map(([key, events]) => [key, events.filter(event => ownerOf(event) === owner)])) };
+    });
+  }
+
+  function expandSupplementReplies(messages = []) {
+    const userIds = new Set(messages.filter(message => message.role === "user").map(message => message.id));
+    const replies = new Map();
+    const remaining = [];
+    for (const message of messages) {
+      const parts = supplementReplyMessages(message);
+      if (parts.length === 1) { remaining.push(message); continue; }
+      for (const part of parts) {
+        const owner = part.raw.replyToUserMessageId;
+        if (!userIds.has(owner)) { remaining.push(part); continue; }
+        const group = replies.get(owner) || [];
+        group.push(part);
+        replies.set(owner, group);
+      }
+    }
+    return remaining.flatMap(message => [message, ...(message.role === "user" ? replies.get(message.id) || [] : [])]);
+  }
+
   return {
+    supplementReplyMessages,
+    expandSupplementReplies,
     mergeStructuredEventLists,
     structuredEventsFromMessage,
     mergeAnswerSegmentLists,

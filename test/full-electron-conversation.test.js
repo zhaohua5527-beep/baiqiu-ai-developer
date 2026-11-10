@@ -8,8 +8,8 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const test = require("node:test");
 
-const root = path.join(__dirname, "..");
-const electron = path.join(root, "node_modules", "electron", "dist", "electron.exe");
+const root = process.env.BAIQIU_E2E_APP_ROOT || path.join(__dirname, "..");
+const electron = process.env.BAIQIU_E2E_EXECUTABLE || path.join(root, "node_modules", "electron", "dist", "electron.exe");
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -54,8 +54,9 @@ class CdpClient {
     this.socket.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data || "{}"));
       if (!message.id || !this.pending.has(message.id)) return;
-      const { resolve, reject } = this.pending.get(message.id);
+      const { resolve, reject, timer } = this.pending.get(message.id);
       this.pending.delete(message.id);
+      clearTimeout(timer);
       if (message.error) reject(new Error(message.error.message || "CDP request failed"));
       else resolve(message.result || {});
     });
@@ -69,7 +70,11 @@ class CdpClient {
   call(method, params = {}) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP request timed out: ${method}`));
+      }, 10_000);
+      this.pending.set(id, { resolve, reject, timer });
       this.socket.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -91,6 +96,11 @@ class CdpClient {
   }
 
   close() {
+    for (const { reject, timer } of this.pending.values()) {
+      clearTimeout(timer);
+      reject(new Error("CDP connection closed"));
+    }
+    this.pending.clear();
     try { this.socket?.close(); } catch {}
   }
 }
@@ -157,6 +167,13 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
     const sessionId = await cdp.evaluate(`window.heiqiu.init().then((db) => db.selectedSessionId)`);
     assert.ok(sessionId, "the isolated app should create a selected session");
 
+    await cdp.evaluate(`(async () => {
+      await window.heiqiu.completeCustomerProfile({ name: "本地回归", phone: "13800000000" });
+      state.db = await window.heiqiu.init();
+      renderCustomerProfileGate();
+      document.querySelector("#firstUseGuideDone").click();
+    })()`);
+
     await cdp.evaluate(`(() => {
       const input = document.querySelector("#chatInput");
       input.value = "运行完整 E2E 对话";
@@ -168,7 +185,7 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
     let publicReasoning;
     try {
       publicReasoning = await waitForValue(() => cdp.evaluate(`(() => {
-        const nodes = [...document.querySelectorAll('.structured-result-entry-thinking:not([data-lifecycle="exiting"])')];
+        const nodes = [...document.querySelectorAll('.execution-event-text, .execution-current-thinking-text, .structured-result-entry-thinking:not([data-lifecycle="exiting"])')];
         return nodes.map((node) => node.textContent).find((text) => text.includes("公开事件")) || "";
       })()`), { label: "public reasoning typewriter", timeoutMs: 5_000 });
     } catch (error) {
@@ -207,7 +224,7 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
     let secondReasoning;
     try {
       secondReasoning = await waitForValue(() => cdp.evaluate(`(() => {
-        const nodes = [...document.querySelectorAll('.structured-result-entry-thinking:not([data-lifecycle="exiting"])')];
+        const nodes = [...document.querySelectorAll('.execution-event-text, .execution-current-thinking-text, .structured-result-entry-thinking:not([data-lifecycle="exiting"])')];
         return nodes.map((node) => node.textContent).find((text) => text.includes("第二段表格与代码")) || "";
       })()`), { label: "second public reasoning typewriter", timeoutMs: 5_000 });
     } catch (error) {
@@ -241,7 +258,7 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
           return nodes.map((node) => node.textContent);
         })()`);
         return Array.isArray(value) && value.at(-1)?.includes("4") ? value : null;
-      }, { label: "three-entry structured window" });
+      }, { label: "durable stage results" });
     } catch (error) {
       const snapshot = await cdp.evaluate(`(() => ({
         nodes: [...document.querySelectorAll(".structured-result-entry")].map((node) => ({
@@ -273,8 +290,7 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
       }));
       throw new Error(`${error.message}\nStructured snapshot: ${JSON.stringify(snapshot)}\nPersisted counts: ${JSON.stringify(counts)}\nOutput:\n${output}`);
     }
-    assert.deepEqual(structuredWindow.slice(-3), ["真实结构化事件 2", "真实结构化事件 3", "真实结构化事件 4"]);
-    assert.ok([3, 4].includes(structuredWindow.length));
+    assert.deepEqual(structuredWindow.map(text => text.trim()), ["真实结构化事件 1", "真实结构化事件 2", "真实结构化事件 3", "真实结构化事件 4"]);
 
     try {
       await waitForValue(() => cdp.evaluate(`(() => {
@@ -314,7 +330,7 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
         heading: row?.querySelector("h1")?.textContent || "",
         table: Boolean(row?.querySelector("table")),
         code: row?.querySelector("pre code")?.textContent || "",
-        answerSegments: row?.querySelectorAll(".stream-segment-answer").length || 0,
+        answerSegments: [...(row?.querySelectorAll(".stream-segment-answer") || [])].filter(node => node.textContent.trim()).length,
         reasoningVisible: Boolean(row?.querySelector('.structured-result-entry-thinking:not([data-lifecycle="exiting"])'))
       };
     })()`);
@@ -330,17 +346,17 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
       const row = [...document.querySelectorAll(".message.assistant")]
         .find((item) => item.textContent.includes("E2E 最终答案"));
       const toggle = row?.querySelector(".execution-activity-toggle");
-      const details = () => [...(row?.querySelectorAll(
-        ".stream-segment-process, .stream-segment-structured, .stream-segment-reasoning"
-      ) || [])].filter((node) => node.textContent.trim());
-      const collapsed = details().every((node) => node.hidden);
+      const activity = row?.querySelector(".streaming-activity");
+      const stageResultsVisible = () => [...row.querySelectorAll(".stream-segment-structured")]
+        .filter(node => node.textContent.trim()).every(node => !node.hidden && node.getBoundingClientRect().height > 0);
+      const collapsed = activity?.dataset.activityExpanded === "0";
       toggle?.click();
-      const expanded = details().every((node) => !node.hidden);
+      const expanded = activity?.dataset.activityExpanded === "1";
       const structuredCount = row?.querySelectorAll(".stream-segment-structured .structured-result-entry").length || 0;
       const finalVisible = Boolean(row?.querySelector(".stream-segment-answer h1"));
       toggle?.click();
-      const recollapsed = details().every((node) => node.hidden);
-      return { hasToggle: Boolean(toggle), collapsed, expanded, recollapsed, structuredCount, finalVisible };
+      const recollapsed = activity?.dataset.activityExpanded === "0";
+      return { hasToggle: Boolean(toggle), collapsed, expanded, recollapsed, structuredCount, finalVisible, stageResultsVisible: stageResultsVisible() };
     })()`);
     assert.deepEqual(completionHistory, {
       hasToggle: true,
@@ -348,7 +364,8 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
       expanded: true,
       recollapsed: true,
       structuredCount: 4,
-      finalVisible: true
+      finalVisible: true,
+      stageResultsVisible: true
     });
 
     const completedMessages = await cdp.evaluate(`window.heiqiu.messages(${JSON.stringify(sessionId)})`);
@@ -365,27 +382,30 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
       document.querySelector("#chatForm").requestSubmit();
       return true;
     })()`);
-    await waitForValue(() => cdp.evaluate(`Boolean(document.querySelector(".streaming-response, .thinking-message"))`), {
-      label: "running abort scenario"
+    await waitForValue(() => cdp.evaluate(`[...document.querySelectorAll(".streaming-response")]
+      .some(row => row.textContent.includes("第一段真实答案已经输出"))`), {
+      label: "partial answer before cancellation"
     });
     await cdp.evaluate(`document.querySelector("#sendBtn").click()`);
     const cancelledMessages = await waitForValue(async () => {
       const messages = await cdp.evaluate(`window.heiqiu.messages(${JSON.stringify(sessionId)})`);
       const cancelled = [...messages].reverse().find((message) => (
         message.role === "assistant"
-        && (message.raw?.productResult?.status === "cancelled" || /终止|中断/.test(message.text))
+        && message.raw?.productResult?.status === "cancelled"
       ));
       return cancelled ? messages : null;
     }, { label: "persisted cancellation result" });
     const cancelled = [...cancelledMessages].reverse().find((message) => message.role === "assistant");
     assert.equal(cancelled.raw?.productResult?.status, "cancelled");
-    assert.match(cancelled.text, /终止|中断/);
+    assert.match(cancelled.text, /第一段真实答案已经输出/);
+    assert.doesNotMatch(cancelled.text, /任务已终止|执行失败/);
+    assert.equal(cancelled.raw.productResult.structuredEvents.length, 2);
 
     await cdp.evaluate(`location.reload()`);
     await waitForValue(() => cdp.evaluate(`Boolean(
       document.readyState === "complete"
       && document.body.textContent.includes("E2E 最终答案")
-      && /终止|中断/.test(document.body.textContent)
+      && [...document.querySelectorAll(".message.assistant")].filter(row => row.textContent.includes("第一段真实答案已经输出")).length === 2
       && !document.querySelector(".fatal-error-overlay")
     )`), { label: "restored answers after reload" });
 
@@ -397,7 +417,7 @@ test("full Electron conversation streams, persists, aborts, and restores in isol
     assert.equal(persistedMessages.some((message) => message.raw?.productResult?.status === "cancelled"), true);
     assert.equal(fs.readdirSync(desktopRoot).length, 0, "E2E startup must not create or alter desktop shortcuts");
 
-    await cdp.evaluate(`window.heiqiu.windowControl("close-quit")`);
+    await cdp.evaluate(`setTimeout(() => { void window.heiqiu.windowControl("close-quit"); }, 50); true`);
     const exitCode = await waitForExit(child);
     assert.equal(exitCode, 0, `Electron exited unexpectedly. Output:\n${output}`);
   } finally {
@@ -520,7 +540,7 @@ test("five semantic event scenarios traverse the real renderer stream reducer", 
     }
 
     assert.equal(fs.readdirSync(desktopRoot).length, 0, "semantic E2E must not touch the desktop");
-    await cdp.evaluate(`window.heiqiu.windowControl("close-quit")`);
+    await cdp.evaluate(`setTimeout(() => { void window.heiqiu.windowControl("close-quit"); }, 50); true`);
     const exitCode = await waitForExit(child);
     assert.equal(exitCode, 0, `Electron exited unexpectedly. Output:\n${output}`);
   } finally {

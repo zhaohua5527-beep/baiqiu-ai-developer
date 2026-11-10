@@ -17,7 +17,7 @@ test("a pinned instruction cannot be mistaken for bottom-following state", () =>
   const applyEnd = rendererSource.indexOf("function restoreSessionScrollPosition", applyStart);
   const apply = rendererSource.slice(applyStart, applyEnd);
 
-  assert.match(capture, /atBottom: !instructionAnchorId\(sessionId\) && isNearBottom\(messageList\)/);
+  assert.match(capture, /atBottom: !instructionAnchorId\(sessionId\) && distanceFromBottom <= 4/);
   assert.match(apply, /const restoreBottom = !keepInstructionAnchor &&/);
   assert.match(apply, /state\.followOutput = keepInstructionAnchor \? false/);
   assert.match(apply, /state\.manualOutputPause = keepInstructionAnchor \|\| !state\.followOutput/);
@@ -53,7 +53,7 @@ test("persistence refreshes keep the locked instruction coordinate without repos
   assert.match(transaction, /positionInstructionAnchor\(currentInstructionRow, instructionState\.targetOffset\)/);
   assert.match(renderMessages, /renderedMessageWindowMatches\(visibleMessages\)[\s\S]*?state\.lastMessageSignature = signature/);
   assert.match(renderMessages, /mutatePreservingMessageViewport\(\(\) => messageList\.replaceChildren\(fragment\)\)/);
-  assert.match(renderMessages, /const anchorLayoutChanged = sessionChanged \|\| messagesReplaced/);
+  assert.match(renderMessages, /if \(hasInstructionAnchor && !sessionChanged\)[\s\S]*?const anchorLayoutChanged = messagesReplaced/);
   assert.match(renderMessages, /applyInstructionAnchor\(session\.id, \{ reposition: anchorLocked && anchorLayoutChanged \}\)/);
   assert.match(renderMessages, /messagesReplaced && anchoredPosition && !anchorLocked/);
 });

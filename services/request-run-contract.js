@@ -122,6 +122,7 @@ function executionOutcomeFromResult(result = {}, evidence = evidenceFromResult(r
   ).toLowerCase();
   if (EXECUTION_OUTCOMES.has(explicit)) return explicit;
   const status = cleanText(result.status, 80).toLowerCase();
+  if (["awaiting_input", "awaiting_confirmation", "pending_confirmation"].includes(status)) return "none";
   if (["cancelled", "aborted"].includes(status) || result.cancelled === true) return "cancelled";
   if (status === "timed_out") return "timed_out";
   if (result.stopReason === "missing_public_final_envelope" && hasDurableEvidence(evidence)) return "succeeded";

@@ -41,12 +41,20 @@ function createPublicProgressHarness() {
   return vm.runInNewContext(`
     (() => {
       const chatStreamProgressSequences = new Map();
+      const chatStreamFrameSequences = new Map();
+      const chatStreamStarted = new Map();
+      const activeRuns = new Map();
+      const sent = [];
+      const traces = [];
+      const mainWindow = { isDestroyed: () => false, webContents: { send: (_name, frame) => sent.push(frame) } };
+      const writeCrossReplyTrace = (phase, meta) => traces.push({ phase, ...meta });
       const safeActivitySnippet = (value, maxLength) => String(value || "").slice(0, maxLength);
       const safeReasoningDelta = (value) => String(value || "");
       ${isPublic}
       ${target}
       ${normalize}
-      return { publicChatProgress };
+      ${sourceBetween(mainSource, "function emitChatStream(", "function safeReasoningDelta(")}
+      return { publicChatProgress, emitChatStream, sent, traces };
     })()
   `, { canonicalPublicEventTarget, normalizeSemanticType, semanticTypeFromEvent, targetForSemanticType });
 }
@@ -87,6 +95,29 @@ test("public progress retains producer sequences independently for each target",
   assert.equal(structured.target, "structured_result");
   assert.equal(structured.outputType, "structured_result");
   assert.equal(structured.kind, "public_reasoning");
+});
+
+test("stage results retain complete long Markdown across parsing, framing and persistence", () => {
+  const { HmsMessageStreamDemux } = require("../services/hms-progress");
+  const replay = require("../renderer-v2/persisted-replay");
+  const message = "## 阶段成果\n\n| 对象 | 金额 |\n| --- | --- |\n| A | 120 |\n\n"
+    + "完整正文🙂与换行。\n".repeat(2500) + "\n最后一行必须保留。";
+  const wire = `<baiqiu-progress>${JSON.stringify({ type: "stage_result", goalId: "invoice", segmentId: "one", message })}</baiqiu-progress>`;
+  const demux = new HmsMessageStreamDemux({ requireFinalEnvelope: false });
+  const events = [];
+  for (let offset = 0; offset < wire.length; offset += 137) events.push(...demux.consume(wire.slice(offset, offset + 137)).progressEvents);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].message, message);
+  const { emitChatStream, traces, sent } = createPublicProgressHarness();
+  const normalized = emitChatStream("session", "turn-long", { type: "phase", progress: events[0] }).progress;
+  assert.equal(normalized.message, message);
+  assert.equal(normalized.goalId, "invoice");
+  assert.equal(sent[0].progress.message, message);
+  assert.equal(traces[0].phase, "stage:sent");
+  assert.equal(traces[0].eventId, normalized.eventId);
+  assert.equal(traces[0].contentChars, message.length);
+  const restored = replay.structuredEventsFromMessage(JSON.parse(JSON.stringify({ role: "assistant", raw: { structuredEvents: [], productResult: { raw: { structuredEvents: [normalized] } } } })));
+  assert.equal(restored[0].message, message);
 });
 
 test("each stream retains Black Ball's public event sequence", () => {

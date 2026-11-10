@@ -13,6 +13,18 @@ const TSV_TABLE = [
   "```"
 ].join("\n");
 
+test("CJK quoted emphasis retains exact content without touching code or unmatched markers", () => {
+  const source = '把论点写到**"法律保留"**这一层，保留**普通重点**。\n\n`**"代码"**不变`\n\n~~~text\n**"围栏"**不变\n~~~\n\n未完成**重点';
+  const html = marked.parse(codeUtils.prepareAssistantMarkdownSource(source), {
+    gfm: true, tokenizer: codeUtils.createAssistantMarkdownTokenizer(marked.Tokenizer)
+  });
+  assert.match(html, /<strong>&quot;法律保留&quot;<\/strong>这一层/);
+  assert.match(html, /<strong>普通重点<\/strong>/);
+  assert.match(html, /<code>\*\*&quot;代码&quot;\*\*不变<\/code>/);
+  assert.match(html, /\*\*&quot;围栏&quot;\*\*不变/);
+  assert.match(html, /未完成\*\*重点/);
+});
+
 test("fenced TSV tables become GFM tables instead of hidden code", () => {
   const normalized = codeUtils.normalizeFencedTables(TSV_TABLE);
   assert.match(normalized, /\| Product \| Sales \| Impressions \|/);

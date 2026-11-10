@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const { runtimeOutcome, hasCommittedRuntimeDelivery } = require("./runtime-outcome");
 
 const OUTPUT_FILE_PATH_PATTERN = /[A-Za-z]:[\\/][^\r\n|<>"?*]+?\.(?:xlsx|xls|csv|docx|doc|pdf|pptx|ppt|txt|md|json|zip|png|jpe?g|webp)/gi;
 
@@ -71,7 +72,23 @@ function normalizeTrailingClarification(payload = {}) {
     .map((item) => typeof item === "string" ? { label: cleanText(item, 160), value: cleanText(item, 160) } : item)
     .filter((item) => item && cleanText(item.label || item.value, 160))
     .slice(0, 8);
-  return { cardType: "task_input", question, required, options, preserveTask: true };
+  return {
+    cardType: "task_input",
+    interactionMode: String(payload?.interactionMode || payload?.mode || "select_and_fill").trim() || "select_and_fill",
+    requestId: cleanText(payload?.requestId, 240),
+    sessionId: cleanText(payload?.sessionId, 240),
+    originalRequest: cleanText(payload?.originalRequest, 2000),
+    round: Number(payload?.round || 1),
+    dimension: cleanText(payload?.dimension, 120),
+    question,
+    reason: cleanText(payload?.reason, 500),
+    required,
+    options,
+    input: payload?.input && typeof payload.input === "object"
+      ? payload.input
+      : { enabled: true, placeholder: "也可以直接填写你的要求" },
+    preserveTask: true
+  };
 }
 
 function parseTrailingHmsProtocolObjects(text = "") {
@@ -215,6 +232,12 @@ function findOutcome(response = {}) {
 
 function evaluateHmsResponse(response = {}, { canonicalTask = false } = {}) {
   const text = cleanText(response?.text || response?.message);
+  if (response.status === "unknown") return { status: "unknown", success: undefined, verified: false, text };
+  const runtime = runtimeOutcome(response);
+  if (runtime && !["completed", "awaiting_input"].includes(runtime.status)) {
+    return { success: false, status: runtime.status === "cancelled" ? "cancelled" : "failed",
+      verified: true, text, error: "black_ball_" + runtime.status };
+  }
   const tools = successfulToolCalls(response);
   const files = generatedFiles(response);
   const delegations = completedDelegations(response);
@@ -237,10 +260,18 @@ function evaluateHmsResponse(response = {}, { canonicalTask = false } = {}) {
     return { success: true, status: "awaiting_input", verified: true, text, outcome, error: null };
   }
 
+  if (hasCommittedRuntimeDelivery(response)) {
+    return { success: true, status: runtime.status, verified: true, text, outcome, error: null };
+  }
   if (!canonicalTask) {
     return text
       ? { success: true, status: "completed", verified: true, text, outcome, error: null }
       : { success: false, status: "failed", verified: false, text, outcome, error: "conversation_response_text_invalid" };
+  }
+
+  if (runtime?.status === "completed") {
+    return { success: Boolean(text), status: text ? "completed" : "failed", verified: Boolean(text),
+      text, outcome, error: text ? null : "conversation_response_text_invalid" };
   }
 
   if (outcomeStatus === "failed" || outcomeStatus === "cancelled") {

@@ -30,7 +30,7 @@
     let destroyed = false;
     const completions = new Map();
     const progress = new WeakMap();
-    const interval = () => 1800 + Math.random() * 1200;
+    const interval = () => 1200 + Math.random() * 900;
     const owner = (face) => face?.closest('.streaming-activity, .thinking-message');
     const paint = (face, expression = 'neutral', closed = false) => {
       const image = face?.querySelector('.execution-short-task-features');
@@ -51,7 +51,7 @@
     };
     const reaction = () => {
       const root = owner(active);
-      if (root && root.dataset.lifecycle !== 'completed') {
+      if (root?.dataset.lifecycle === 'running') {
         const current = progress.get(root);
         return { expression: current?.expression || 'listening', remaining: Infinity };
       }
@@ -112,7 +112,7 @@
       if (destroyed) return;
       const candidates = [...container.querySelectorAll('.execution-short-task-face')]
         .filter((face) => !face.closest('[hidden], [aria-hidden="true"].streaming-activity'));
-      const running = candidates.filter((face) => owner(face)?.dataset.lifecycle !== 'completed');
+      const running = candidates.filter((face) => owner(face)?.dataset.lifecycle === 'running');
       const completed = candidates.filter((face) => owner(face)?.dataset.lifecycle === 'completed');
       const next = running.at(-1) || completed.at(-1) || null;
       if (next === active) {

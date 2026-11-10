@@ -1,5 +1,7 @@
 "use strict";
 
+const { runtimeOutcome, hasCommittedRuntimeDelivery } = require("./runtime-outcome");
+
 function cleanText(value, limit = 12000) {
   return String(value || "").replace(/\r\n/g, "\n").trim().slice(0, limit);
 }
@@ -8,6 +10,9 @@ function cleanText(value, limit = 12000) {
 // 未执行"，任务应标记 awaiting_input 而不是 completed——外层 task-brain 据此
 // 不会误把从未 prepare 的任务标成"已完成"。
 function conversationResultStatus(response = {}, { hasTask = false } = {}) {
+  if (response.status === "unknown") return "unknown";
+  const runtime = runtimeOutcome(response);
+  if (runtime) return ["completed", "awaiting_input"].includes(runtime.status) ? runtime.status : runtime.status === "cancelled" ? "cancelled" : "failed";
   const clarification = response && typeof response === "object" ? response.clarification : null;
   const isClarification = Boolean(
     clarification && typeof clarification === "object"
@@ -34,7 +39,7 @@ function normalizeAnswerResult(result) {
     error.response = result;
     throw error;
   }
-  if (!text) {
+  if (!text && !hasCommittedRuntimeDelivery(result)) {
     const error = new Error("Conversation response did not contain text");
     error.code = "RESPONSE_INVALID_ANSWER";
     error.response = result;

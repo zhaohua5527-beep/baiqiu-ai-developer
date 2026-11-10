@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "manifestType": "baiqiu-online-update",
+  "version": "0.0.0",
+  "releaseNotes": "Release machine must replace and sign this template before deployment.",
+  "downloadUrl": "http://47.108.191.67/releases/baiqiu-signed-release.zip",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "size": 0,
+  "packageType": "full-client",
+  "forceUpdate": false
+}

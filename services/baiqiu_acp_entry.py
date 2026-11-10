@@ -1,12 +1,14 @@
 from acp_adapter import entry
 
 import asyncio
+import hashlib
 import logging
 import json
 import os
 import re
 import time
 import uuid
+from pathlib import Path
 from urllib.parse import urlparse
 
 
@@ -60,6 +62,7 @@ def session_manager_class(base_class, load_config):
                     kwargs["api_mode"] = model_config["api_mode"]
             agent = super()._make_agent(**kwargs)
             agent._baiqiu_requested_provider = selected
+            agent._baiqiu_context_mode = config.get("baiqiu", {}).get("context_policy", "on")
             bind_provider_protocol(agent, config.get("baiqiu", {}).get("provider_protocol"))
             return agent
 
@@ -133,6 +136,38 @@ def bind_provider_protocol(agent, protocol=None):
     agent._build_api_kwargs = build_request
 
 
+async def wait_for_session_idle(state, conn, session_id, turn_id=""):
+    import acp
+
+    revision = getattr(state, "_baiqiu_cancel_revision", 0)
+    sequence = 0
+
+    async def publish(phase):
+        nonlocal sequence
+        sequence += 1
+        update = acp.update_agent_message_text("")
+        update.field_meta = {"baiqiu_diagnostic": {
+            "type": "session_waiting", "phase": phase,
+            "eventId": "session-wait:" + str(uuid.uuid4()),
+            "turnId": turn_id, "sequence": sequence,
+            "timestamp": int(time.time() * 1000),
+        }}
+        await conn.session_update(session_id, update)
+
+    waiting = state.is_running
+    if waiting:
+        await publish("waiting")
+    while state.is_running:
+        if getattr(state, "_baiqiu_cancel_revision", 0) != revision:
+            return False
+        await asyncio.sleep(0.05)
+    if getattr(state, "_baiqiu_cancel_revision", 0) != revision:
+        return False
+    if waiting:
+        await publish("ready")
+    return True
+
+
 def discard_interrupted_runtime_prompt(state, prompt):
     if not prompt:
         return False
@@ -193,11 +228,155 @@ def runtime_history_for_request(history):
     return result
 
 
+def context_request_profile(body):
+    def size(value):
+        try:
+            return len(json.dumps(value, ensure_ascii=False))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    body = body if isinstance(body, dict) else {}
+    messages = body.get("messages") or body.get("input") or []
+    if not isinstance(messages, list):
+        messages = []
+    result = {"contextChars": size(messages), "messageCount": len(messages),
+              "toolSchemaChars": size(body.get("tools") or []),
+              "systemChars": size(body.get("system") or body.get("instructions") or ""),
+              "userChars": 0, "assistantChars": 0, "toolResultChars": 0,
+              "toolCallChars": 0, "protocolReplayChars": 0, "imageDataChars": 0, "imageCount": 0}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        bucket = {"system": "systemChars", "developer": "systemChars", "user": "userChars",
+                  "assistant": "assistantChars", "tool": "toolResultChars"}.get(message.get("role"))
+        if bucket:
+            result[bucket] += size(message.get("content"))
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    result["imageCount"] += 1
+                    image_url = block.get("image_url")
+                    url = image_url.get("url", "") if isinstance(image_url, dict) else ""
+                    if isinstance(url, str) and url.startswith("data:"):
+                        result["imageDataChars"] += len(url)
+        if message.get("tool_calls"):
+            result["toolCallChars"] += size(message["tool_calls"])
+        for key in ("reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items", "codex_message_items"):
+            if message.get(key):
+                result["protocolReplayChars"] += size(message[key])
+    return result
+
+
+def context_protocol_supported(agent):
+    return (getattr(agent, "api_mode", "") == "chat_completions"
+            and (getattr(agent, "provider", ""), urlparse(getattr(agent, "base_url", "")).hostname,
+                 getattr(agent, "model", "")) in {
+                     ("deepseek", "api.deepseek.com", "deepseek-flash"),
+                     ("deepseek", "api.deepseek.com", "deepseek-v4-flash"),
+                     ("zai", "open.bigmodel.cn", "glm-5.3-flash"),
+                 })
+
+
+def archive_context_output(root, session_id, content, write=False):
+    session_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    payload = content.encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    directory = Path(root).resolve() / "context-evidence" / session_key
+    target = directory / (digest + ".txt")
+    if write:
+        directory.mkdir(parents=True, exist_ok=True)
+        if not target.exists() or target.read_bytes() != payload:
+            temporary = directory / (uuid.uuid4().hex + ".tmp")
+            try:
+                temporary.write_bytes(payload)
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        if target.read_bytes() != payload:
+            raise OSError("context_evidence_verification_failed")
+    return target.as_posix()
+
+
+def context_request_view(messages, *, mode="shadow", root=None, session_id="", current_index=-1,
+                         readable=False, local=True, supported=True, query=""):
+    mode = mode if mode in ("off", "shadow", "on") else "off"
+    before = len(json.dumps(messages, ensure_ascii=False))
+    metrics = {"contextPolicy": mode, "contextBeforeChars": before, "contextCandidateChars": before,
+               "contextSelectedChars": before, "contextOffloadedCount": 0,
+               "contextCandidateCount": 0, "contextArchiveFailures": 0, "contextRelevantCount": 0}
+    if mode == "off" or before < 120000 or not (readable and local and supported and root and session_id):
+        return messages, metrics
+    if not 0 <= current_index < len(messages) or messages[current_index].get("role") != "user":
+        return messages, metrics
+    previous_turns = [index for index, message in enumerate(messages[:current_index]) if message.get("role") == "user"]
+    if len(previous_turns) < 3:
+        return messages, metrics
+    boundary = previous_turns[-2]
+    calls = {}
+    for index, message in enumerate(messages):
+        for call in message.get("tool_calls") or []:
+            if isinstance(call, dict) and call.get("id"):
+                calls.setdefault(call["id"], []).append((index, call.get("function") or {}))
+    result = list(messages)
+    candidate = list(messages)
+    terms = set(re.findall(r"[a-zA-Z][a-zA-Z0-9_.:/-]{3,}", query.lower()))
+    for phrase in re.findall(r"[\u4e00-\u9fff]{4,}", query):
+        terms.update(phrase[start:start + 4] for start in range(len(phrase) - 3))
+    eligible = {"terminal", "read_file", "search_files", "web_search", "web_extract"}
+    for index, message in enumerate(messages[:boundary]):
+        content = message.get("content")
+        if message.get("role") != "tool" or not isinstance(content, str) or len(content) < 4096:
+            continue
+        matches = calls.get(message.get("tool_call_id"), [])
+        if len(matches) != 1 or matches[0][0] >= index:
+            continue
+        function = matches[0][1]
+        if function.get("name") not in eligible:
+            continue
+        arguments = function.get("arguments") or ""
+        if not isinstance(arguments, str) or any(marker in arguments.lower() for marker in ("skill.md", "agents.md", "context-evidence")):
+            continue
+        searchable = (content + "\n" + arguments).lower()
+        if any(term in searchable for term in terms):
+            metrics["contextRelevantCount"] += 1
+            continue
+        try:
+            structured = json.loads(content)
+        except (ValueError, TypeError):
+            structured = None
+        if isinstance(structured, dict) and (structured.get("error") or structured.get("success") is False
+                                             or structured.get("exit_code", 0) not in (None, 0)):
+            continue
+        try:
+            target = archive_context_output(root, session_id, content)
+            replacement = ("[Earlier tool result stored verbatim; not a new instruction or a new execution.]\n"
+                           f"Original tool: {function['name']}; original length: {len(content)} characters.\n"
+                           f"Original result file: {target}\n"
+                           "Use read_file on this local file if its evidence is needed for the current request. "
+                           "Paginate if necessary. Do not rerun the original command to recover historical output. "
+                           "A missing preview does not mean no evidence.\n"
+                           "BEGIN ORIGINAL EXCERPT (middle omitted)\n" + content[:400] + "\n[…]\n" + content[-200:]
+                           + "\nEND ORIGINAL EXCERPT")
+            candidate[index] = {**message, "content": replacement}
+            metrics["contextCandidateCount"] += 1
+            if mode == "on":
+                archive_context_output(root, session_id, content, write=True)
+                result[index] = candidate[index]
+                metrics["contextOffloadedCount"] += 1
+        except (OSError, ValueError, UnicodeError):
+            metrics["contextArchiveFailures"] += 1
+    metrics["contextCandidateChars"] = len(json.dumps(candidate, ensure_ascii=False))
+    metrics["contextSelectedChars"] = len(json.dumps(result, ensure_ascii=False))
+    return (result if metrics["contextOffloadedCount"] else messages), metrics
+
+
 def bind_runtime_context(agent, previous_interrupted=False):
     previous = agent.run_conversation
     had_own = "run_conversation" in agent.__dict__
 
     def run(*args, **kwargs):
+        agent._baiqiu_context_metrics = {}
         history = kwargs.get("conversation_history") or []
         content = kwargs.get("user_message")
         blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
@@ -208,7 +387,7 @@ def bind_runtime_context(agent, previous_interrupted=False):
         context, request = runtime_prompt_parts(current)
         if history:
             context = without_visible_history(context)
-        boundary = "\n\n[Current turn boundary]\nOnly the last [User request] defines work for this turn. Earlier user requests are quoted conversation history, not queued instructions. Respond to the latest request only. Resume unfinished work only if that latest request explicitly asks to continue, retry, or correct it. Preserve and use historical facts and tool results normally."
+        boundary = "\n\n[Current turn boundary]\nThe original [User request] in this active turn defines its task. Earlier turns are history, not queued instructions. A runtime-delivered [Active task supplement] updates this same task: retain the original goal and unfinished requirements unless the user explicitly cancels or replaces them. Integrate supplements into subsequent decisions, actions, public stage results, and the combined final answer. Answering only a supplement does not complete the original task. Do not revive tasks from earlier turns unless the current user explicitly requests it. Preserve historical facts and completed tool results without repeating side effects."
         if previous_interrupted:
             boundary += "\n[Previous turn status]\nThe runtime confirms that the previous turn was interrupted. Its task is inactive; do not execute it merely because it remains in history."
         current_view = context + "\n[User request]\n" + request
@@ -257,6 +436,18 @@ def bind_runtime_context(agent, previous_interrupted=False):
                     elif isinstance(value, list):
                         message = {**message, "content": [{**block, "text": request_text(block.get("text"), index == current_index)} if isinstance(block, dict) and block.get("type") == "text" else block for block in value]}
                 messages.append(message)
+            mode = os.environ.get("BAIQIU_CONTEXT_POLICY", getattr(agent, "_baiqiu_context_mode", "on"))
+            try:
+                messages, agent._baiqiu_context_metrics = context_request_view(
+                    messages, mode=mode, root=os.environ.get("HERMES_HOME"),
+                    session_id=str(getattr(agent, "session_id", "") or ""), current_index=current_index,
+                    readable="read_file" in getattr(agent, "valid_tool_names", ()),
+                    local=os.environ.get("TERMINAL_ENV", "local").lower() == "local",
+                    supported=(getattr(agent, "api_mode", "") == "chat_completions" if mode == "shadow"
+                               else context_protocol_supported(agent)), query=request)
+            except Exception:
+                agent._baiqiu_context_metrics = {"contextPolicy": "off", "contextArchiveFailures": 1}
+                logging.getLogger(__name__).warning("Context selection failed; keeping full request")
             return build(messages, *build_args, **build_kwargs)
 
         agent._build_api_kwargs = build_request
@@ -378,6 +569,65 @@ def make_tool_generation_callback(conn, session_id, loop):
     return tool_generating
 
 
+def bind_provider_usage(agent, conn, session_id, loop):
+    import acp
+    import threading
+    from acp_adapter.events import _send_update
+    try:
+        from agent.usage_pricing import normalize_usage
+    except ImportError:
+        return lambda: None
+
+    bindings = []
+    local = threading.local()
+
+    def bind(name):
+        previous = getattr(agent, name, None)
+        if not callable(previous):
+            return
+        had_own = name in agent.__dict__
+
+        def observed(*args, **kwargs):
+            nested = getattr(local, "active", False)
+            local.active = True
+            try:
+                response = previous(*args, **kwargs)
+            finally:
+                local.active = nested
+            if not nested and getattr(response, "usage", None):
+                try:
+                    usage = normalize_usage(response.usage, provider=agent.provider, api_mode=agent.api_mode)
+                    update = acp.update_agent_message_text("")
+                    update.field_meta = {"baiqiu_diagnostic": {
+                        "type": "provider_usage", "requestId": str(uuid.uuid4()),
+                        "inputTokens": usage.prompt_tokens, "outputTokens": usage.output_tokens,
+                        "totalTokens": usage.total_tokens, "timestamp": time.time_ns() // 1_000_000,
+                    }}
+                    for source, target in (("cache_read_tokens", "cacheReadTokens"), ("cache_write_tokens", "cacheWriteTokens")):
+                        value = getattr(usage, source, None)
+                        if isinstance(value, int) and value >= 0:
+                            update.field_meta["baiqiu_diagnostic"][target] = value
+                    _send_update(conn, session_id, loop, update)
+                except Exception:
+                    logging.getLogger(__name__).debug("Provider usage delivery failed", exc_info=True)
+            return response
+
+        setattr(agent, name, observed)
+        bindings.append((name, previous, observed, had_own))
+
+    for name in ("_interruptible_api_call", "_interruptible_streaming_api_call"):
+        bind(name)
+
+    def restore():
+        for name, previous, observed, had_own in bindings:
+            if getattr(agent, name, None) is observed:
+                if had_own:
+                    setattr(agent, name, previous)
+                else:
+                    delattr(agent, name)
+    return restore
+
+
 def bind_provider_timings(agent, conn, session_id, loop):
     import acp
     import httpx
@@ -414,7 +664,7 @@ def bind_provider_timings(agent, conn, session_id, loop):
                     publish("first_byte", self.request_id)
                 self.bytes_received += len(chunk)
                 observed_at = time.monotonic()
-                if chunk and observed_at - self.last_activity_at >= 1:
+                if chunk and observed_at - self.last_activity_at >= 0.25:
                     publish("stream_activity", self.request_id, bytesReceived=self.bytes_received)
                     self.last_activity_at = observed_at
                 yield chunk
@@ -432,6 +682,7 @@ def bind_provider_timings(agent, conn, session_id, loop):
         try:
             body = json.loads(request.content)
             details = {
+                **context_request_profile(body),
                 "toolCount": len(body.get("tools") or []),
                 "reasoningEffort": body.get("reasoning_effort"),
                 "thinkingEnabled": (body.get("thinking") or {}).get("type") == "enabled",
@@ -466,14 +717,10 @@ def bind_provider_timings(agent, conn, session_id, loop):
     def observed(*args, **kwargs):
         request_id = str(uuid.uuid4())
         api_kwargs = kwargs.get("api_kwargs") or {}
-        try:
-            context_chars = len(json.dumps(api_kwargs.get("messages") or [], ensure_ascii=False))
-        except (TypeError, ValueError):
-            context_chars = 0
         publish("client_prepare", request_id,
-                messageCount=len(api_kwargs.get("messages") or []),
+                **context_request_profile(api_kwargs),
+                **getattr(agent, "_baiqiu_context_metrics", {}),
                 toolCount=len(api_kwargs.get("tools") or []),
-                contextChars=context_chars,
                 runtimeContextCount=sum(json.dumps(message.get("content") or "", ensure_ascii=False).count("[Runtime context]") for message in api_kwargs.get("messages", []) if message.get("role") == "user"),
                 visibleHistoryCount=sum(json.dumps(message.get("content") or "", ensure_ascii=False).count("[Recent visible conversation]") for message in api_kwargs.get("messages", []) if message.get("role") == "user"))
         client = previous(*args, **kwargs)
@@ -486,8 +733,26 @@ def bind_provider_timings(agent, conn, session_id, loop):
         return client
 
     setattr(agent, name, observed)
+    original_build = getattr(agent, "_build_api_kwargs", None)
+    had_build = "_build_api_kwargs" in agent.__dict__
+
+    def build_request(messages, *args, **kwargs):
+        identity = str(uuid.uuid4())
+        publish("context_prepare", identity)
+        request = original_build(messages, *args, **kwargs)
+        publish("context_ready", identity, **context_request_profile(request),
+                **getattr(agent, "_baiqiu_context_metrics", {}))
+        return request
+
+    if callable(original_build):
+        agent._build_api_kwargs = build_request
 
     def restore():
+        if getattr(agent, "_build_api_kwargs", None) is build_request:
+            if had_build:
+                agent._build_api_kwargs = original_build
+            else:
+                del agent._build_api_kwargs
         if getattr(agent, name, None) is observed:
             if had_own:
                 setattr(agent, name, previous)
@@ -534,12 +799,53 @@ def main():
     from hermes_cli.config import load_config
 
     install_remote_probe_guard()
+    from baiqiu_windows_process import install_windows_probe_guard
+    install_windows_probe_guard()
     install_tool_completion_compat()
+    from baiqiu_tool_execution import install_tool_execution
+    try:
+        install_tool_execution()
+    except (RuntimeError, AttributeError):
+        logging.getLogger(__name__).exception("Tool execution compatibility mismatch; retaining native runtime")
+    from baiqiu_protocol_recovery import install_protocol_recovery, bind_protocol_recovery
+    install_protocol_recovery()
     manager = session_manager_class(SessionManager, load_config)()
 
     logger = logging.getLogger(__name__)
 
     class BaiqiuACPAgent(HermesACPAgent):
+        def on_connect(self, conn):
+            from baiqiu_run_state import RunStateStore, ObservedConnection
+            self.run_states = RunStateStore(Path(os.environ["HERMES_HOME"]) / "baiqiu-runs")
+            super().on_connect(ObservedConnection(conn, self.run_states))
+
+        async def ext_method(self, method, params):
+            if method == "baiqiu/supplement":
+                session_id = str(params.get("sessionId", ""))
+                turn_id = str(params.get("turnId", ""))
+                state = self.session_manager.get_session(session_id)
+                channel = getattr(state, "_baiqiu_supplements", None)
+                if channel and channel.record["turnId"] == turn_id:
+                    receipt = await asyncio.to_thread(channel.receive, params.get("supplementId"), params.get("text"))
+                else:
+                    snapshot = self.run_states.snapshot(session_id, turn_id)
+                    item = snapshot.get("supplements", {}).get(params.get("supplementId"))
+                    if item and item["text"] != params.get("text"):
+                        raise ValueError("Conflicting supplement identity")
+                    receipt = dict(accepted=bool(item), status=item["status"] if item else "not_running",
+                                   supplementId=params.get("supplementId"))
+                return dict(receipt, sessionId=session_id, turnId=turn_id)
+            if method != "baiqiu/run_status":
+                raise acp.RequestError.method_not_found(method)
+            return self.run_states.snapshot(str(params.get("sessionId", "")),
+                                            str(params.get("turnId", "")), params.get("afterSequence"))
+
+        async def cancel(self, session_id, **kwargs):
+            state = self.session_manager.get_session(session_id)
+            if state is not None:
+                state._baiqiu_cancel_revision = getattr(state, "_baiqiu_cancel_revision", 0) + 1
+            return await super().cancel(session_id, **kwargs)
+
         async def _register_session_mcp_servers(self, state, mcp_servers):
             await super()._register_session_mcp_servers(state, mcp_servers)
             try:
@@ -556,8 +862,28 @@ def main():
 
         async def prompt(self, prompt, session_id, **kwargs):
             state = self.session_manager.get_session(session_id)
-            if state is None or state.is_running or not self._conn:
+            turn_id = (getattr(prompt[0], "field_meta", None) or {}).get("baiqiuTurnId", "") if prompt else ""
+            if not state or not turn_id:
+                return await self._prompt_with_status(prompt, session_id, **kwargs)
+            if not await wait_for_session_idle(state, self._conn, session_id, turn_id):
+                return acp.schema.PromptResponse(stop_reason="cancelled")
+            record = self.run_states.begin(session_id, turn_id)
+            try:
+                response = await self._prompt_with_status(prompt, session_id, **kwargs)
+            except BaseException:
+                self.run_states.finish(record, "error", error=True)
+                raise
+            outcome = self.run_states.finish(record, response.stop_reason)
+            response.field_meta = {**(response.field_meta or {}), "baiqiuRun": outcome}
+            return response
+
+        async def _prompt_with_status(self, prompt, session_id, **kwargs):
+            state = self.session_manager.get_session(session_id)
+            if state is None or not self._conn:
                 return await super().prompt(prompt, session_id, **kwargs)
+            turn_id = (getattr(prompt[0], "field_meta", None) or {}).get("baiqiuTurnId", "") if prompt else ""
+            if not await wait_for_session_idle(state, self._conn, session_id, turn_id):
+                return acp.schema.PromptResponse(stop_reason="cancelled")
             previous_interrupted = discard_interrupted_runtime_prompt(state, prompt)
             agent = state.agent
             if not hasattr(agent, "tool_gen_callback"):
@@ -578,18 +904,79 @@ def main():
             agent.tool_gen_callback = tool_generating
             restore_diagnostics = bind_provider_diagnostics(agent, self._conn, session_id, asyncio.get_running_loop())
             restore_timings = bind_provider_timings(agent, self._conn, session_id, asyncio.get_running_loop())
+            restore_usage = bind_provider_usage(agent, self._conn, session_id, asyncio.get_running_loop())
             restore_context = bind_runtime_context(agent, previous_interrupted)
             from baiqiu_async_delivery import bind_async_delivery
             finish_delivery = bind_async_delivery(state)
+            delivery_run = agent.run_conversation
+            record = self.run_states.active.get(session_id)
+            from baiqiu_supplements import TurnSupplements, bind_supplements
+            from acp_adapter.events import _send_update
+            event_loop = asyncio.get_running_loop()
+
+            def publish_supplement(diagnostic):
+                update = acp.update_agent_message_text("")
+                update.field_meta = {"baiqiu_diagnostic": diagnostic}
+                _send_update(self._conn, session_id, event_loop, update)
+
+            supplements = TurnSupplements(agent, record, publish_supplement,
+                lambda: bool(state.cancel_event and state.cancel_event.is_set()),
+                self.run_states.checkpoint) if record else None
+            state._baiqiu_supplements = supplements
+
+            def tracked_run(*args, **options):
+                result = delivery_run(*args, **options)
+                while supplements:
+                    continuation = supplements.finish_or_continue(result)
+                    if not continuation:
+                        break
+                    next_result = delivery_run(user_message=continuation,
+                        conversation_history=result.get("messages") or [], task_id=session_id,
+                        persist_user_message=continuation)
+                    for key in ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens", "cache_read_tokens"):
+                        if result.get(key) is not None or next_result.get(key) is not None:
+                            next_result[key] = (result.get(key) or 0) + (next_result.get(key) or 0)
+                    result = next_result
+                stage_delivery = getattr(agent, "_baiqiu_stage_delivery", None)
+                if record and stage_delivery and stage_delivery.terminal_delivery:
+                    record["completion"] = stage_delivery.terminal_delivery
+                return self.run_states.capture(record, result) if record else result
+
+            agent.run_conversation = tracked_run
             delivery_succeeded = False
+            recovery, restore_recovery = bind_protocol_recovery(
+                agent, self._conn, session_id, asyncio.get_running_loop(),
+                lambda: bool(state.cancel_event and state.cancel_event.is_set()),
+                turn_id=(getattr(prompt[0], "field_meta", None) or {}).get("baiqiuTurnId", "") if prompt else "",
+                history=state.history)
+            restore_stage_delivery = lambda: None
+            restore_supplements = lambda: None
             try:
+                if any("[Black Ball event ownership / Public structured progress protocol]" in str(getattr(block, "text", "")) for block in prompt):
+                    from baiqiu_stage_delivery import bind_stage_delivery
+                    stage_delivery, restore_stage_delivery = bind_stage_delivery(
+                        agent, self._conn, session_id, asyncio.get_running_loop(),
+                        lambda: bool(state.cancel_event and state.cancel_event.is_set()), turn_id, state.history)
+                    stage_delivery.supplements = supplements
+                if supplements and callable(getattr(agent, "_build_api_kwargs", None)):
+                    restore_supplements = bind_supplements(agent, supplements)
                 response = await super().prompt(prompt, session_id, **kwargs)
-                delivery_succeeded = response.stop_reason == "end_turn"
+                delivery_succeeded = response.stop_reason == "end_turn" and not recovery.pending
+                if response.stop_reason != "cancelled" and recovery.pending:
+                    response.stop_reason = "refusal"
                 return response
             finally:
+                restore_supplements()
+                if getattr(state, "_baiqiu_supplements", None) is supplements:
+                    del state._baiqiu_supplements
+                restore_stage_delivery()
+                restore_recovery()
+                if agent.run_conversation is tracked_run:
+                    agent.run_conversation = delivery_run
                 finish_delivery(delivery_succeeded)
                 restore_context()
                 restore_timings()
+                restore_usage()
                 restore_diagnostics()
                 if agent.tool_gen_callback is tool_generating:
                     agent.tool_gen_callback = previous

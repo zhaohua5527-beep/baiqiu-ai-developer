@@ -1,0 +1,10 @@
+{
+  "createdAt": "2026-10-09T20:58:28.086Z",
+  "files": {
+    "main.js": "ea2d7985e63938f11ef0eca4ba4f9cc0b80e12c9919b058baafba2d913add14a",
+    "preload.js": "0cec65e7570605b2cb8a513b70e790d6f2e76d7bb5b963f4f1549604d42af5e2",
+    "browser-preload.js": "d27fff93b2097a48b31b58fcf25ba25b0dde289998440354d0868501bb808120",
+    "tool-registry.js": "83254daff05ae8225d4840779c7753d35cc514ea71be427b082f2ae93e4d820b",
+    "tool-loader.js": "da78c2f21c96f5b30c0e599cd0f879017264de1442452d193a44973d2d64157c"
+  }
+}

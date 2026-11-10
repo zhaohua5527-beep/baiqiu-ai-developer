@@ -1,6 +1,6 @@
 {
   "name": "baiqiu-ai",
-  "version": "3.0.23",
+  "version": "3.0.28",
   "description": "Baiqiu AI desktop client with Black Ball execution",
   "main": "main.js",
   "packageManager": "pnpm@11.9.0",
@@ -89,6 +89,7 @@
     "files": [
       "*.js",
       "*.json",
+      "!baiqiu-mode.json",
       "!app.js",
       "assets/**/*",
       "core/**/*",
@@ -96,6 +97,7 @@
       "renderer-v2/**/*",
       "server/*.js",
       "server/*.json",
+      "!server/license-db.json",
       "services/**/*",
       "!services/agents{,/**/*}",
       "!services/attention{,/**/*}",

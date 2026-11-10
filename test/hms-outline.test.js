@@ -127,11 +127,9 @@ test("directories are created only after final content is stable", () => {
   assert.match(rendererSource, /evaluateLongReply\(row, rendered, displayText, options\)/);
 });
 
-test("plain novel chapter lines are promoted into real navigable headings", () => {
-  assert.match(rendererSource, /const NOVEL_CHAPTER_HEADING_LINE =/);
-  assert.match(rendererSource, /function promoteNovelChapterHeadings\(text = ""\)/);
-  assert.match(rendererSource, /return `## \$\{trimmed\}`;/);
-  assert.match(rendererSource, /const normalizedSource = promoteNovelChapterHeadings\(source\);/);
+test("plain chapter lines remain prose and explicit headings stay navigable", () => {
+  assert.doesNotMatch(rendererSource, /promoteNovelChapterHeadings/);
+  assert.match(rendererSource, /const normalizedSource = source;/);
   assert.match(rendererSource, /element,/);
   assert.match(rendererSource, /const anchorElement = heading\?\.element \|\| heading;/);
 });

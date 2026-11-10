@@ -11,7 +11,7 @@
       .map((item) => String(item?.id || item?.path || `${item?.name || ""}:${item?.sizeBytes || item?.size || 0}`))
       .sort();
     const quote = task.quote && typeof task.quote === "object"
-      ? String(task.quote.messageId || task.quote.text || "").trim()
+      ? JSON.stringify([task.quote.sessionId || "", task.quote.messageId || "", task.quote.selectionText || "", task.quote.text || ""])
       : "";
     const context = task.context && typeof task.context === "object" ? JSON.stringify(task.context) : "";
     return JSON.stringify([text, attachments, quote, context]);
@@ -21,6 +21,8 @@
     constructor() {
       this.queues = new Map();
       this.activeSessions = new Set();
+      this.pendingRuns = new Map();
+      this.pausedSessions = new Set();
       this.sequence = 0;
     }
 
@@ -45,6 +47,8 @@
         ui: task.ui && typeof task.ui === "object" ? { ...task.ui } : null,
         quote: task.quote && typeof task.quote === "object" ? { ...task.quote } : null,
         autoStart: task.autoStart === true,
+        supplement: task.supplement !== false,
+        deliveryMode: task.deliveryMode === "steer" ? "steer" : "queue",
         fingerprint,
         createdAt: task.createdAt || Date.now()
       };
@@ -61,6 +65,7 @@
       if (patch.ui && typeof patch.ui === "object") task.ui = { ...patch.ui };
       if (Object.prototype.hasOwnProperty.call(patch, "quote")) task.quote = patch.quote && typeof patch.quote === "object" ? { ...patch.quote } : null;
       if (Object.prototype.hasOwnProperty.call(patch, "autoStart")) task.autoStart = patch.autoStart === true;
+      if (Object.prototype.hasOwnProperty.call(patch, "deliveryMode")) task.deliveryMode = patch.deliveryMode === "steer" ? "steer" : "queue";
       task.fingerprint = taskFingerprint(task);
       return task;
     }
@@ -115,6 +120,47 @@
 
     isActive(sessionId) {
       return this.activeSessions.has(String(sessionId || ""));
+    }
+
+    beginRun(sessionId, runId) {
+      const key = String(sessionId || "");
+      this.pendingRuns.set(key, { runId, cancelled: false });
+      this.pausedSessions.delete(key);
+    }
+
+    finishRun(sessionId, runId, completed) {
+      const key = String(sessionId || "");
+      const pending = this.pendingRuns.get(key);
+      if (!pending || pending.runId !== runId) return false;
+      this.pendingRuns.delete(key);
+      if (!completed || pending.cancelled) this.pausedSessions.add(key);
+      return true;
+    }
+
+    pause(sessionId) {
+      const key = String(sessionId || "");
+      this.pausedSessions.add(key);
+      const pending = this.pendingRuns.get(key);
+      if (pending) pending.cancelled = true;
+    }
+
+    resume(sessionId) {
+      this.pausedSessions.delete(String(sessionId || ""));
+    }
+
+    isPaused(sessionId) {
+      return this.pausedSessions.has(String(sessionId || ""));
+    }
+
+    isPending(sessionId) {
+      return this.pendingRuns.has(String(sessionId || ""));
+    }
+
+    restore(sessionId, task) {
+      const key = String(sessionId || "");
+      const queue = this.list(key);
+      if (!this.queues.has(key)) this.queues.set(key, queue);
+      if (!queue.some(item => item.id === task.id)) queue.unshift(task);
     }
   }
 

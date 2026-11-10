@@ -27,7 +27,7 @@ function listFiles(root, relative = "") {
     const child = path.join(relative, entry.name);
     if (entry.isDirectory()) return listFiles(root, child);
     if (!entry.isFile()) return [];
-    if (child === "release-manifest.json") return [];
+    if (child === "release-manifest.json" || child === "release-files.json") return [];
     const file = path.join(root, child);
     return [{
       path: child.replace(/\\/g, "/"),
@@ -123,6 +123,24 @@ function main() {
   const executable = findExecutable(clientDir);
   addLegacyExecutableAlias(clientDir, executable, compatibilityArg);
   const executablePath = path.join(clientDir, executable);
+  const completeFiles = listFiles(clientDir).sort((left, right) => left.path.localeCompare(right.path));
+  const inventory = {
+    schemaVersion: 1,
+    packageType: "full-client-files",
+    version,
+    files: completeFiles
+  };
+  const inventoryPath = path.join(clientDir, "release-files.json");
+  fs.writeFileSync(inventoryPath, `${JSON.stringify(inventory)}\n`, "utf8");
+  const compatibilityFiles = completeFiles
+    .filter((file) => !file.path.startsWith("resources/app/node_modules/"));
+  compatibilityFiles.push({
+    path: "release-files.json",
+    size: fs.statSync(inventoryPath).size,
+    sha256: sha256(inventoryPath)
+  });
+  compatibilityFiles.sort((left, right) => left.path.localeCompare(right.path));
+
   const manifest = {
     schemaVersion: 1,
     packageType: "full-client",
@@ -133,7 +151,7 @@ function main() {
       size: fs.statSync(executablePath).size,
       sha256: sha256(executablePath)
     },
-    files: listFiles(clientDir).sort((left, right) => left.path.localeCompare(right.path))
+    files: compatibilityFiles
   };
 
   fs.writeFileSync(path.join(clientDir, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
@@ -159,7 +177,8 @@ function main() {
     version,
     packageType: manifest.packageType,
     executable,
-    fileCount: manifest.files.length,
+    fileCount: completeFiles.length,
+    compatibilityFileCount: manifest.files.length,
     outputFile,
     size: fs.statSync(outputFile).size,
     sha256: sha256(outputFile)

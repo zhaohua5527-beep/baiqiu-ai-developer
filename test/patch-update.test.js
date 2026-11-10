@@ -94,3 +94,42 @@ test("full-client ZIP inspection accepts Windows archive path separators", async
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("full-client ZIP inspection allows manifests larger than the patch limit", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "baiqiu-large-full-update-test-"));
+  try {
+    const zip = new JSZip();
+    const files = Array.from({ length: 9000 }, (_item, index) => ({
+      path: `resources/app/node_modules/package-${index}/file-${index}.js`,
+      size: index,
+      sha256: "d".repeat(64)
+    }));
+    const manifest = JSON.stringify({
+      packageType: "full-client",
+      version: "3.0.26",
+      executable: { path: "BaiqiuAI.exe", sha256: "c".repeat(64) },
+      files
+    });
+    assert.ok(Buffer.byteLength(manifest) > 1024 * 1024);
+    zip.file("client/release-manifest.json", manifest);
+    const output = path.join(root, "large-client.zip");
+    fs.writeFileSync(output, await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }));
+    const inspected = inspectUpdatePackage(output, { toVersion: "3.0.26" });
+    assert.equal(inspected.packageType, "full-client");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("file-patch ZIP inspection keeps the one megabyte manifest limit", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "baiqiu-large-patch-test-"));
+  try {
+    const zip = new JSZip();
+    zip.file("patch-manifest.json", "x".repeat((1024 * 1024) + 1));
+    const output = path.join(root, "large-patch.zip");
+    fs.writeFileSync(output, await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }));
+    assert.throws(() => inspectUpdatePackage(output), /Patch manifest is too large/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

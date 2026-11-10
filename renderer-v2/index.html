@@ -93,7 +93,7 @@
         <section id="messageList" class="message-list"></section>
         <aside id="composerClarification" class="intent-predict-panel" aria-label="建议选项" hidden>
           <div class="intent-predict-head">
-            <strong>意图预测</strong>
+            <strong>任务引导</strong>
             <button id="composerClarificationAbort" class="intent-predict-abort" type="button" title="终止当前任务" aria-label="终止当前任务">×</button>
           </div>
           <div id="composerClarificationQuestion" class="intent-predict-question" hidden></div>
@@ -103,10 +103,6 @@
       <section id="productTaskStrip" class="product-task-strip" hidden></section>
       <section id="attachmentPreview" class="attachment-preview" hidden></section>
       <section id="queuePanel" class="queue-panel" aria-label="预置任务" hidden>
-        <div class="queue-heading">
-          <span><strong>预置任务</strong><small>按顺序等待执行</small></span>
-          <button id="queueClearBtn" type="button">清空</button>
-        </div>
         <div id="queueList" class="queue-list"></div>
       </section>
       <form id="chatForm" class="composer">
@@ -312,7 +308,7 @@
     <button id="messageQuoteBtn" type="button" role="menuitem"><span aria-hidden="true">↳</span><strong>引用</strong></button>
     <button id="messageKnowledgeBtn" type="button" role="menuitem"><span aria-hidden="true">+</span><strong>沉淀</strong></button>
   </div>
-  <div id="presetTaskContextMenu" class="preset-task-context-menu" role="menu" aria-label="预置任务操作" hidden>
+  <div id="presetTaskContextMenu" class="preset-task-context-menu" role="menu" aria-label="补充操作" hidden>
     <button id="presetTaskEditBtn" type="button" role="menuitem"><span aria-hidden="true">✎</span><strong>编辑</strong></button>
   </div>
   <div id="copyToast" class="copy-toast" hidden>已复制</div>
@@ -1384,6 +1380,7 @@
   <script src="../services/membership-utils.js"></script>
       <script src="../services/knowledge/knowledge-keyline.js"></script>
   <script src="../services/assistant-code-utils.js"></script>
+  <script src="../services/answer-document.js"></script>
   <script src="../services/result-ast.js"></script>
       <script src="./knowledge-universe-3d.bundle.js"></script>
       <script src="./session-task-queue.js"></script>
@@ -1392,6 +1389,7 @@
       <script src="./context-menu-position.js"></script>
       <script src="../services/black-ball-public-event-contract.js"></script>
       <script src="./persisted-replay.js"></script>
+      <script src="./token-usage.js"></script>
       <script src="./event-aggregator.js"></script>
       <script src="./mini-theatre.js"></script>
       <script src="./task-face.js"></script>

@@ -9,6 +9,7 @@ const PATCH_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAvgwkCd/0+G/cd8K3eSxfSHtPHY4lR1jA2TP1zhn6NZM=
 -----END PUBLIC KEY-----`;
 const MAX_PATCH_MANIFEST_BYTES = 1024 * 1024;
+const MAX_FULL_CLIENT_MANIFEST_BYTES = 16 * 1024 * 1024;
 
 function canonicalValue(value) {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -100,10 +101,10 @@ function zipEntry(zipPath, wantedName) {
   return null;
 }
 
-function readZipEntry(zipPath, wantedName, maximumSize = MAX_PATCH_MANIFEST_BYTES) {
+function readZipEntry(zipPath, wantedName, maximumSize = MAX_PATCH_MANIFEST_BYTES, manifestLabel = "Patch manifest") {
   const entry = zipEntry(zipPath, wantedName);
   if (!entry) return null;
-  if (entry.uncompressedSize > maximumSize || entry.compressedSize > maximumSize) throw new Error("Patch manifest is too large");
+  if (entry.uncompressedSize > maximumSize || entry.compressedSize > maximumSize) throw new Error(`${manifestLabel} is too large`);
   const header = readAt(zipPath, entry.localOffset, 30);
   if (header.length !== 30 || header.readUInt32LE(0) !== 0x04034b50) throw new Error("Update ZIP local entry is invalid");
   const nameLength = header.readUInt16LE(26);
@@ -143,7 +144,8 @@ function inspectUpdatePackage(zipPath, options = {}) {
     catch { throw new Error("Patch manifest is not valid JSON"); }
     return { packageType: "file-patch", manifest: verifyPatchManifest(manifest, options) };
   }
-  const fullContent = readZipEntry(zipPath, "client/release-manifest.json") || readZipEntry(zipPath, "release-manifest.json");
+  const fullContent = readZipEntry(zipPath, "client/release-manifest.json", MAX_FULL_CLIENT_MANIFEST_BYTES, "Full update manifest")
+    || readZipEntry(zipPath, "release-manifest.json", MAX_FULL_CLIENT_MANIFEST_BYTES, "Full update manifest");
   if (!fullContent) throw new Error("Full update package is missing release-manifest.json");
   let manifest;
   try { manifest = JSON.parse(fullContent.toString("utf8").replace(/^\uFEFF/, "")); }
@@ -153,6 +155,8 @@ function inspectUpdatePackage(zipPath, options = {}) {
 
 module.exports = {
   PATCH_PUBLIC_KEY,
+  MAX_PATCH_MANIFEST_BYTES,
+  MAX_FULL_CLIENT_MANIFEST_BYTES,
   canonicalValue,
   patchPayload,
   signPatchManifest,

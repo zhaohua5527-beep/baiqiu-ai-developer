@@ -98,6 +98,7 @@ contextBridge.exposeInMainWorld("heiqiu", {
   reorderSessions: (ids) => ipcRenderer.invoke("session:reorder", ids),
   messages: (id, query = null) => ipcRenderer.invoke("session:messages", id, query),
   appendMessage: (id, message) => ipcRenderer.invoke("session:append-message", id, message),
+  removeMessage: (id, messageId) => ipcRenderer.invoke("session:remove-message", id, messageId),
   pathForFile: (file) => webUtils.getPathForFile(file),
   userProfile: () => ipcRenderer.invoke("user-profile:get"),
   updateUserProfile: (payload) => ipcRenderer.invoke("user-profile:update", payload || {}),
@@ -106,6 +107,18 @@ contextBridge.exposeInMainWorld("heiqiu", {
   listModels: (provider) => ipcRenderer.invoke("models:list", provider),
   verifyModel: (provider) => ipcRenderer.invoke("models:verify", provider),
   configureModel: (provider) => ipcRenderer.invoke("models:configure", provider),
+  modelSettings: () => ipcRenderer.invoke("models:settings"),
+  deleteModelConfiguration: (payload) => ipcRenderer.invoke("models:delete", payload),
+  onModelConfigurationProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("models:configuration-progress", listener);
+    return () => ipcRenderer.removeListener("models:configuration-progress", listener);
+  },
+  onModelConfigurationFailure: (callback) => {
+    const listener = (_event, failure) => callback(failure);
+    ipcRenderer.on("models:configuration-failed", listener);
+    return () => ipcRenderer.removeListener("models:configuration-failed", listener);
+  },
   setModelEnabled: (payload) => ipcRenderer.invoke("models:set-enabled", payload),
   setModelReasoning: (value) => ipcRenderer.invoke("models:set-reasoning", value),
   modelRuntimeState: () => ipcRenderer.invoke("models:runtime-state"),
@@ -143,6 +156,8 @@ contextBridge.exposeInMainWorld("heiqiu", {
   productTaskResult: (taskId) => ipcRenderer.invoke("product:task-result", taskId),
   productTaskHistory: (options) => ipcRenderer.invoke("product:task-history", options),
   signalAbortChat: (payload) => ipcRenderer.send("chat:abort-signal", payload),
+  queryRunStatus: (payload) => ipcRenderer.invoke("chat:run-status", payload),
+  supplementChat: (payload) => ipcRenderer.invoke("chat:supplement", payload),
   abortChat: (id) => ipcRenderer.invoke("chat:abort", id),
   transcribeAudio: (payload) => ipcRenderer.invoke("voice:transcribe", payload || {}),
   voiceStatus: () => ipcRenderer.invoke("voice:status"),
@@ -156,6 +171,7 @@ contextBridge.exposeInMainWorld("heiqiu", {
   spreadsheetPreview: (attachment) => ipcRenderer.invoke("system:spreadsheet-preview", attachment),
   spreadsheetAiPlan: (payload) => ipcRenderer.invoke("system:spreadsheet-ai-plan", payload),
   spreadsheetSave: (payload) => ipcRenderer.invoke("system:spreadsheet-save", payload),
+  documentSave: (payload) => ipcRenderer.invoke("system:document-save", payload),
   previewAttachment: (attachment) => ipcRenderer.invoke("system:preview-attachment", attachment),
   previewWebpage: (target) => ipcRenderer.invoke("system:preview-webpage", target),
   browserSearch: (query, maxResults = 8) => ipcRenderer.invoke("browser:search", query, maxResults),

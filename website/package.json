@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
     "test:e2e": "node -e \"process.env.PLAYWRIGHT_BROWSERS_PATH=process.env.PLAYWRIGHT_BROWSERS_PATH||'D:/Codex/baiqiu-ai-developer/website/.playwright-browsers'; require('child_process').spawnSync('npx',['playwright','test'],{stdio:'inherit',env:process.env,shell:true})\"",

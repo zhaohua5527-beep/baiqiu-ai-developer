@@ -17,19 +17,16 @@ function functionSegment(name, nextName) {
   return rendererSource.slice(start, end > start ? end : start + 12000);
 }
 
-test("preset interruption signals the active controller before awaiting persistence", () => {
+test("confirming a supplement continues the active task without aborting it", () => {
   const start = functionSegment("startQueuedTask", "clearQueueSortIndicators");
-  const signalAt = start.indexOf("api.signalAbortChat?.");
-  const firstAwaitAt = start.indexOf("await api.abortChat");
-
-  assert.ok(signalAt >= 0, "preset interruption must send the fast abort signal");
-  assert.ok(firstAwaitAt > signalAt, "fast abort signal must precede the first persistence await");
-  assert.doesNotMatch(start.slice(0, firstAwaitAt), /setTimeout|api\.init/);
+  assert.doesNotMatch(start, /signalAbortChat|api\.abortChat|abortCurrentTask|api\.init/);
+  assert.match(start, /finishQueuedTaskEdit\(session, task\)/);
+  assert.match(start, /autoStart: true, deliveryMode: "steer"/);
+  assert.match(start, /processQueue\(session\.id\)/);
   assert.doesNotMatch(rendererSource, /waitForQueuedTaskAbortSettlement/);
-  assert.match(start, /taskState\.textContent = "正在切换预置任务"/);
 });
 
-test("fast abort IPC validates run identity and separates timeout from user cancellation", () => {
+test("fast abort IPC validates run identity and separates timeout inspection from user cancellation", () => {
   assert.match(preloadSource, /signalAbortChat: \(payload\) => ipcRenderer\.send\("chat:abort-signal", payload\)/);
   const signalStart = mainSource.indexOf('ipcMain.on("chat:abort-signal"');
   const fullAbortStart = mainSource.indexOf('ipcMain.handle("chat:abort"', signalStart);
@@ -39,20 +36,22 @@ test("fast abort IPC validates run identity and separates timeout from user canc
   assert.match(signal, /activeRuns\.get\(requestedId\)/);
   assert.match(signal, /requestedRunId && !cancelRequestTargetsRun\(requestedRunId, run\)/);
   assert.match(signal, /const timeoutRequested = String\(abortRequest\.reason \|\| ""\)\.toLowerCase\(\) === "timeout"/);
-  assert.match(signal, /if \(timeoutRequested\) \{[\s\S]*?run\.timedOut = true;[\s\S]*?\} else \{[\s\S]*?run\.userAborted = true;/);
-  assert.match(signal, /run\.controller\.abort\(timeoutRequested \? \{ code: "TASK_TIMEOUT", message: run\.timeoutReason \} : undefined\)/);
+  const timeoutBranch = signal.slice(signal.indexOf("if (timeoutRequested) {"), signal.indexOf("} else {"));
+  assert.match(timeoutBranch, /run\.queryRuntimeStatus/);
+  assert.doesNotMatch(timeoutBranch, /run\.controller\.abort/);
   assert.doesNotMatch(signal, /\bawait\b|loadDb\(/);
 });
 
-test("preset rows expose editing and restore text plus attachments", () => {
+test("preset rows edit locally without replacing the composer or opening a dialog", () => {
   const render = functionSegment("renderQueue", "renderSettings");
-  const restore = functionSegment("restoreQueuedTaskToComposer", "waitForVisibleOutputDrain");
+  const editor = functionSegment("editQueuedTaskInline", "finalizeVisibleStreamNow");
 
   assert.match(render, /data-action="edit"/);
-  assert.match(render, /restoreQueuedTaskToComposer\(selected, task\)/);
-  assert.match(restore, /chatInput\.value = task\.text \|\| ""/);
-  assert.match(restore, /state\.attachments = \[\.\.\.\(task\.attachments \|\| \[\]\)\]/);
-  assert.match(restore, /state\.composerQuote = task\.quote/);
+  assert.match(render, /editQueuedTaskInline\(selected, task\)/);
+  assert.match(render, /queue-task-editor/);
+  assert.match(editor, /autoStart: false/);
+  assert.match(editor, /task\.editText = task\.text \|\| ""/);
+  assert.doesNotMatch(editor, /chatInput\.value\s*=|state\.attachments\s*=|state\.composerQuote\s*=|createElement\("dialog"\)|showModal|processQueue/);
 });
 
 test("an interrupted sender cannot clear a replacement sender", () => {

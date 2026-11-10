@@ -23,10 +23,25 @@ const NON_CONVERSATIONAL_MODEL_PATTERN = /(?:^|[-_.])(?:asr|tts|stt|embedding|em
 function providerHttpError(response, payload = {}, context = {}) {
   const status = Number(response?.status || 0);
   const message = payload?.error?.message || payload?.message || `HTTP ${status || "unknown"}`;
-  const error = new Error(String(message));
+  const providerCode = String(payload?.error?.code || payload?.code || "");
+  let publicMessage = String(message);
+  if (/does not have a valid CodingPlan subscription|subscription has expired/i.test(publicMessage)) {
+    publicMessage = "火山方舟返回：当前账号没有有效的 Coding Plan 订阅或订阅已过期。请核对套餐状态与 Base URL；不会自动切换到按量计费接口。";
+  } else if (/has not activated the model/i.test(publicMessage)) {
+    publicMessage = `火山方舟返回：当前账号尚未开通模型 ${context.model || ""}，请在方舟控制台开通对应模型服务后重试。`;
+  } else if (/model or endpoint .* does not exist or you do not have access/i.test(publicMessage)) {
+    publicMessage = `供应商返回：模型或接入点 ${context.model || ""} 不存在，或当前密钥没有访问权限。请核对模型 ID / 接入点 ID、开通状态及 Base URL。`;
+  } else if (status === 401) {
+    publicMessage = `供应商拒绝了身份验证（HTTP 401）。请核对 API Key 是否有效，以及它是否属于当前接口地址。原始原因：${message}`;
+  } else if (status === 405) {
+    publicMessage = `接口不接受当前请求方法（HTTP 405）。请核对 Base URL 是否为 API 地址，以及 Chat / Messages 协议是否匹配。原始原因：${message}`;
+  }
+  const error = new Error(publicMessage);
   error.code = status ? `PROVIDER_HTTP_${status}` : "PROVIDER_HTTP_ERROR";
   error.status = status || null;
   error.statusCode = status || null;
+  error.providerCode = providerCode;
+  error.providerMessage = String(message);
   error.providerId = String(context.providerId || "");
   error.providerName = String(context.providerName || context.providerId || "");
   error.model = String(context.model || "");
@@ -84,18 +99,21 @@ function mapModelCapabilities(models = [], provider = {}) {
 
 function normalizeProvider(id, provider = {}) {
   const preset = PRESET_PROVIDERS[id] || {};
-  const baseURL = String(provider.baseURL || preset.baseURL || "")
+  const apiStyle = String(provider.apiStyle || preset.apiStyle || "openai").trim().toLowerCase();
+  let baseURL = String(provider.baseURL || preset.baseURL || "")
     .trim()
-    .replace(/\/(?:chat\/completions|responses|models)\/?$/i, "")
+    .replace(/\/+$/, "")
+    .replace(/\/(?:chat\/completions|responses|messages|models)$/i, "")
     .replace(/\/+$/, "");
+  if (apiStyle === "anthropic" && baseURL && !/\/v1$/i.test(baseURL)) baseURL += "/v1";
   return {
     id,
     ...preset,
     ...provider,
     name: provider.name || preset.name || id,
     baseURL,
-    model: provider.model || preset.model || "",
-    apiStyle: preset.apiStyle || provider.apiStyle || "openai",
+    model: String(provider.model || preset.model || "").trim(),
+    apiStyle,
     requiresApiKey: provider.requiresApiKey !== undefined ? Boolean(provider.requiresApiKey) : preset.requiresApiKey !== false,
     local: Boolean(provider.local || preset.local),
     apiKeyUrl: String(provider.apiKeyUrl || preset.apiKeyUrl || "").trim()
@@ -122,24 +140,58 @@ function normalizeOpenAICompatibleMessages(messages = []) {
   });
 }
 
-async function listProviderModels({ providerId, provider, fetchImpl = fetch, signal = null }) {
+function deepSeekModelMetadataFromHtml(html, models = []) {
+  const { load } = require("cheerio");
+  const document = load(html);
+  const metadata = {};
+  document("table").each((_index, table) => {
+    const rows = document(table).find("tr").map((_rowIndex, row) => [document(row).children("td,th").map((_cellIndex, cell) => {
+      const content = document(cell).clone();
+      content.find("sup").remove();
+      return content.text().trim();
+    }).get()]).get();
+    const ids = rows.find(row => row[0] === "模型")?.slice(1) || [];
+    const versions = rows.find(row => row[0] === "模型版本")?.slice(1) || [];
+    if (ids.length !== versions.length) return;
+    ids.forEach((id, index) => {
+      if (models.includes(id) && versions[index] && versions[index].length <= 160) {
+        metadata[id] = { displayName: versions[index], source: "https://api-docs.deepseek.com/zh-cn/quick_start/pricing" };
+      }
+    });
+  });
+  return metadata;
+}
+
+async function listProviderModels({ providerId, provider, fetchImpl = fetch, signal = null, includeMetadata = false }) {
   const normalized = normalizeProvider(providerId, provider);
   if (!normalized.baseURL) throw new Error(`模型 ${normalized.name} 缺少 Base URL`);
   if (normalized.requiresApiKey && !normalized.apiKey) throw new Error(`请先填写 ${normalized.name} 的 API Key。`);
-  const response = await fetchImpl(`${normalized.baseURL}/models`, {
-    method: "GET",
-    headers: providerHeaders(normalized),
-    signal: signal || undefined
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw providerHttpError(response, payload, {
-      providerId,
-      providerName: normalized.name,
-      debug: { providerId, providerName: normalized.name, status: response.status, ok: false }
+  const rows = [];
+  const cursors = new Set();
+  let cursor = "";
+  do {
+    const url = new URL(`${normalized.baseURL}/models`);
+    if (cursor) url.searchParams.set("after_id", cursor);
+    const response = await fetchImpl(url.toString(), {
+      method: "GET",
+      headers: providerHeaders(normalized),
+      signal: signal || undefined
     });
-  }
-  const rows = Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : [];
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw providerHttpError(response, payload, {
+        providerId,
+        providerName: normalized.name,
+        debug: { providerId, providerName: normalized.name, status: response.status, ok: false }
+      });
+    }
+    rows.push(...(Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : []));
+    cursor = payload.has_more === true ? String(payload.last_id || "") : "";
+    if (payload.has_more === true && (!cursor || cursors.has(cursor) || cursors.size >= 100)) {
+      throw new Error("模型目录分页未完成，请稍后重新获取。");
+    }
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
   const allModels = rows
     .map((item) => typeof item === "string" ? item : item?.id)
     .filter((id) => typeof id === "string" && id.trim())
@@ -149,12 +201,34 @@ async function listProviderModels({ providerId, provider, fetchImpl = fetch, sig
   if (!allModels.length) throw new Error("供应商没有返回可用模型 ID。请检查 Base URL 是否为 API 地址。");
   const models = conversationModelIds(allModels);
   if (!models.length) throw new Error("供应商返回的型号不包含可用于黑球对话的文本模型。");
+  const catalogSource = `${normalized.baseURL}/models`;
+  const modelMetadata = Object.fromEntries(rows.filter(item => item && typeof item === "object" && models.includes(item.id))
+    .map(item => [item.id, { displayName: String(item.display_name || item.name || item.id).trim().slice(0, 160), source: catalogSource }]));
+  let metadataWarning = "";
+  if (includeMetadata && new URL(normalized.baseURL).origin === "https://api.deepseek.com") {
+    try {
+      const timeout = AbortSignal.timeout(4000);
+      const response = await fetchImpl("https://api-docs.deepseek.com/zh-cn/quick_start/pricing", {
+        headers: { Accept: "text/html" }, signal: signal ? AbortSignal.any([signal, timeout]) : timeout
+      });
+      if (!response.ok) throw new Error("official model details unavailable");
+      const official = deepSeekModelMetadataFromHtml(await response.text(), models);
+      if (!Object.keys(official).length) throw new Error("official model details changed");
+      Object.assign(modelMetadata, official);
+    } catch {
+      metadataWarning = "目录已更新，官方版本名称暂未获取；当前显示真实 API ID。";
+    }
+  }
   return {
     providerId,
     providerName: normalized.name,
     baseURL: normalized.baseURL,
     models,
     allModels,
+    modelMetadata,
+    metadataWarning,
+    catalogSource,
+    fetchedAt: new Date().toISOString(),
     modelCapabilities: mapModelCapabilities(models, normalized)
   };
 }
@@ -210,6 +284,8 @@ async function callChatCompletion({ providerId, provider, body, fetchImpl = fetc
       body: JSON.stringify(requestBody),
       signal: requestController.signal
     });
+    clearTimeout(responseTimer);
+    return await readChatCompletionResponse(response, { providerId, normalized, requestModel, requestBody, url, startedAt, onDelta });
   } catch (error) {
     if (responseTimedOut) {
       const timeoutError = new Error("模型在 30 秒内没有建立响应，请检查模型连接、API Key 或供应商状态。");
@@ -221,6 +297,9 @@ async function callChatCompletion({ providerId, provider, body, fetchImpl = fetc
     clearTimeout(responseTimer);
     signal?.removeEventListener?.("abort", relayAbort);
   }
+}
+
+async function readChatCompletionResponse(response, { providerId, normalized, requestModel, requestBody, url, startedAt, onDelta }) {
   if (requestBody.stream === true && response.ok && response.body && /(?:text\/event-stream|stream)/i.test(response.headers.get("content-type") || "")) {
     return readStreamedChatCompletion(response, {
       providerId,
@@ -232,7 +311,10 @@ async function callChatCompletion({ providerId, provider, body, fetchImpl = fetc
       onDelta
     });
   }
-  const payload = await response.json().catch(() => ({}));
+  const payload = await response.json().catch(error => {
+    if (error.name === "AbortError") throw error;
+    return {};
+  });
   payload._debug = {
     providerId,
     providerName: normalized.name,
@@ -292,11 +374,11 @@ async function readStreamedChatCompletion(response, options = {}) {
   }, FIRST_STREAM_DELTA_TIMEOUT_MS);
   const toolCalls = [];
   const emit = (delta) => {
-    if (typeof options.onDelta === "function" && delta && (delta.content || delta.reasoningContent || delta.toolCall)) {
+    if (delta && (delta.content || delta.reasoningContent || delta.toolCall)) {
       firstDeltaSeen = true;
       clearTimeout(firstDeltaTimer);
       firstDeltaTimer = null;
-      options.onDelta(delta);
+      if (typeof options.onDelta === "function") options.onDelta(delta);
     }
   };
   const consumeEvent = (eventText) => {
@@ -434,27 +516,34 @@ function completionText(payload = {}) {
 }
 
 async function probeProvider({ providerId, provider, fetchImpl = fetch, signal = null }) {
+  const startedAt = Date.now();
   const normalized = normalizeProvider(providerId, provider);
-  const payload = await callChatCompletion({
-    providerId,
-    provider: normalized,
-    body: {
-      model: normalized.model,
-      messages: [
-        { role: "system", content: "You are a connection verifier. Follow the user's output format exactly." },
-        { role: "user", content: `只回复 ${MODEL_PROBE_TOKEN}，不要添加其他内容。` }
-      ],
-      // 推理模型（如 deepseek-v4-*）会先消耗大量 token 做"思考"，32 个 token
-      // 常被思考过程耗尽，正式回复 content 为空 → 校验词永远无法出现。
-      // 提高到 512 保证校验词能写进 content。
-      max_tokens: 512,
-      stream: false
-    },
-    fetchImpl,
-    signal
-  });
+  const body = {
+    model: normalized.model,
+    messages: [
+      { role: "system", content: "You are a connection verifier. Follow the user's output format exactly." },
+      { role: "user", content: `只回复 ${MODEL_PROBE_TOKEN}，不要添加其他内容。` }
+    ],
+    max_tokens: 512,
+    stream: false
+  };
+  let payload = await callChatCompletion({ providerId, provider: normalized, body, fetchImpl, signal });
+  let probeAttempts = 1;
+  if (!completionText(payload) && payload.choices?.[0]?.finish_reason === "length") {
+    body.max_tokens = 4096;
+    probeAttempts += 1;
+    payload = await callChatCompletion({ providerId, provider: normalized, body, fetchImpl, signal });
+  }
   const text = completionText(payload);
-  if (!text) throw new Error("模型接口已响应，但没有返回可用的文本内容。");
+  if (!text) {
+    const error = new Error(payload.choices?.[0]?.finish_reason === "length"
+      ? "模型连接已建立，但连接验证的输出预算耗尽，尚未得到正文；不能据此判定 API Key 或路由无效。"
+      : "模型接口已响应，但没有返回可用的文本内容。");
+    error.code = "MODEL_PROBE_EMPTY_TEXT";
+    error.debug = { ...payload._debug, finishReason: payload.choices?.[0]?.finish_reason,
+      completionTokens: payload.usage?.completion_tokens, probeAttempts, probeTokenBudget: body.max_tokens };
+    throw error;
+  }
   return {
     providerId,
     providerName: normalized.name,
@@ -463,9 +552,11 @@ async function probeProvider({ providerId, provider, fetchImpl = fetch, signal =
     verified: true,
     verificationScope: "direct_text",
     verifiedApiStyle: normalized.apiStyle,
+    probeAttempts,
+    probeTokenBudget: body.max_tokens,
     instructionCompliant: text.includes(MODEL_PROBE_TOKEN),
     verifiedAt: new Date().toISOString(),
-    latencyMs: payload._debug?.durationMs ?? null,
+    latencyMs: Date.now() - startedAt,
     statusCode: payload._debug?.status ?? null
   };
 }
@@ -501,6 +592,7 @@ async function probeReasoningControl({ providerId, provider, fetchImpl = fetch, 
       reasoningVerifiedAt: new Date().toISOString()
     };
   } catch (error) {
+    signal?.throwIfAborted();
     return {
       ...inferred,
       reasoningMode: "prompt",
@@ -512,23 +604,28 @@ async function probeReasoningControl({ providerId, provider, fetchImpl = fetch, 
 }
 
 async function verifyProviderConnection({ providerId, provider, fetchImpl = fetch, signal = null }) {
+  const normalized = normalizeProvider(providerId, provider);
+  const probe = await probeProvider({ providerId, provider: normalized, fetchImpl, signal });
   let models = [];
   let allModels = [];
   let modelListWarning = "";
   let modelListVerified = false;
   try {
-    const listed = await listProviderModels({ providerId, provider, fetchImpl, signal });
+    const discoveryTimeout = AbortSignal.timeout(8000);
+    const listed = await listProviderModels({ providerId, provider: normalized, fetchImpl,
+      signal: signal ? AbortSignal.any([signal, discoveryTimeout]) : discoveryTimeout });
     models = listed.models;
     allModels = listed.allModels;
     modelListVerified = true;
   } catch (error) {
+    signal?.throwIfAborted();
     modelListWarning = error?.message || String(error);
   }
-  const normalized = normalizeProvider(providerId, provider);
-  if (modelListVerified && !models.includes(normalized.model)) {
-    throw new Error(`${normalized.name} 当前账号不支持文本模型 ${normalized.model}。请选择供应商真实返回的型号。`);
+  if (!models.includes(normalized.model)) {
+    if (modelListVerified) modelListWarning = "所选模型未出现在模型目录中，但已通过真实正文请求验证。目录不代表账号的全部可调用型号或接入点。";
+    models = [normalized.model, ...models];
   }
-  const probe = await probeProvider({ providerId, provider, fetchImpl, signal });
+  signal?.throwIfAborted();
   const reasoningControl = await probeReasoningControl({ providerId, provider: normalized, fetchImpl, signal });
   const modelCapabilities = mapModelCapabilities(models.length ? models : [normalized.model], normalized);
   modelCapabilities[normalized.model] = reasoningControl;
@@ -541,6 +638,7 @@ module.exports = {
   callChatCompletion,
   completionText,
   conversationModelIds,
+  deepSeekModelMetadataFromHtml,
   inferredModelCapabilities,
   isConversationModelId,
   listProviderModels,

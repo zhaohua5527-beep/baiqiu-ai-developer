@@ -26,16 +26,15 @@ test("WeChat QR uses HMS iLink endpoints and stores confirmed credentials", () =
   assert.doesNotMatch(mainSource, /黑球微信网关尚未接入白球桥接|wechat_qr_unavailable/);
 });
 
-test("HMS GatewayRunner mirrors real WeChat turns into a locked read-only session", () => {
+test("HMS GatewayRunner mirrors real WeChat turns into the interactive session", () => {
   assert.match(bridgeSource, /wechat-gateway-runtime\.py/);
-  assert.match(gatewayRuntimeSource, /from gateway\.run import main/);
+  assert.match(gatewayRuntimeSource, /from gateway\.run import GatewayRunner, main/);
   assert.match(gatewayRuntimeSource, /WeixinAdapter\.set_message_handler/);
-  assert.match(gatewayRuntimeSource, /response = await handler\(event\)/);
-  assert.match(mainSource, /ensureWechatChatSession\(\{ select: false \}\)/);
+  assert.match(gatewayRuntimeSource, /WeixinAdapter\.handle_message = _handle_message_with_mirror/);
+  assert.match(mainSource, /ensureWechatChatSession\(\{ select: false, includeSnapshot: false \}\)/);
   assert.match(mainSource, /raw: \{ wechat: true/);
-  assert.doesNotMatch(preloadSource, /wechatSend:/);
-  assert.match(mainSource, /readOnly: true/);
-  assert.match(rendererSource, /微信聊天仅供查看和同步/);
+  assert.match(preloadSource, /wechatSend:/);
+  assert.match(mainSource, /async function realWechatGatewaySend/);
   assert.match(bridgeSource, /s\.source = 'weixin'/);
   assert.match(bridgeSource, /m\.role IN \('user', 'assistant'\)/);
   assert.match(mainSource, /async function syncWechatGatewayHistory/);
@@ -54,23 +53,46 @@ test("WeChat QR is requested on first open and polled until connected", () => {
   assert.match(rendererSource, /scheduleWechatQrPolling\(\)/);
   assert.match(rendererSource, /if \(state\.wechat\.connected\)[\s\S]*stopWechatQrPolling\(\)/);
   assert.match(rendererSource, /const qrExpired = status\.qrStatus === "expired"/);
+  assert.match(mainSource, /const qr = await realWechatGatewayQr\(\{ afterUnbind: true \}\)/);
+});
+
+test("WeChat keeps files as attachment cards and queues ordinary follow-ups", () => {
+  assert.match(gatewayRuntimeSource, /"attachments": attachments/);
+  assert.match(gatewayRuntimeSource, /HERMES_GATEWAY_BUSY_INPUT_MODE.*queue/);
+  assert.match(gatewayRuntimeSource, /HERMES_GATEWAY_BUSY_TEXT_MODE.*queue/);
+  assert.match(bridgeSource, /_legacy_document_attachment/);
+  assert.match(bridgeSource, /"attachments": attachments/);
+  assert.match(mainSource, /if \(\(!text && !attachments\.length\)/);
+  assert.match(mainSource, /persistAttachmentForMessage\(item\)/);
+  assert.match(rendererSource, /const deliveredFiles = taskPresentation/);
+  assert.match(rendererSource, /className = "message-file-link"/);
 });
 
 test("WeChat is one locked real conversation at the top of the normal chat list", () => {
   assert.match(mainSource, /return \{ ok: true, db: rendererDbSnapshot/);
-  assert.match(mainSource, /ensureWechatChatSession\(\{ select: false \}\);[\s\S]*db = loadDb\(\)/);
+  assert.match(mainSource, /ensureWechatChatSession\(\{ select: false, includeSnapshot: false \}\)/);
   assert.doesNotMatch(rendererSource, /createWechatSessionShortcut|data-wechat-shortcut|wechat-session-shortcut/);
   assert.doesNotMatch(stylesSource, /\.wechat-session-shortcut/);
-  assert.match(rendererSource, /sessions\.filter\(\(session\) => isChatListSession\(session\)[\s\S]*\.sort\(\(a, b\) => isWechatChatSession\(a\) === isWechatChatSession\(b\) \? 0 : isWechatChatSession\(a\) \? -1 : 1\)/);
+  assert.match(rendererSource, /isWechatChatSession\(a\) === isWechatChatSession\(b\) \? 0 : isWechatChatSession\(a\) \? -1 : 1/);
   assert.match(rendererSource, /for \(const session of unassigned\) chatSection\.appendChild\(createProjectSessionNode\(session, \{ batchSelectable: true \}\)\)/);
-  assert.match(rendererSource, /button\.innerHTML = isWechat\s*\? `<span class="project-session-name" title="微信聊天">微信聊天<\/span>`/);
+  assert.match(rendererSource, /button\.innerHTML = isWechat/);
   assert.doesNotMatch(rendererSource, /wechat-session-component|同步微信聊天记录/);
   assert.match(rendererSource, /function renderComposerSessionMode\(session = selectedSession\(\)\)/);
-  assert.match(rendererSource, /chatForm\.hidden = isWechat/);
+  assert.match(rendererSource, /chatForm\.hidden = false/);
   assert.match(rendererSource, /if \(!isWechat\) button\.addEventListener\("contextmenu"/);
-  assert.match(rendererSource, /isChatListSession\(session\) && !session\.systemLocked && !isWechatChatSession\(session\)/);
-  const plainWechatRow = rendererSource.slice(rendererSource.indexOf("button.innerHTML = isWechat"), rendererSource.indexOf("if (!isWechat) updateSessionStatusIndicator"));
+  assert.match(rendererSource, /!session\.systemLocked && !isWechatChatSession\(session\)/);
+  const plainWechatRow = rendererSource.slice(rendererSource.indexOf("button.innerHTML = isWechat"), rendererSource.indexOf("if (!isWechat && !isTrashed) updateSessionStatusIndicator"));
   assert.doesNotMatch(plainWechatRow.split(": `", 1)[0], /ai-core|session-status-indicator|扫码|未连接/);
+});
+
+test("stopping during startup prevents a late worker from spawning", async () => {
+  let starts = 0;
+  const worker = new WechatGatewayWorker({ spawnProcess: () => { starts++; } });
+  const pending = worker.status({ pythonPath: "fixture", agentRoot: "fixture" });
+  await worker.stop();
+  await assert.rejects(pending, /启动已取消/);
+  assert.equal(starts, 0);
+  assert.equal(worker.child, null);
 });
 
 test("WeChat worker keeps one HMS bridge process for QR and status", async () => {
@@ -89,8 +111,7 @@ test("WeChat worker keeps one HMS bridge process for QR and status", async () =>
   const worker = new WechatGatewayWorker({ scriptPath });
   const runtime = { pythonPath: process.execPath, agentRoot: fixture, hermesHome: fixture };
   try {
-    const qr = await worker.qr(runtime);
-    const status = await worker.qrStatus(runtime);
+    const [qr, status] = await Promise.all([worker.qr(runtime), worker.qrStatus(runtime)]);
     assert.equal(qr.pid, status.pid);
     assert.equal(qr.action, "qr");
     assert.equal(status.action, "qr-status");

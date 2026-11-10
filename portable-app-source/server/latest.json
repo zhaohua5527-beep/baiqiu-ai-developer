@@ -1,0 +1,19 @@
+{
+  "name": "白球 AI",
+  "version": "3.0.4.0",
+  "latestVersion": "3.0.4.0",
+  "downloadUrl": "http://47.108.191.67/baiqiu-3.0.4.0.zip",
+  "packageUrl": "http://47.108.191.67/baiqiu-3.0.4.0.zip",
+  "sha256": "237021c91b5a1bfa9c3a415521508c460c783e068ff6f5f2dae81cea307f7c20",
+  "checksum": "237021c91b5a1bfa9c3a415521508c460c783e068ff6f5f2dae81cea307f7c20",
+  "size": 1061463043,
+  "fileSize": 1061463043,
+  "zipSize": 1061463043,
+  "packageType": "full-client",
+  "forceUpdate": true,
+  "releaseNotes": "白球AI max V1 3.0.4：修复逐字显示与跟随滚动、会话列表字体、在线更新兼容性，并完整内置黑球运行时。",
+  "changelog": "白球AI max V1 3.0.4：修复逐字显示与跟随滚动、会话列表字体、在线更新兼容性，并完整内置黑球运行时。",
+  "installerUrl": "http://47.108.191.67/download/baiqiu-3.0.4.0-setup.exe",
+  "installerSha256": "1206763d3b73679d3b53b3f85d6c84d5814c842dba65cb8a1ea242942a00a442",
+  "installerSize": 1408532
+}

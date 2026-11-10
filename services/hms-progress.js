@@ -250,7 +250,8 @@ function publicReasoningDelta(value = "", maxLength = 1200) {
   // safety pass only; White Ball must not rewrite or summarize Black Ball's
   // public reasoning.
   let text = String(value || "")
-    .replace(/<\/?baiqiu-(?:progress|presentation|outcome|clarification|outline|answer|final)(?:\s+[^>]*)?>/gi, "")
+    .replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1|`[^`\n]*`|<\/?baiqiu-(?:progress|presentation|outcome|clarification|outline|answer|final)(?:\s+[^>]*)?>/gi,
+      match => match.startsWith("<") ? "" : match)
     .replace(/\[(?:Runtime context|System prompt|White Ball tool result)\]/gi, "")
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
   text = text.replace(SECRET_PATTERNS[0], "[已隐藏密钥]");
@@ -475,7 +476,7 @@ function progressEvents(value = {}) {
   // from three fields, which made every turn look identical and obscured the
   // actual update. Keep the authored message as-is and leave milestone fields
   // as transport metadata instead of presenting them as reasoning.
-  const message = publicReasoningDelta(payload.message || payload.summary || "", 20000).trim();
+  const message = publicReasoningDelta(payload.message || payload.summary || "", Number.MAX_SAFE_INTEGER).trim();
   if (!isConcretePublicReasoning(message)) return [];
   return [{
     source: "hms",
@@ -489,19 +490,50 @@ function progressEvents(value = {}) {
     status,
     track: "public_progress",
     message,
+    ...(typeof payload.goalId === "string" ? { goalId: payload.goalId.slice(0, 160) } : {}),
     ...(payload.completed ? { completed: publicText(payload.completed, 240) } : {}),
     ...(payload.next ? { next: publicText(payload.next, 240) } : {}),
     ...(evidenceToolCallIds.length ? { evidenceToolCallIds } : {}),
-    ...(segmentId ? { segmentId } : {})
+    ...(segmentId ? { segmentId, nativeSegmentId: segmentId } : {})
   }];
 }
 
 function parseProgressEnvelope(value = "") {
   try {
-    return progressEvents(JSON.parse(String(value || "").trim()));
+    const source = String(value || "").trimStart();
+    const header = progressMarkdownHeader(source);
+    if (!header) return progressEvents(JSON.parse(source.trim()));
+    const tail = source.slice(header.length);
+    if ("message" in header.value || "summary" in header.value || !/^\r?\n/.test(tail)
+      || !["stage_result", "cross"].includes(header.value.type)
+      || typeof header.value.segmentId !== "string" || !header.value.segmentId.trim()) return [];
+    const message = tail.replace(/^\r?\n/, "").replace(/\r?\n$/, "");
+    const prose = message.replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?\1|`[^`\n]*`/g, "");
+    if (!message.trim() || /<\/?(?:baiqiu-|[｜|]{1,2}DSML)/i.test(prose)) return [];
+    return progressEvents({ ...header.value, message });
   } catch {
     return [];
   }
+}
+
+function progressMarkdownHeader(source = "") {
+  const leading = source.length - source.trimStart().length;
+  const json = balancedJsonSlice(source, leading);
+  if (!json) return null;
+  try {
+    const value = JSON.parse(json);
+    return value?.schemaVersion === 2 ? { value, length: leading + json.length } : null;
+  } catch {
+    return null;
+  }
+}
+
+function markdownProgressCloseIndex(source, start) {
+  const tail = source.slice(start);
+  const masked = tail.replace(/^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^[ \t]*\1[ \t]*$|$(?![\s\S]))/gm,
+    match => " ".repeat(match.length));
+  const close = /^[ \t]*<\/baiqiu-progress>[ \t]*(?=\r?$)/im.exec(masked);
+  return close ? start + close.index + close[0].indexOf("<") : -1;
 }
 
 function partialTagLength(value = "", tag = PROGRESS_OPEN_TAG) {
@@ -570,6 +602,10 @@ function stripTrailingPartialHmsProtocol(value = "") {
 
 function answerOpenMatch(value = "") {
   return /<baiqiu-answer\b[^>]*>/i.exec(String(value || ""));
+}
+
+function progressOpenMatch(value = "") {
+  return /<baiqiu-progress["']?>/i.exec(String(value || ""));
 }
 
 // Some providers occasionally emit a closing progress tag where the next
@@ -645,8 +681,9 @@ function firstProtocolOpenIndex(value = "") {
   const text = String(value || "");
   const lower = text.toLowerCase();
   const indexes = [
-    lower.indexOf(PROGRESS_OPEN_TAG),
+    progressOpenMatch(text)?.index ?? -1,
     answerOpenMatch(text)?.index ?? -1,
+    /<baiqiu-(?:presentation|outcome|clarification|outline)\b[^>]*>/i.exec(text)?.index ?? -1,
     lower.indexOf(FINAL_OPEN_TAG)
   ].filter((index) => index >= 0);
   return indexes.length ? Math.min(...indexes) : -1;
@@ -688,6 +725,7 @@ class HmsMessageStreamDemux {
     this.pendingProgressClose = false;
     this.protocolSeen = false;
     this.protocolMalformed = false;
+    this.progressProtocolMalformed = false;
     this.publicProgressDelta = "";
     this.answerDeltas = [];
     this.completedSegments = [];
@@ -742,7 +780,44 @@ class HmsMessageStreamDemux {
         this.inActionFence = false;
         continue;
       }
-      const progressStart = this.buffer.toLowerCase().indexOf(PROGRESS_OPEN_TAG);
+      if (this.pendingAnswerSegmentId) {
+        const pendingId = this.pendingAnswerSegmentId;
+        const leadingWhitespace = /^\s+/.exec(this.buffer)?.[0] || "";
+        if (leadingWhitespace) {
+          this.buffer = this.buffer.slice(leadingWhitespace.length);
+          if (!this.buffer) break;
+          continue;
+        }
+        const pendingAnswer = answerOpenMatch(this.buffer);
+        const lower = this.buffer.toLowerCase();
+        if (pendingAnswer?.index === 0) {
+          this.buffer = this.buffer.slice(pendingAnswer[0].length);
+          this.pendingAnswerSegmentId = "";
+          this.inAnswer = true;
+          this.segmentedAnswerSeen = true;
+          this.currentSegmentId = this.normalizeSegmentId(answerSegmentId(pendingAnswer[0], pendingId));
+          this.nextSegmentIndex += 1;
+          continue;
+        }
+        if (lower.startsWith(ANSWER_CLOSE_TAG)) {
+          this.buffer = this.buffer.slice(ANSWER_CLOSE_TAG.length);
+          this.pendingAnswerSegmentId = "";
+          this.completedSegments.push(pendingId);
+          this.streamEvents.push({ type: "answer_end", segmentId: pendingId });
+          continue;
+        }
+        if (progressOpenMatch(this.buffer)?.index === 0 || lower.startsWith(FINAL_OPEN_TAG)) {
+          this.pendingAnswerSegmentId = "";
+          continue;
+        }
+        if (partialProtocolSuffixLength(this.buffer) === this.buffer.length) break;
+        this.pendingAnswerSegmentId = "";
+        this.inAnswer = true;
+        this.segmentedAnswerSeen = true;
+        this.currentSegmentId = pendingId;
+        continue;
+      }
+      const progressStart = progressOpenMatch(this.buffer)?.index ?? -1;
       const pendingProgress = !this.inAnswer && !this.inFinal && progressStart >= 0
         && firstProtocolOpenIndex(this.buffer) === progressStart;
       const earlyActionIndex = pendingProgress ? -1 : actionFenceOpenIndex(this.buffer);
@@ -824,46 +899,6 @@ class HmsMessageStreamDemux {
         continue;
       }
       if (!pendingProgress && partialJsonFenceSuffixLength(this.buffer)) break;
-      if (this.pendingAnswerSegmentId) {
-        const pendingId = this.pendingAnswerSegmentId;
-        const leadingWhitespace = /^\s+/.exec(this.buffer)?.[0] || "";
-        if (leadingWhitespace) {
-          this.buffer = this.buffer.slice(leadingWhitespace.length);
-          if (!this.buffer) break;
-          continue;
-        }
-        const pendingAnswer = answerOpenMatch(this.buffer);
-        const lower = this.buffer.toLowerCase();
-        if (pendingAnswer?.index === 0) {
-          this.buffer = this.buffer.slice(pendingAnswer[0].length);
-          this.pendingAnswerSegmentId = "";
-          this.inAnswer = true;
-          this.segmentedAnswerSeen = true;
-          this.currentSegmentId = this.normalizeSegmentId(answerSegmentId(pendingAnswer[0], pendingId));
-          this.nextSegmentIndex += 1;
-          continue;
-        }
-        if (lower.startsWith(ANSWER_CLOSE_TAG)) {
-          this.buffer = this.buffer.slice(ANSWER_CLOSE_TAG.length);
-          this.pendingAnswerSegmentId = "";
-          this.completedSegments.push(pendingId);
-          this.streamEvents.push({ type: "answer_end", segmentId: pendingId });
-          continue;
-        }
-        if (lower.startsWith(PROGRESS_OPEN_TAG) || lower.startsWith(FINAL_OPEN_TAG)) {
-          this.pendingAnswerSegmentId = "";
-          continue;
-        }
-        // An answer opening tag commonly arrives as `<baiqiu-answer ` in one
-        // provider chunk and the attributes in the next. Do not promote that
-        // incomplete protocol prefix to answer text.
-        if (partialProtocolSuffixLength(this.buffer)) break;
-        this.pendingAnswerSegmentId = "";
-        this.inAnswer = true;
-        this.segmentedAnswerSeen = true;
-        this.currentSegmentId = pendingId;
-        continue;
-      }
       if (this.inAnswer) {
         const lower = this.buffer.toLowerCase();
         const closeIndex = lower.indexOf(ANSWER_CLOSE_TAG);
@@ -967,7 +1002,8 @@ class HmsMessageStreamDemux {
         continue;
       }
       const lower = this.buffer.toLowerCase();
-      const progressIndex = lower.indexOf(PROGRESS_OPEN_TAG);
+      const progressMatch = progressOpenMatch(this.buffer);
+      const progressIndex = progressMatch?.index ?? -1;
       const answerMatch = answerOpenMatch(this.buffer);
       const answerIndex = answerMatch ? answerMatch.index : -1;
       const finalIndex = lower.indexOf(FINAL_OPEN_TAG);
@@ -1039,8 +1075,26 @@ class HmsMessageStreamDemux {
         this.buffer = protocolTail.slice(passiveCloseIndex + passiveClose.length);
         continue;
       }
-      const payloadStart = openIndex + PROGRESS_OPEN_TAG.length;
+      const payloadStart = openIndex + progressMatch[0].length;
       this.protocolSeen = true;
+      const markdownHeader = progressMarkdownHeader(this.buffer.slice(payloadStart));
+      if (markdownHeader) {
+        const markdownClose = markdownProgressCloseIndex(this.buffer, payloadStart + markdownHeader.length);
+        if (markdownClose < 0) {
+          this.buffer = this.buffer.slice(openIndex);
+          break;
+        }
+        const events = this.normalizeProgressEvents(parseProgressEnvelope(this.buffer.slice(payloadStart, markdownClose)));
+        if (events.length) {
+          progressEvents.push(...events);
+          events.forEach(event => this.streamEvents.push({ type: "progress", progress: event }));
+        } else {
+          this.protocolMalformed = true;
+        }
+        this.pendingAnswerSegmentId = this.allowImplicitAnswer ? String(events[0]?.segmentId || "").trim() : "";
+        this.buffer = this.buffer.slice(markdownClose + PROGRESS_CLOSE_TAG.length);
+        continue;
+      }
       const closeIndex = progressCloseIndex(this.buffer, payloadStart);
 
       // Recover a common malformed boundary without waiting for flush(). The
@@ -1112,7 +1166,9 @@ class HmsMessageStreamDemux {
         progressEvents.push(...events);
         events.forEach((event) => this.streamEvents.push({ type: "progress", progress: event }));
       } else {
-        this.protocolMalformed = true;
+        if (progressEnvelopeSegmentId(progressPayload)
+          && !/<\/?(?:baiqiu-|[｜|]{1,2}DSML)/i.test(progressPayload)) this.progressProtocolMalformed = true;
+        else this.protocolMalformed = true;
       }
       // A malformed progress JSON can still retain an unambiguous segment id.
       // Use only that narrow transport field to recover the following answer;
@@ -1130,7 +1186,8 @@ class HmsMessageStreamDemux {
       answerDeltas: this.answerDeltas,
       completedSegments: this.completedSegments,
       streamEvents: this.streamEvents,
-      protocolError: this.protocolMalformed
+      protocolError: this.protocolMalformed,
+      progressProtocolError: this.progressProtocolMalformed
     };
   }
 
@@ -1151,6 +1208,22 @@ class HmsMessageStreamDemux {
     const wasInAnswer = this.inAnswer;
     const value = this.buffer;
     this.buffer = "";
+    const progressEvents = [];
+    const opening = /^\s*<baiqiu-progress>/i.exec(value);
+    if (opening) {
+      const payload = value.slice(opening[0].length).trimStart();
+      const json = payload.startsWith("{") ? balancedJsonSlice(payload) : "";
+      const suffix = payload.slice(json.length).trim();
+      if (json && /^(?:<\/[｜|]{1,2}DSML[｜|]{1,2}\s+(?:parameter|invoke|calls)\s*>\s*)+$/.test(suffix)) {
+        let event = {};
+        try { event = JSON.parse(json); } catch {}
+        if (["stage_result", "cross", "action", "thinking"].includes(event.type)
+          && typeof event.message === "string" && typeof event.segmentId === "string" && event.segmentId.trim()) {
+          progressEvents.push(...this.normalizeProgressEvents(parseProgressEnvelope(json)));
+          progressEvents.forEach((progress) => this.streamEvents.push({ type: "progress", progress }));
+        }
+      }
+    }
     const withoutPartialProtocol = stripTrailingPartialHmsProtocol(value);
     const partialActionLength = partialActionFenceSuffixLength(withoutPartialProtocol);
     const withoutPartialAction = partialActionLength
@@ -1186,20 +1259,22 @@ class HmsMessageStreamDemux {
     if (!visibleDelta) {
       return {
         visibleDelta: "",
-        progressEvents: [],
+        progressEvents,
         answerDeltas: this.answerDeltas,
         completedSegments: this.completedSegments,
         streamEvents: this.streamEvents,
-        protocolError: this.protocolMalformed
+        protocolError: this.protocolMalformed,
+        progressProtocolError: this.progressProtocolMalformed
       };
     }
     return {
       visibleDelta,
-      progressEvents: [],
+      progressEvents,
       answerDeltas: this.answerDeltas,
       completedSegments: this.completedSegments,
       streamEvents: this.streamEvents,
-      protocolError: this.protocolMalformed
+      protocolError: this.protocolMalformed,
+      progressProtocolError: this.progressProtocolMalformed
     };
   }
 }
@@ -1240,7 +1315,8 @@ class HmsUpdateStreamDemux {
       answerDeltas: [...message.answerDeltas, ...thought.answerDeltas],
       completedSegments: [...message.completedSegments, ...thought.completedSegments],
       streamEvents: [...message.streamEvents, ...thought.streamEvents],
-      protocolError: message.protocolError || thought.protocolError
+      protocolError: message.protocolError || thought.protocolError,
+      progressProtocolError: message.progressProtocolError || thought.progressProtocolError
     };
   }
 }
@@ -1254,11 +1330,30 @@ function extractHmsFinalEnvelope(value = "") {
   return { text, envelope: matches[0][0] };
 }
 
+function stripMarkdownProgressEnvelopes(value = "") {
+  const source = String(value || "");
+  const masked = source.replace(/^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^[ \t]*\1[ \t]*$|$(?![\s\S]))/gm,
+    match => " ".repeat(match.length));
+  const opening = /<baiqiu-progress>/gi;
+  let cursor = 0;
+  let output = "";
+  for (const match of masked.matchAll(opening)) {
+    if (match.index < cursor) continue;
+    const payloadStart = match.index + match[0].length;
+    const header = progressMarkdownHeader(source.slice(payloadStart));
+    if (!header) continue;
+    const close = markdownProgressCloseIndex(source, payloadStart + header.length);
+    output += source.slice(cursor, match.index);
+    cursor = close < 0 ? source.length : close + PROGRESS_CLOSE_TAG.length;
+  }
+  return output + source.slice(cursor);
+}
+
 function stripHmsProgressEnvelopes(value = "") {
-  const cleaned = normalizeEscapedHmsProtocolClosers(value)
-    .replace(/<baiqiu-progress>[\s\S]*?<\/baiqiu-progress>/gi, "")
-    .replace(/<baiqiu-progress>[\s\S]*?<\/baiqiu-answer\b[^>]*>/gi, "")
-    .replace(/<baiqiu-progress>[\s\S]*$/gi, "")
+  const cleaned = normalizeEscapedHmsProtocolClosers(stripMarkdownProgressEnvelopes(value))
+    .replace(/<baiqiu-progress["']?>[\s\S]*?<\/baiqiu-progress>/gi, "")
+    .replace(/<baiqiu-progress["']?>[\s\S]*?<\/baiqiu-answer\b[^>]*>/gi, "")
+    .replace(/<baiqiu-progress["']?>[\s\S]*$/gi, "")
     .replace(/<\/?baiqiu-(?:answer|final|presentation|outcome|clarification|outline)\b[^>]*>/gi, "");
   return stripTrailingPartialHmsProtocol(cleaned).trim();
 }
@@ -1304,14 +1399,12 @@ function toolDescriptor(update = {}) {
 }
 
 function publicToolTarget(input = {}) {
-  const targetPath = String(input.path || input.filePath || input.outputPath || "").trim();
-  if (targetPath) return `“${path.basename(targetPath)}”`;
-  const query = publicText(input.query || input.keyword || input.search || "", 64);
-  if (query) return `“${query}”`;
+  const targetPath = publicText(input.path || input.filePath || input.outputPath || input.directory || input.root || "", 240);
+  const query = publicText(input.query || input.keyword || input.search || input.pattern || "", 120);
+  if (targetPath || query) return [targetPath && `“${targetPath}”`, query && `关键词“${query}”`].filter(Boolean).join("，");
   const url = String(input.url || "").trim();
   if (!url) return "";
-  try { return `“${new URL(url).hostname || publicText(url, 64)}”`; }
-  catch { return `“${publicText(url, 64)}”`; }
+  return `“${publicText(url, 240)}”`;
 }
 
 function publicVerificationLabel(command = "") {
@@ -1346,7 +1439,7 @@ function publicToolNarrative({ toolName = "", command = "", input = {}, result =
   if (retrying) {
     retryCount = Math.max(0, Number(retryCount || 0) || 0);
     return {
-      publicSummary: `${operation}正在${retryCount ? `进行第 ${retryCount} 次` : ""}重试`,
+      publicSummary: `${operation}正在${retryCount ? `进行第 ${retryCount} 次` : ""}重试${target || command ? `：${target || command}` : ""}`,
       publicSummaryKind: "retry",
       publicSummarySalient: true
     };
@@ -1368,7 +1461,7 @@ function publicToolNarrative({ toolName = "", command = "", input = {}, result =
   if (verificationResult) {
     const counts = completed ? publicVerificationCounts(result) : "";
     return {
-      publicSummary: completed ? `${verificationLabel}完成${counts ? `：${counts}` : ""}` : `正在进行${verificationLabel}`,
+      publicSummary: completed ? `${verificationLabel}完成${counts ? `：${counts}` : ""}` : `正在进行${verificationLabel}${command ? `：${command}` : ""}`,
       publicSummaryKind: "verification",
       publicSummarySalient: true
     };
@@ -1395,7 +1488,7 @@ function publicToolNarrative({ toolName = "", command = "", input = {}, result =
     };
   }
   return {
-    publicSummary: completed ? `${operation}已完成` : `正在执行${operation}`,
+    publicSummary: (completed ? `${operation}已完成` : `正在执行${operation}`) + (command ? `：${command}` : ""),
     publicSummaryKind: completed ? "result" : "action",
     publicSummarySalient: false
   };
@@ -1413,12 +1506,12 @@ function toolEvent(update = {}) {
     : /(?:write_file|edit_file|patch)/.test(toolName) && /\.(?:js|ts|jsx|tsx|py|java|go|rs|css|html|json)$/i.test(targetPath)
       ? "code"
       : "tool";
-  const status = String(update.status || update.state || "").toLowerCase();
+  const status = String(update.status || update.state || toolCall.status || toolCall.state || "").toLowerCase();
   const toolCallId = toolCallIdOf(update);
   const result = toolResultOf(update);
   const failed = Boolean(update.error) || result?.success === false || ["failed", "error", "cancelled"].includes(status);
   const completed = !failed && (["completed", "complete", "success", "done"].includes(status)
-    || (update.sessionUpdate === "tool_call_update" && meaningfulToolValue(result)));
+    || (!status && update.sessionUpdate === "tool_call_update" && meaningfulToolValue(result)));
   const state = failed ? "failed" : completed ? "completed" : "running";
   const verificationResult = update.verification === true
     || String(update.resultKind || update.resultType || "").toLowerCase() === "verification_result"
@@ -1597,6 +1690,9 @@ class HmsProgressMapper {
       const mergedTool = {
         ...previous,
         ...update,
+        status: update.status || update.state || update.toolCall?.status || update.toolCall?.state
+          || (meaningfulToolValue(toolResultOf(update)) && type === "tool_call_update" ? "completed" : previous.status || previous.state || ""),
+        state: "",
         ...(toolCallId ? { toolCallId } : {}),
         ...(meaningfulToolValue(mergedInput) ? { rawInput: mergedInput } : {}),
         ...(meaningfulToolValue(mergedResult) ? { rawOutput: mergedResult } : {}),
@@ -1702,6 +1798,7 @@ module.exports = {
   publicActivityText,
   stripTrailingPartialHmsProtocol,
   stripHmsProgressEnvelopes,
+  stripMarkdownProgressEnvelopes,
   extractBareToolActions,
   stripBareToolActionLines,
   toolEvidenceEventId,

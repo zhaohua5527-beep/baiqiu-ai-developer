@@ -13,7 +13,7 @@ test("attachment-only turns have one visible and durable user instruction", () =
   const sendStart = rendererSource.indexOf("async function sendCurrentTask(");
   const sendEnd = rendererSource.indexOf("async function processQueue", sendStart);
   const send = rendererSource.slice(sendStart, sendEnd);
-  assert.match(send, /const visibleText = text \|\| \(!quote && attachments\.length \? "请分析附件内容。" : ""\)/);
+  assert.match(send, /const visibleText = text \|\| \(quote\s*\? "请结合引用内容继续处理"\s*:\s*attachments\.length \? "请分析附件内容。" : ""\)/);
   assert.match(send, /role: "user",\s*text: visibleText,/);
   assert.match(send, /clientMessageCreatedAt: userMessage\.createdAt/);
 });

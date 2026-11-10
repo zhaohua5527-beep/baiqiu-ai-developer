@@ -89,7 +89,7 @@ test("persisted turns keep cross-linked process events beside permanent answer s
   assert.match(persisted, /publicExecutionDetailsFromMessage\(message\)/);
   assert.match(persisted, /const replay = persistedReplay\.replaySegmentModel\(message, processDetails\);/);
   assert.match(persisted, /stream-segment-process/);
-  assert.match(persisted, /stream-segment-structured streaming-structured-result/);
+  assert.match(persisted, /stream-segment-structured persisted-structured-result streaming-structured-result/);
   assert.match(persisted, /structuredBySegment/);
   assert.match(persisted, /const structuredEvents = replay\.structuredEvents;/);
   assert.match(persisted, /replaceExecutionActivityLines/);
@@ -106,11 +106,11 @@ test("persisted turns keep cross-linked process events beside permanent answer s
   assert.match(rendererSource, /root\.dataset\.segmentedDetailsOwner/);
 });
 
-test("structured summaries paint synchronously while final answers keep adaptive typing", () => {
+test("new structured replies use adaptive typing and restored history paints completely", () => {
   const append = sourceBetween(rendererSource, "function appendLiveStructuredResult", "function isPublicStructuredThought");
   assert.match(append, /node\.textContent = node\.__structuredTargetText/);
-  assert.match(append, /node\.__structuredVisibleLength = Array\.from\(node\.__structuredTargetText\)\.length/);
-  assert.doesNotMatch(append, /scheduleLiveStructuredEntryPaint\(entry, node\)/);
+  assert.match(append, /if \(options\.animate === false\)/);
+  assert.match(append, /scheduleLiveStructuredEntryPaint\(entry, node\)/);
   assert.match(rendererSource, /revealLiveChatStreamText[\s\S]*?assistantTypingCharsPerSecond\(entry\.targetChars\.length\)/);
 });
 
@@ -126,7 +126,7 @@ test("final answer commit keeps segmented content and retires only temporary pro
   const finalOnly = sourceBetween(
     rendererSource,
     "if (rendered && !hasStreamedAnswer)",
-    "} else if (rendered && finalExtendsStream)"
+    "} else if (rendered && (finalExtendsStream || answerPaintIncomplete))"
   );
   assert.match(finalOnly, /renderSegmentedLiveAnswer\(entry\)/);
   assert.doesNotMatch(finalOnly, /rendered\.replaceChildren\(\)/);
@@ -142,7 +142,9 @@ test("final answer commit keeps segmented content and retires only temporary pro
   assert.match(collapse, /streaming-elapsed/);
   assert.doesNotMatch(collapse, /execution-activity-duration-only/);
   assert.match(rendererSource, /recycleLiveStructuredProcess\(entry, "", \{ transientOnly: true, respectMinimum: false \}\)/);
-  assert.match(rendererSource, /durableStructuredEvents\.length[\s\S]*?renderPersistedSegmentPairs\(message, rendered\)/);
+  const finalize = sourceBetween(rendererSource, "function finalizeLiveChatStream", "function discardLiveChatStreamsForSession");
+  assert.doesNotMatch(finalize, /renderPersistedSegmentPairs\(/);
+  assert.match(finalize, /durableStructuredEvents\.forEach\(\(event\) => appendLiveStructuredResult/);
   assert.doesNotMatch(rendererSource, /transientOnly: false/);
   assert.match(rendererSource, /hideLiveThinkingLayer\(entry, \{ allStructured: true, respectMinimum: false \}\)/);
 });

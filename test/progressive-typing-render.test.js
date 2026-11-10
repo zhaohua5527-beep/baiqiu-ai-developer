@@ -17,12 +17,15 @@ test("session refresh preserves an active local typewriter row", () => {
 
   assert.match(rendererSource, /const activeAssistantTypings = new Map\(\);/);
   assert.match(rendererSource, /function liveChatStreamOwnsVisibleRow\(entry\)[\s\S]*?!row\?\.isConnected \|\| !messageList\.contains\(row\) \|\| row\.hidden[\s\S]*?rowStreamId === streamId[\s\S]*?rowMessageId === messageId/);
+  assert.match(rendererSource, /function messageRenderFingerprint\(message = \{\}\)/);
+  assert.match(rendererSource, /row\.dataset\.renderFingerprint = messageRenderFingerprint\(message\);/);
+  assert.match(renderMessages, /const renderedContentMatches = renderedMessageWindowContentMatches\(visibleMessages\);/);
   assert.match(renderMessages, /const activeTyping = activeAssistantTypingForSession\(session\.id\);/);
   assert.match(renderMessages, /const activeStream = activeLiveChatStreamForSession\(session\.id\);/);
   assert.match(renderMessages, /const activeStreamOwnsVisibleRow = liveChatStreamOwnsVisibleRow\(activeStream\);/);
   assert.match(
     renderMessages,
-    /if \(\(activeTyping \|\| activeStreamOwnsVisibleRow\) && !sessionChanged\) \{[\s\S]*?requestAnimationFrame\(updateReadingControls\);[\s\S]*?\} else if \(!sessionChanged && renderedMessageWindowMatches\(visibleMessages\)\)[\s\S]*?mutatePreservingMessageViewport\(\(\) => messageList\.replaceChildren\(fragment\)\);/
+    /if \(\(activeTypingBlocksRender \|\| activeStreamBlocksRender\) && !sessionChanged\) \{[\s\S]*?requestAnimationFrame\(updateReadingControls\);[\s\S]*?\} else if \(!sessionChanged[\s\S]*?renderedMessageWindowMatches\(visibleMessages\)[\s\S]*?renderedContentMatches\)[\s\S]*?mutatePreservingMessageViewport\(\(\) => messageList\.replaceChildren\(fragment\)\);/
   );
 });
 
@@ -199,7 +202,7 @@ test("composing preserves the reading position and sending anchors the new instr
     rendererSource.indexOf("async function renderMessages"),
     rendererSource.indexOf("function renderAttachments")
   );
-  assert.match(renderMessages, /if \(hasInstructionAnchor\) \{[\s\S]*?const anchorLocked = instructionAnchorPositionLocked\(session\.id\);[\s\S]*?const anchorLayoutChanged = sessionChanged \|\| messagesReplaced;[\s\S]*?applyInstructionAnchor\(session\.id, \{ reposition: anchorLocked && anchorLayoutChanged \}\);/);
+  assert.match(renderMessages, /if \(hasInstructionAnchor && !sessionChanged\) \{[\s\S]*?const anchorLocked = instructionAnchorPositionLocked\(session\.id\);[\s\S]*?const anchorLayoutChanged = messagesReplaced;[\s\S]*?applyInstructionAnchor\(session\.id, \{ reposition: anchorLocked && anchorLayoutChanged \}\);/);
   assert.match(renderMessages, /const visibleMessages = mergePendingUserMessages\(session\.id, messages\);/);
   assert.match(rendererSource, /function scheduleInstructionAnchor\(sessionId = state\.selectedSessionId\)/);
   assert.match(rendererSource, /function mutatePreservingMessageViewport\(mutation\)/);
@@ -211,8 +214,8 @@ test("composing preserves the reading position and sending anchors the new instr
   assert.match(rendererSource, /function clearInstructionAnchor\(sessionId = state\.selectedSessionId\)[\s\S]*?removeInstructionAnchorSpace\(\);/);
   assert.match(rendererSource, /let messageRenderEpoch = 0;/);
   assert.match(rendererSource, /async function renderMessages\([^)]*\)[\s\S]*?const renderEpoch = \+\+messageRenderEpoch;[\s\S]*?renderEpoch !== messageRenderEpoch/);
-  assert.match(rendererSource, /const hasInstructionAnchor = Boolean\(instructionAnchorId\(session\.id\)\);[\s\S]*?if \(sessionChanged && !hasInstructionAnchor\) \{[\s\S]*?restoreSessionScrollPosition\(session\.id\);[\s\S]*?messagesReplaced && renderPosition && !hasInstructionAnchor/);
-  assert.match(renderMessages, /const anchoredPosition = renderPosition \|\| \(sessionChanged \? savedSessionPosition : null\);[\s\S]*?messagesReplaced && anchoredPosition && !anchorLocked[\s\S]*?applyMessageScrollPosition\(anchoredPosition, \{ keepInstructionAnchor: true \}\);/);
+  assert.match(rendererSource, /const hasInstructionAnchor = Boolean\(instructionAnchorId\(session\.id\)\);[\s\S]*?if \(sessionChanged\) \{[\s\S]*?restoreSessionScrollPosition\(session\.id\);[\s\S]*?messagesReplaced && renderPosition && !hasInstructionAnchor/);
+  assert.match(renderMessages, /const anchoredPosition = renderPosition;[\s\S]*?messagesReplaced && anchoredPosition && !anchorLocked[\s\S]*?applyMessageScrollPosition\(anchoredPosition, \{ keepInstructionAnchor: true \}\);/);
   assert.match(rendererSource, /function releaseInstructionAnchorPosition\(sessionId = state\.selectedSessionId\)[\s\S]*?anchor\.locked = false;/);
   assert.match(rendererSource, /messageList\?\.addEventListener\("wheel", \(event\) => \{[\s\S]*?releaseInstructionAnchorPosition\(state\.selectedSessionId\);/);
   assert.match(rendererSource, /function createThinkingMessage\(_label = "", options = \{\}\)[\s\S]*?const instructionIsAnchored = Boolean\(instructionAnchorId\(state\.selectedSessionId\)\);[\s\S]*?if \(instructionIsAnchored\)[\s\S]*?state\.followOutput = false;[\s\S]*?state\.manualOutputPause = true;[\s\S]*?else if \(options\.follow !== false\) \{[\s\S]*?scrollMessagesToBottom\(\);/);
@@ -515,7 +518,7 @@ test("local lifecycle details stay synchronized when the thinking row becomes a 
     rendererSource.indexOf("function removeThinkingMessage")
   );
   assert.match(thinkingMessage, /const initialThinkingText = String\(_label \|\| ""\)\.trim\(\);/);
-  assert.match(thinkingMessage, /if \(options\.waiting === true\)[\s\S]*?waiting\.textContent = String\(_label \|\| "等待黑球真实执行事件"\)/);
+  assert.doesNotMatch(thinkingMessage, /execution-waiting-status|等待黑球真实执行事件/);
   assert.doesNotMatch(thinkingMessage, /pushExecutionActivityDetail/);
   assert.match(rendererSource, /thinkingRow = createThinkingMessage\("", \{[\s\S]*?startedAt: taskStartedAt,[\s\S]*?waiting: true/);
   assert.match(rendererSource, /registerLiveChatStream\(streamId, session\.id, thinkingRow/);
@@ -607,7 +610,7 @@ test("send preflight failures persist a stable terminal response for the origina
   );
   assert.match(sendCurrentTask, /try \{[\s\S]*?addVisibleMessage\(userMessage\);[\s\S]*?createThinkingMessage[\s\S]*?await api\.appendMessage\(session\.id, userMessage\);/);
   assert.match(sendCurrentTask, /const existingStreamId = activeSendOwners\.get\(session\.id\);[\s\S]*?if \(existingStreamId\) \{/);
-  assert.match(sendCurrentTask, /sessionTaskQueue\.enqueue\(session\.id, \{[\s\S]*?autoStart: false/);
+  assert.match(sendCurrentTask, /sessionTaskQueue\.enqueue\(session\.id, \{[\s\S]*?autoStart: true/);
   assert.doesNotMatch(sendCurrentTask, /taskFingerprint|activeSendFingerprints|避免重复提交/);
   assert.match(sendCurrentTask, /thinkingRow = createThinkingMessage\("", \{[\s\S]*?startedAt: taskStartedAt,[\s\S]*?waiting: true/);
   assert.match(sendCurrentTask, /const message = taskFailureText\(error\);/);
@@ -750,7 +753,7 @@ test("final stream reconciliation preserves the running instruction anchor and n
   assert.doesNotMatch(finalize, /messageList\.scrollTop =/);
 });
 
-test("messages sent while a reply is running remain queued for explicit manual delivery", () => {
+test("supplement drafts require an explicit send before following a completed reply", () => {
   const enqueue = rendererSource.slice(
     rendererSource.indexOf("async function enqueueCurrentTask"),
     rendererSource.indexOf("async function abortCurrentTask")
@@ -759,9 +762,12 @@ test("messages sent while a reply is running remain queued for explicit manual d
     rendererSource.indexOf("async function processQueue"),
     rendererSource.indexOf("attachBtn.addEventListener", rendererSource.indexOf("async function processQueue"))
   );
-  assert.match(enqueue, /sessionTaskQueue\.enqueue\(session\.id, \{ text, attachments: \[\.\.\.state\.attachments\], quote, autoStart: false \}\);/);
-  assert.match(enqueue, /已加入队列，需手动启动/);
-  assert.match(processQueue, /if \(!nextTask\?\.autoStart\) return;[\s\S]*?await sendCurrentTask\(task, sessionId\);/);
+  assert.match(enqueue, /autoStart: false, deliveryMode/);
+  assert.match(enqueue, /if \(submit\) await startQueuedTask\(session, queued\)/);
+  assert.match(enqueue, /点击箭头才发送/);
+  assert.match(processQueue, /sessionTaskQueue\.isPaused\(sessionId\)/);
+  assert.match(processQueue, /nextTask\.editing/);
+  assert.match(processQueue, /await sendCurrentTask\(task, sessionId, \{ onAccepted:/);
 });
 
 test("main process treats Black Ball final text as authoritative without White Ball content review", () => {

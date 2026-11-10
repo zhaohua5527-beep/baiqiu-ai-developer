@@ -18,7 +18,8 @@ function between(start, end) {
 }
 
 const { executionThreeRowViewModel, completedExecutionHeaderText } = new Function(
-  between("function executionThreeRowViewModel", "function paintExecutionPhaseResult")
+  between("function executionToolKey", "function executionActiveTools")
+  + between("function executionThreeRowViewModel", "function paintExecutionPhaseResult")
   + "; return { executionThreeRowViewModel, completedExecutionHeaderText };"
 )();
 const { executionSummaryEntry, uniqueExecutionActivityEntries } = new Function(
@@ -60,6 +61,12 @@ function stageDom(paintResult = (_root, node, result) => { node.textContent = re
       get isConnected() { return dom(node).is("main") || dom(node).parents("main").length > 0; },
       get children() { return dom(node).children().toArray().map(wrap); },
       get parentElement() { return wrap(node.parent); },
+      appendChild(child) { dom(node).append(child.node); return child; },
+      insertBefore(child, reference) {
+        if (reference?.node) dom(reference.node).before(child.node);
+        else dom(node).append(child.node);
+        return child;
+      },
       get className() { return dom(node).attr("class") || ""; },
       set className(value) { dom(node).attr("class", value); },
       get textContent() { return dom(node).text(); },
@@ -84,12 +91,13 @@ function stageDom(paintResult = (_root, node, result) => { node.textContent = re
   }
   const document = { createElement: (tag) => wrap(dom("<" + tag + "></" + tag + ">")[0]) };
   const paint = new Function("document", "uniqueExecutionActivityEntries", "executionViewModelFromDetails",
-    "executionThreeRowViewModel", "completedExecutionHeaderText", "paintExecutionPhaseResult", "EXECUTION_ACTIVITY_VISIBLE_LIMIT",
-    between("function paintExecutionStageView", "function executionActivityViewportIsAtBottom") + "; return paintExecutionStageView;"
+    "executionThreeRowViewModel", "completedExecutionHeaderText", "paintExecutionPhaseResult", "EXECUTION_ACTIVITY_VISIBLE_LIMIT", "mutatePreservingMessageViewport", "paintExecutionCurrentOperations",
+    between("function executionWaitHint", "function completedExecutionHeaderText")
+    + between("function reconcileExecutionChildren", "function executionActivityViewportIsAtBottom") + "; return paintExecutionStageView;"
   )(document, uniqueExecutionActivityEntries,
     (events, turnId) => eventAggregator.aggregateExecutionEvents(events, { turnId }),
     executionThreeRowViewModel, completedExecutionHeaderText,
-    paintResult, 3);
+    paintResult, 3, mutation => mutation(), () => {});
   const root = wrap(dom("main")[0]);
   root.dataset.activityExpanded = "0";
   return { root, panel: root.querySelector(".execution-stage-summary"), paint };
@@ -148,10 +156,12 @@ test("real replies separate later tools without removing code or returned conten
       assert.equal(panel.children.length, 2);
       assert.equal(firstNode.querySelector(".execution-phase-event-list").textContent,
         "shell\npython first.py\nprint('first')\n结果：{\"value\":1}");
-      assert.equal(firstNode.querySelector(".execution-phase-results").textContent, firstReply.message);
-      assert.equal(panel.children[1].querySelector(".execution-phase-event-list").children[0].textContent,
-        "python second.py\n结果：{\"value\":2}");
-      assert.equal(panel.children[1].querySelector(".execution-phase-results").textContent, nextReply.message);
+       assert.equal(firstNode.querySelector(".execution-phase-results").hidden, true);
+       assert.equal(firstNode.querySelector(".execution-phase-results").textContent, "");
+       assert.equal(panel.children[1].querySelector(".execution-phase-event-list").children[0].textContent,
+         "python second.py\n结果：{\"value\":2}");
+       assert.equal(panel.children[1].querySelector(".execution-phase-results").hidden, true);
+       assert.equal(panel.children[1].querySelector(".execution-phase-results").textContent, "");
       const { root: replayRoot, panel: replayPanel, paint: replayPaint } = stageDom();
       replayPaint(replayRoot, input, "turn-1");
       assert.equal(replayPanel.textContent, panel.textContent);
@@ -198,18 +208,28 @@ test("failure, timeout, empty result, and interruption remain authored statuses"
   assert.equal(executionSummaryEntry(event("no-status", 1, "tool")).status, "");
 });
 
-test("normal statuses do not occupy a separate row while exceptions stay visible", () => {
+test("status icons stay inline and structured results keep their own lane", () => {
   const normalStatuses = ["", "completed", "success", "succeeded", "done", "running", "in_progress", "pending", "queued"];
   for (const status of [...normalStatuses, "failed", "error", "timeout", "timed_out", "empty", "cancelled", "interrupted", "blocked"]) {
     for (const semanticType of ["tool", "stage_result"]) {
       const { root, panel, paint } = stageDom();
       const original = event("status-event", 1, semanticType, "a", { status });
       paint(root, [original], "turn-1");
-      const row = panel.children[0].querySelector(semanticType === "tool" ? ".execution-phase-event" : ".execution-phase-result");
-      assert.equal(row.dataset.status, status);
-      assert.equal(row.querySelector(".execution-event-status").hidden, normalStatuses.includes(status));
-      assert.equal(row.querySelector(".execution-event-text").textContent, original.message);
-      assert.equal(root.__executionStageDetails[0].status, status);
+       if (semanticType === "tool") {
+         const row = panel.children[0].querySelector(".execution-phase-event");
+         assert.equal(row.dataset.status, status);
+         const expectedIcon = ["completed", "success", "succeeded", "done"].includes(status) ? "✅"
+           : ["failed", "error", "timeout", "timed_out", "cancelled"].includes(status) ? "❌" : "";
+         assert.equal(row.querySelector(".execution-event-status").hidden, !expectedIcon);
+         assert.equal(row.querySelector(".execution-event-status").textContent, expectedIcon);
+         assert.equal(row.querySelector(".execution-event-text").textContent, original.message);
+       } else {
+         const modelEvent = root.__executionViewModel.events.find((item) => item.eventId === original.eventId);
+         assert.equal(panel.children.length, 0);
+         assert.equal(modelEvent.semanticType, "stage_result");
+         assert.equal(modelEvent.status, status);
+       }
+       assert.equal(root.__executionStageDetails[0].status, status);
     }
   }
   assert.match(styles, /\.execution-event-status\[hidden\]\s*\{\s*display:\s*none;/);
@@ -237,24 +257,18 @@ test("phase DOM keeps all events, results below execution, and one unchanged Cro
   assert.equal(list.children[1].dataset.collapsedHidden, "0");
   assert.equal(first.children[0].className, "execution-phase-process");
   assert.equal(first.children[1].className, "execution-phase-results");
-  assert.equal(first.children[1].children[0].dataset.eventId, "ra");
-  const cross = event("cross", 8, "cross", "b", { message: "真实 Cross 原文" });
+   const cross = event("cross", 8, "cross", "b", { message: "真实 Cross 原文" });
   paint(root, [...firstStage, ...secondStage, cross, cross], "turn-1");
   assert.equal(panel.children.length, 2);
   assert.equal(panel.children[0], first);
   assert.equal(list.children[0], firstRow);
-  assert.deepEqual(panel.children.flatMap((phase) => [
-    phase.querySelector(".execution-phase-event-list").children.map((row) => row.dataset.eventId),
-    phase.querySelector(".execution-phase-result").dataset.eventId
-  ]), [["a1", "a2", "a3", "a4"], "ra", ["b1"], "rb"]);
-  assert.equal(panel.querySelector(".execution-phase-label"), null);
-  assert.equal(panel.querySelector(".execution-phase-result-label"), null);
-  assert.equal(first.querySelector(".execution-phase-result .execution-event-text").textContent, "ra");
-  const crossRows = panel.children.flatMap((phase) => phase.querySelector(".execution-phase-results").children)
-    .filter((row) => row.dataset.semanticType === "cross");
-  assert.equal(crossRows.length, 1);
-  assert.equal(crossRows[0].textContent, cross.message);
-  assert.equal(crossRows[0].querySelector(".execution-phase-result-label"), null);
+   assert.deepEqual(panel.children.map((phase) => (
+     phase.querySelector(".execution-phase-event-list").children.map((row) => row.dataset.eventId)
+   )), [["a1", "a2", "a3", "a4"], ["b1"]]);
+   assert.equal(panel.querySelector(".execution-phase-label"), null);
+   assert.equal(panel.querySelector(".execution-phase-result-label"), null);
+   assert.ok(panel.children.every((phase) => phase.querySelector(".execution-phase-results").hidden));
+   assert.equal(root.__executionViewModel.events.find((item) => item.eventId === cross.eventId).semanticType, "cross");
   paint(root, [], "turn-1");
   assert.equal(panel.children.length, 2);
   root.dataset.lifecycle = "completed";
@@ -273,7 +287,7 @@ test("phase DOM keeps all events, results below execution, and one unchanged Cro
   assert.equal(list.children[0], firstRow);
 });
 
-test("each reply finishes before its process folds and the top toggle can restore it", () => {
+test("structured results close their execution phase while expansion restores exact tool nodes", () => {
   for (const semanticType of ["stage_result", "cross"]) {
     const frames = new Map();
     let nextFrame = 0;
@@ -299,13 +313,14 @@ test("each reply finishes before its process folds and the top toggle can restor
     assert.equal(process.hidden, false);
     paint(root, [reply], "turn-1");
     advance(100);
-    assert.equal(process.hidden, false);
-    assert.notEqual(phase.querySelector(".execution-phase-results").textContent, reply.message);
-    paint(root, [event("next-tool", 3, "tool", "b")], "turn-1");
-    advance(10000);
-    assert.equal(process.hidden, true);
-    assert.equal(phase.querySelector(".execution-phase-results").hidden, false);
-    assert.equal(phase.querySelector(".execution-phase-results").textContent, reply.message);
+     assert.equal(process.hidden, true);
+     assert.equal(phase.querySelector(".execution-phase-results").hidden, true);
+     assert.equal(phase.querySelector(".execution-phase-results").textContent, "");
+     paint(root, [event("next-tool", 3, "tool", "b")], "turn-1");
+     advance(10000);
+     assert.equal(process.hidden, true);
+     assert.equal(phase.querySelector(".execution-phase-results").hidden, true);
+     assert.equal(phase.querySelector(".execution-phase-results").textContent, "");
     assert.equal(toolNode.querySelector(".execution-event-text").textContent, "print('code')\n结果：123");
     assert.equal(panel.children[1].querySelector(".execution-phase-process").hidden, false);
     root.dataset.activityExpanded = "1";
@@ -316,10 +331,10 @@ test("each reply finishes before its process folds and the top toggle can restor
     paint(root, [], "turn-1");
     assert.equal(process.hidden, true);
     paint(root, [event("next-reply", 4, semanticType, "b", { message: "下一段真实回复正文。" })], "turn-1");
-    assert.equal(panel.children[1].querySelector(".execution-phase-process").hidden, false);
+    assert.equal(panel.children[1].querySelector(".execution-phase-process").hidden, true);
     advance(20000);
     assert.equal(panel.children[1].querySelector(".execution-phase-process").hidden, true);
-    assert.equal(phase.querySelector(".execution-phase-results").textContent, reply.message);
+     assert.equal(phase.querySelector(".execution-phase-results").textContent, "");
     assert.equal(root.__executionStageDetails.find((item) => item.eventId === tool.eventId).sourceText, tool.sourceText);
   }
 });
@@ -331,11 +346,10 @@ test("Cross-only phases do not add numbered process or result labels", () => {
     event("cross-only", 6, "cross", "", { message: "真实 Cross" }),
     event("b1", 7, "tool", "b"), event("rb", 8, "stage_result", "b")
   ], "turn-1");
-  assert.equal(panel.children.length, 3);
-  assert.equal(panel.children[1].querySelector(".execution-phase-process").hidden, true);
-  assert.equal(panel.children[1].querySelector(".execution-phase-result-label"), null);
-  assert.equal(panel.children[2].querySelector(".execution-phase-event").dataset.eventId, "b1");
-  assert.equal(panel.children[2].querySelector(".execution-phase-result").dataset.eventId, "rb");
+   assert.equal(panel.children.length, 2);
+   assert.ok(panel.children.every((phase) => phase.querySelector(".execution-phase-results").hidden));
+   assert.equal(panel.children[1].querySelector(".execution-phase-event").dataset.eventId, "b1");
+   assert.equal(root.__executionViewModel.events.find((item) => item.eventId === "cross-only").semanticType, "cross");
   assert.equal(panel.querySelector(".execution-phase-label"), null);
   assert.equal(panel.querySelector(".execution-phase-result-label"), null);
 });
@@ -375,7 +389,7 @@ test("old and empty snapshots preserve stage structure, raw payloads, and final 
 
 test("completed collapse keeps stage DOM and responsive CSS has no fixed content width", () => {
   const collapse = between("function collapseCompletedExecutionActivity", "function streamActivityHtml");
-  assert.match(collapse, /currentHead\.replaceWith/);
+  assert.match(collapse, /currentHead\.classList\.add\("execution-completion-head"\)/);
   assert.doesNotMatch(collapse, /root\.innerHTML\s*=/);
   assert.match(styles, /grid-template-columns:\s*minmax\(0, 1fr\)/);
   assert.match(styles, /overflow-wrap:\s*anywhere/);
@@ -383,11 +397,10 @@ test("completed collapse keeps stage DOM and responsive CSS has no fixed content
 });
 
 test("real final collapses execution without clearing the answer owner", () => {
-  const start = source.indexOf('  if (!["error", "cancelled"].includes(frame.type)');
-  const end = source.indexOf('  if (frame.type === "start")', start);
-  assert.ok(start >= 0 && end > start);
-  const final = source.slice(start, end);
-  assert.match(final, /acceptedEvent\.semanticType === "final"/);
-  assert.match(final, /collapseCompletedExecutionActivity/);
-  assert.doesNotMatch(final, /answer_delta|entry\.rendered|entry\.text\s*=/);
+  const finalize = between("function finalizeLiveChatStream", "function discardLiveChatStreamsForSession");
+  assert.match(finalize, /entry\.activity = collapseCompletedExecutionActivity/);
+  assert.match(finalize, /setAnswerResultDocument\(rendered, committedText/);
+  const finalFrame = between("function handleChatStreamFrame", "function removeSessionExecutionIndicator");
+  assert.match(finalFrame, /freezeLiveStreamElapsed\(entry\)/);
+  assert.doesNotMatch(finalFrame, /collapseCompletedExecutionActivity/);
 });

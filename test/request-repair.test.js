@@ -65,24 +65,39 @@ test('native provider credentials, explicit endpoint and API style survive confi
   assert.equal(service.runtime().providerProtocol, null);
 });
 
-test('completion preserves real answers despite progress format errors and rejects missing answers', () => {
+test('main completion requires native delivery evidence and retains protocol-degraded results', () => {
   const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
-  const start = source.indexOf('    if (result.protocolError &&', source.indexOf('  let publicFinalFound ='));
+  const start = source.indexOf('    if (result.protocolError)', source.indexOf('  let publicFinalFound ='));
   const end = source.indexOf('    const displayableStatus', start);
   assert.ok(start > 0 && end > start);
   const branch = source.slice(start, end);
-  for (const text of ['', '已读到 17 件。']) {
-    const context = vm.createContext({ result: { status: 'done', text, protocolError: true }, publicFinalMissing: false,
-      publicFinalFound: false, publicOutput: { finalFound: false }, streamedPublicText: text });
+  const { createHash } = require('node:crypto');
+  const { hasCommittedRuntimeDelivery } = require('../services/runtime-outcome');
+  const { failIncompleteProtocol } = require('../services/hms-stream-failure');
+  const text = '已读到 17 件。';
+  const sha256 = createHash('sha256').update(text).digest('hex');
+  const stage = { turnId: 'turn', eventId: 'stage:1', semanticType: 'stage_result', nativeSegmentId: 'one', message: text };
+  const native = { source: 'black_ball_runtime', turnId: 'turn', eventId: 'runtime:1', sequence: 2,
+    status: 'completed', completion: { version: 1, status: 'completed', outputs: [
+      { target: 'structured', segmentId: 'one', sha256 }
+    ] } };
+  const cases = [
+    { result: { status: 'done', protocolError: true }, output: text, stages: [], status: 'failed', found: false, delivery: 'degraded' },
+    { result: { status: 'done', protocolError: true, runtimeOutcome: native }, output: '', stages: [stage], status: 'done', found: true, delivery: 'degraded' },
+    { result: { status: 'done', protocolError: true, runtimeOutcome: native }, output: '', stages: [{ ...stage, message: '错误内容' }], status: 'failed', found: false, delivery: 'degraded' },
+    { result: { status: 'done', protocolError: true, runtimeOutcome: { ...native, completion: { ...native.completion,
+      outputs: [{ target: 'answer', segmentId: 'one', contentChars: text.length, sha256 }] } } }, output: text, stages: [], status: 'done', found: true, delivery: 'degraded' },
+    { result: { status: 'done' }, output: '好', stages: [], status: 'done', found: true, delivery: 'completed' },
+    { result: { status: 'done' }, output: '', stages: [], status: 'failed', found: false, delivery: 'degraded' }
+  ];
+  for (const scenario of cases) {
+    const context = vm.createContext({ result: scenario.result, publicFinalMissing: false,
+      publicFinalFound: false, publicOutput: { finalFound: false }, streamedPublicText: scenario.output,
+      hmsStructuredEvents: scenario.stages, hasCommittedRuntimeDelivery, failIncompleteProtocol });
     vm.runInContext(branch, context);
-    assert.equal(context.result.status, text ? 'done' : 'failed');
-    assert.equal(context.result.text, text);
-    assert.equal(context.publicFinalFound, Boolean(text));
-    assert.equal(context.result.deliveryStatus, text ? 'completed' : 'degraded');
+    assert.equal(context.result.status, scenario.status);
+    assert.equal(context.result.text, scenario.output);
+    assert.equal(context.publicFinalFound, scenario.found);
+    assert.equal(context.result.deliveryStatus, scenario.delivery);
   }
-  const context = vm.createContext({ result: { status: 'done', text: '好' }, publicFinalMissing: false,
-    publicFinalFound: false, publicOutput: { finalFound: false }, streamedPublicText: '好' });
-  vm.runInContext(branch, context);
-  assert.equal(context.result.deliveryStatus, 'completed');
-  assert.equal(context.result.text, '好');
 });

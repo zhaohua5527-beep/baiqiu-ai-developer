@@ -19,7 +19,22 @@ function releaseFiles(clientRoot) {
   const releasePath = path.join(clientRoot, "release-manifest.json");
   const release = readJson(releasePath);
   if (release.packageType !== "full-client" || !release.version || !Array.isArray(release.files)) throw new Error(`Invalid full release manifest: ${releasePath}`);
-  const entries = new Map(release.files.map((file) => [file.path, { ...file }]));
+  const inventoryPath = path.join(clientRoot, "release-files.json");
+  let inventory = null;
+  if (fs.existsSync(inventoryPath)) {
+    inventory = readJson(inventoryPath);
+    if (inventory.packageType !== "full-client-files" || inventory.version !== release.version || !Array.isArray(inventory.files)) {
+      throw new Error(`Invalid full release inventory: ${inventoryPath}`);
+    }
+  }
+  const entries = new Map((inventory?.files || release.files).map((file) => [file.path, { ...file }]));
+  if (inventory) {
+    entries.set("release-files.json", {
+      path: "release-files.json",
+      size: fs.statSync(inventoryPath).size,
+      sha256: sha256(inventoryPath)
+    });
+  }
   entries.set("release-manifest.json", {
     path: "release-manifest.json",
     size: fs.statSync(releasePath).size,

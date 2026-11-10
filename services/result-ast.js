@@ -134,7 +134,7 @@
       semanticRole: "document",
       copyable: true,
       copySerializer: "markdown",
-      children: blockNodes(lexer(source, { gfm: true, breaks: true }))
+      children: blockNodes(lexer(source, { gfm: true, breaks: true, tokenizer: options.tokenizer }))
     };
   }
 

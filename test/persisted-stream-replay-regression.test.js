@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const persistedReplay = require("../renderer-v2/persisted-replay");
 
 class MiniElement {
   constructor(tagName) {
@@ -24,7 +25,14 @@ class MiniElement {
     };
     this.hidden = false;
     this.textContent = "";
-    this.innerHTML = "";
+    this._innerHTML = "";
+    Object.defineProperty(this, "innerHTML", {
+      get: () => this._innerHTML,
+      set: (value) => {
+        this._innerHTML = String(value || "");
+        this.textContent = this._innerHTML;
+      }
+    });
     this.style = { removeProperty() {} };
     this.listeners = new Map();
   }
@@ -57,6 +65,7 @@ class MiniElement {
     const payload = event || { type: "click", target: this };
     payload.target ||= this;
     (this.listeners.get(payload.type) || []).forEach((listener) => listener(payload));
+    if (payload.bubbles !== false && this.parentNode) this.parentNode.dispatchEvent(payload);
   }
 
   click() { this.dispatchEvent({ type: "click", target: this }); }
@@ -111,6 +120,7 @@ function loadReplayApi() {
     "utf8"
   );
   const source = [
+    sourceBetween(rendererSource, "function activityDetailText", "function mergeExecutionNarrativeEntries"),
     sourceBetween(rendererSource, "function mergeStructuredEventLists", "function snapshotMessageIdentity"),
     sourceBetween(rendererSource, "function snapshotMessageIdentity", "function mergeSessionChangedDb"),
     sourceBetween(rendererSource, "function publicExecutionDetailsFromMessage", "function renderPersistedExecutionTimeline"),
@@ -124,6 +134,7 @@ function loadReplayApi() {
     Number,
     String,
     Date,
+    persistedReplay,
     document: { createElement: (tag) => new MiniElement(tag) },
     progressTarget: (event = {}) => String(event.target || event.progressTarget || ""),
     liveTurnEventFingerprint: (event) => JSON.stringify(event),
@@ -140,9 +151,13 @@ function loadReplayApi() {
     replaceExecutionActivityLines: () => {},
     isPublicStructuredThought: () => false,
     renderMarkdown: (text) => String(text || ""),
+    renderStructuredEntryText: (node, text) => { node.textContent = String(text || ""); },
+    decorateAnswerResult: () => {},
     bindRenderedLinks: () => {},
     classifyRenderedDataLayout: () => {},
     bindExecutionActivityViewport: () => {},
+    taskFace: { sync: () => {} },
+    paintExecutionStageView: (root, details) => { root.__paintedDetails = details; },
     mutatePreservingMessageViewport: (mutation) => mutation(),
     executionActivityNodes: (root) => ({ rendered: root.querySelector(".execution-activity-details") }),
     executionActivityRenderedDetails: (_root, details) => details,
@@ -177,6 +192,41 @@ test("structured-only persisted messages establish a real replay", () => {
   assert.equal(api.renderPersistedSegmentPairs(message, rendered), true);
   assert.equal(rendered.querySelector(".structured-result-entry").textContent, "stage confirmed");
 });
+
+test("cross and stage results stay in the main structured lane after execution collapse", () => {
+  const rendered = new MiniElement("div");
+  const message = persistedMessage({
+    structuredEvents: [
+      {
+        turnId: "turn-1",
+        eventId: "stage-result-1",
+        sequence: 2,
+        target: "structured_result",
+        semanticType: "stage_result",
+        message: "阶段结果正文"
+      },
+      {
+        turnId: "turn-1",
+        eventId: "cross-1",
+        sequence: 3,
+        target: "structured_result",
+        semanticType: "cross",
+        message: "交叉回复正文"
+      }
+    ]
+  });
+
+  assert.equal(api.renderPersistedSegmentPairs(message, rendered), true);
+  const structured = rendered.querySelector(".stream-segment-structured");
+  assert.equal(structured.hidden, false);
+  assert.equal(structured.classList.contains("persisted-structured-result"), true);
+  assert.deepEqual(
+    structured.querySelectorAll(".structured-result-entry").map((node) => node.textContent),
+    ["阶段结果正文", "交叉回复正文"]
+  );
+  assert.equal(rendered.querySelector(".stream-segment-process").hidden, true);
+});
+
 test("nested raw.raw execution, structured, and answer fields are restored", () => {
   const message = {
     raw: {
@@ -192,12 +242,12 @@ test("nested raw.raw execution, structured, and answer fields are restored", () 
   assert.equal(api.answerSegmentsFromMessage(message).some((item) => item.eventId === "answer-raw-raw"), true);
 });
 
-test("completed segmented details are hidden initially and restored by the expand action", () => {
+test("completed details expand through the execution panel without duplicating segmented details", () => {
   const rendered = new MiniElement("div");
   assert.equal(api.renderPersistedSegmentPairs(persistedMessage(), rendered), true);
   const block = rendered.querySelector(".stream-segment-block");
   assert.equal(block.querySelector(".stream-segment-process").hidden, true);
-  assert.equal(block.querySelector(".stream-segment-structured").hidden, true);
+  assert.equal(block.querySelector(".stream-segment-structured").hidden, false);
 
   const bubble = new MiniElement("div");
   bubble.className = "bubble";
@@ -212,7 +262,9 @@ test("completed segmented details are hidden initially and restored by the expan
   activity.appendChild(toggle);
   api.bindExecutionActivityToggle(activity);
   toggle.click();
-  assert.equal(block.querySelector(".stream-segment-process").hidden, false);
+  assert.equal(activity.dataset.activityExpanded, "1");
+  assert.equal(activity.__paintedDetails[0].message, "tool returned");
+  assert.equal(block.querySelector(".stream-segment-process").hidden, true);
   assert.equal(block.querySelector(".stream-segment-structured").hidden, false);
 });
 

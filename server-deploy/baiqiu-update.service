@@ -1,0 +1,23 @@
+[Unit]
+Description=Baiqiu AI update and download service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/baiqiu-update
+Environment=PYTHONUNBUFFERED=1
+Environment=BAIQIU_UPDATE_ROOT=/opt/baiqiu-update
+Environment=BAIQIU_UPDATE_HOST=127.0.0.1
+Environment=BAIQIU_UPDATE_PORT=18790
+EnvironmentFile=-/etc/baiqiu-update.env
+ExecStart=/usr/bin/python3 /opt/baiqiu-update/baiqiu-update-server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

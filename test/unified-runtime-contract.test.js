@@ -78,5 +78,6 @@ test("online updates use the signed update.json authority without latest.json fa
   const urls = mainSource.slice(mainSource.indexOf("function updateManifestUrls"), mainSource.indexOf("function updateJsonUrl"));
   assert.match(urls, /`\$\{baseUrl\}\/update\.json`/);
   assert.doesNotMatch(urls, /latest\.json/);
-  assert.match(mainSource, /DEFAULT_PUBLIC_SERVER = "http:\/\/156\.239\.227\.26"/);
+  assert.match(mainSource, /DEFAULT_PUBLIC_SERVER = "http:\/\/107\.149\.93\.41"/);
+  assert.match(mainSource, /LEGACY_PUBLIC_SERVER_ORIGINS = new Set\(\[[\s\S]*?"http:\/\/156\.239\.227\.26"/);
 });

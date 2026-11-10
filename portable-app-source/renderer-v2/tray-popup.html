@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>白球 AI</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      display: grid;
+      align-content: center;
+      padding: 8px;
+      overflow: hidden;
+      border: 1px solid #dce5f2;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #165dcc;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      box-shadow: 0 12px 28px rgb(25 56 96 / 18%);
+      user-select: none;
+    }
+    nav { display: grid; gap: 4px; }
+    a {
+      display: flex;
+      height: 36px;
+      align-items: center;
+      padding: 0 12px;
+      border-radius: 4px;
+      color: #165dcc;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0;
+      text-decoration: none;
+      outline: none;
+    }
+    a:hover,
+    a:focus-visible { background: #edf5ff; color: #0d4eae; }
+    a + a { border-top: 1px solid #edf1f7; border-radius: 0 0 4px 4px; }
+  </style>
+</head>
+<body>
+  <nav aria-label="白球托盘菜单">
+    <a href="baiqiu-tray://show">显示白球</a>
+    <a href="baiqiu-tray://quit">退出白球</a>
+  </nav>
+</body>
+</html>

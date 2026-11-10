@@ -13,6 +13,84 @@ const {
   sensitiveEvidencePath
 } = require("../services/hermes-acp-client");
 
+test("a prompt reserves its session before asynchronous initialization", async () => {
+  const client = new HermesAcpClient();
+  let release;
+  client.ensureSession = () => new Promise(resolve => { release = resolve; });
+  const first = client.prompt("one", "first");
+  await assert.rejects(client.prompt("one", "second"), { code: "HERMES_SESSION_BUSY" });
+  release({ hermesSessionId: "runtime-one", active: {
+    prompt() {}, nextUpdate: async () => ({ kind: "stop", stopReason: "end_turn" })
+  } });
+  await first;
+  assert.equal(client.hasActivePrompt("one"), false);
+});
+
+test("cancelled startup releases its reservation without dispatching", async () => {
+  const client = new HermesAcpClient();
+  client.ensureSession = async () => { throw new Error("startup failed"); };
+  await assert.rejects(client.prompt("one", "hello"), /startup failed/);
+  assert.equal(client.hasActivePrompt("one"), false);
+});
+
+test("abort preserves a generated file and quarantines the old runtime identity", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "baiqiu-abort-file-"));
+  try {
+    const file = path.join(directory, "result.docx");
+    fs.writeFileSync(file, "generated file fixture");
+    const client = new HermesAcpClient();
+    const controller = new AbortController();
+    let count = 0;
+    let disposed = false;
+    const session = { hermesSessionId: "old-runtime", active: {
+      prompt() {},
+      nextUpdate() {
+        count += 1;
+        if (count === 1) return Promise.resolve({ update: {
+          sessionUpdate: "tool_call_update", toolCallId: "generated-file", title: "write_docx", status: "completed",
+          rawOutput: { outputPath: file }, locations: [{ path: file }]
+        } });
+        controller.abort();
+        return new Promise(() => {});
+      },
+      dispose() { disposed = true; }
+    } };
+    client.sessions.set("one", session);
+    client.ensureSession = async () => session;
+    client.cancel = async () => true;
+    const result = await client.prompt("one", "generate", { signal: controller.signal, deliveryRoots: [directory] });
+    assert.equal(result.status, "cancelled");
+    assert.deepEqual(result.files.map(item => item.path), [file]);
+    assert.equal(client.interruptedSessions.has("old-runtime"), true);
+    assert.equal(client.sessions.has("one"), false);
+    assert.equal(disposed, true);
+    assert.equal(client.hasActivePrompt("one"), false);
+    client.start = async () => {};
+    client.supportsAcpMcp = () => false;
+    client.connection = { agent: {
+      request() { throw new Error("must not resume cancelled runtime"); },
+      buildSession: () => ({ start: async () => ({ sessionId: "fresh-runtime" }) })
+    } };
+    const next = await client._ensureSession("one", { hermesSessionId: "old-runtime", cwd: directory });
+    assert.equal(next.hermesSessionId, "fresh-runtime");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("runtime startup installs the tool execution bridge from the application", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "baiqiu-tool-bridge-"));
+  try {
+    ensureHermesPythonCompat({ platform: "win32", pythonCompatPath: directory });
+    for (const name of ["baiqiu_tool_execution.py", "baiqiu_run_state.py"]) {
+      assert.equal(fs.readFileSync(path.join(directory, name), "utf8"),
+        fs.readFileSync(path.join(__dirname, "..", "services", name), "utf8"));
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("generated files are collected from output text without treating input attachments as outputs", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "baiqiu-hermes-files-"));
   try {

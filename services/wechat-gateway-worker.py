@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import mimetypes
 import os
 import re
 import sqlite3
@@ -12,6 +13,31 @@ import time
 from pathlib import Path
 
 from gateway.platforms import weixin
+from baiqiu_wechat_messages import read_messages
+
+
+_DOCUMENT_NOTICE = re.compile(
+    r"\[The user sent a document:\s*'(?P<name>[^\r\n]+?)'\.\s*"
+    r"It is saved at:\s*(?P<path>[^\r\n]+?)\.\s*Its text is not inlined here[^\]]*\]",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _legacy_document_attachments(text):
+    attachments = []
+    root = (Path(_home()) / "cache" / "documents").resolve()
+
+    def replace(match):
+        name = match.group("name").strip()
+        candidate = Path(match.group("path").strip()).resolve()
+        if not name or not candidate.is_relative_to(root) or not candidate.is_file():
+            return match.group(0)
+        attachments.append({"id": "", "name": name,
+            "mimeType": mimetypes.guess_type(name)[0] or "application/octet-stream",
+            "sizeBytes": candidate.stat().st_size, "path": str(candidate)})
+        return ""
+
+    return _DOCUMENT_NOTICE.sub(replace, str(text or "")).strip(), attachments
 
 
 def _emit(value):
@@ -65,18 +91,23 @@ def _history_messages(limit=500):
         ).fetchall()
     finally:
         connection.close()
-    return [
-        {
+    result = []
+    for row in reversed(rows):
+        text = str(row["content"] or "")
+        attachments = []
+        if row["role"] == "user":
+            text, attachments = _legacy_document_attachments(text)
+        result.append({
             "messageId": str(row["message_id"]),
             "sessionId": str(row["session_id"] or ""),
             "role": str(row["role"] or ""),
-            "text": str(row["content"] or ""),
+            "text": text,
             "timestamp": float(row["timestamp"] or 0),
             "chatId": str(row["chat_id"] or ""),
             "userId": str(row["user_id"] or ""),
-        }
-        for row in reversed(rows)
-    ]
+            "attachments": attachments,
+        })
+    return result
 
 
 async def _api_get(base_url, endpoint):
@@ -90,20 +121,27 @@ class Bridge:
         self.qr_base_url = weixin.ILINK_BASE_URL
         self.gateway = None
         self.gateway_reader = None
+        self.gateway_ready = None
         self.send_cooldowns = {}
         self.desktop_receipts = {}
 
-    async def relay_gateway_events(self, stream):
+    async def relay_gateway_events(self, stream, ready):
         prefix = b"__BAIQIU_WECHAT_EVENT__"
         while True:
             line = await stream.readline()
             if not line:
+                if not ready.done():
+                    ready.set_result(False)
                 return
             if not line.startswith(prefix):
                 continue
             try:
                 event = json.loads(line[len(prefix):].decode("utf-8"))
             except Exception:
+                continue
+            if event.get("type") == "gateway_ready":
+                if not ready.done():
+                    ready.set_result(bool(event.get("connected")))
                 continue
             if event.get("type") == "desktop_receipt":
                 pending = self.desktop_receipts.get(event.get("requestId"))
@@ -114,7 +152,7 @@ class Bridge:
 
     async def ensure_gateway_started(self, account_id, data):
         if self.gateway and self.gateway.returncode is None:
-            return True
+            return bool(self.gateway_ready and self.gateway_ready.done() and self.gateway_ready.result())
         user_id = str(data.get("user_id") or "")
         if not account_id or not data.get("token") or not user_id:
             return False
@@ -137,15 +175,22 @@ class Bridge:
             stdout=asyncio.subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
-        self.gateway_reader = asyncio.create_task(self.relay_gateway_events(self.gateway.stdout))
-        await asyncio.sleep(0.8)
-        return self.gateway.returncode is None
+        self.gateway_ready = asyncio.get_running_loop().create_future()
+        self.gateway_reader = asyncio.create_task(self.relay_gateway_events(self.gateway.stdout, self.gateway_ready))
+        try:
+            ready = await asyncio.wait_for(asyncio.shield(self.gateway_ready), timeout=15)
+        except asyncio.TimeoutError:
+            ready = False
+        if not ready:
+            await self.stop_gateway()
+        return ready
 
     async def stop_gateway(self):
         process = self.gateway
         reader = self.gateway_reader
         self.gateway = None
         self.gateway_reader = None
+        self.gateway_ready = None
         if not process or process.returncode is not None:
             return
         process.terminate()
@@ -203,7 +248,11 @@ class Bridge:
             running = await self.ensure_gateway_started(account_id, data)
             return {"ok": running, "connected": running, "available": True, "accountId": account_id, "chatId": str(data.get("user_id") or ""), "updatedAt": data.get("saved_at") or "", "reason": "微信已连接" if running else "微信账号已绑定，但 HMS 消息网关没有运行"}
         if action == "history":
-            return {"ok": True, "available": True, "messages": _history_messages(request.get("limit") or 500)}
+            journal = read_messages(request.get("after") or 0, request.get("limit") or 500)
+            legacy = _history_messages() if not request.get("after") else []
+            if journal["started"] is not None:
+                legacy = [item for item in legacy if item["timestamp"] < journal["started"]]
+            return {"ok": True, "available": True, "messages": legacy + journal["messages"], "cursor": journal["cursor"]}
         if action == "unbind":
             await self.stop_gateway()
             root = Path(_home()) / "weixin" / "accounts"
@@ -214,6 +263,8 @@ class Bridge:
                         item.unlink(missing_ok=True)
                         removed += 1
             self.qr_value = ""
+            self.qr_base_url = weixin.ILINK_BASE_URL
+            self.send_cooldowns.clear()
             return {"ok": True, "connected": False, "available": True, "unbound": removed > 0}
         if action == "send":
             accounts = _accounts()

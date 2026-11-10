@@ -1,3 +1,5 @@
+> **2026-11-10 源码更新**：仓库根目录为 F 盘开发源码；[portable-app-source](portable-app-source/) 单独保存 F 盘便携程序的实际代码，[portable-installer](portable-installer/) 保存快捷安装器源码。两套源码存在差异，未自动合并。详见[本次上传说明](docs/source-upload-20261110.md)。源码内的私人邀请校验值已替换为占位符，使用该功能前需要自行配置。
+
 # ⚪ 白球 AI —— 把 AI 从「聊天窗口」带到你的电脑里
 
 过去几年，我们已经习惯了和 AI 对话。

@@ -126,11 +126,12 @@ test("stalled runs time out by exact owner without treating lifecycle theater as
   assert.match(activity, /source === "hms" && kind !== "lifecycle"/);
 });
 
-test("the real Hermes dispatch timing event arms the renderer timeout once", () => {
+test("the real provider HTTP request arms the renderer wait notice once", () => {
   const runtime = sourceBetween(mainSource, "async function runHermesSessionPrompt", "async function runHermesSessionPromptWithRecovery");
   assert.match(mainSource, /function emitBlackBallModelRequestDispatched/);
-  assert.match(runtime, /stage === "promptDispatched" && !modelRequestDispatched/);
-  assert.match(runtime, /emitBlackBallModelRequestDispatched\(session\.id, streamId, detail\?\.at\)/);
+  assert.match(runtime, /diagnostic.stage === "http_request" && !modelRequestDispatched/);
+  assert.match(runtime, /emitBlackBallModelRequestDispatched\(session\.id, streamId, diagnostic.timestamp\)/);
+  assert.doesNotMatch(runtime, /stage === "promptDispatched" && !modelRequestDispatched/);
 });
 
 test("drained output always commits a pending finalization", () => {

@@ -1,7 +1,8 @@
 ﻿// 全局错误捕获与白屏恢复
 (function initGlobalErrorGuard() {
   let errorOverlay = null;
-  const isNonBlockingScriptError = (error) => /^test is not defined$/i.test(String(error?.message || error || "").trim());
+  const isNonBlockingScriptError = (error) => /^(?:test is not defined|ResizeObserver loop (?:limit exceeded|completed with undelivered notifications\.))$/i
+    .test(String(error?.message || error || "").trim());
   function showFatalError(error) {
     if (errorOverlay) return;
     console.error('[FatalError]', error);
@@ -20,7 +21,6 @@
     document.body.appendChild(errorOverlay);
   }
   window.addEventListener('error', (e) => {
-    if (e.error && e.error.message && e.error.message.includes('ResizeObserver')) return;
     if (isNonBlockingScriptError(e.error || e.message)) {
       e.preventDefault();
       console.warn('[NonBlockingScriptError]', e.error || e.message);
@@ -29,7 +29,6 @@
     showFatalError(e.error || e.message);
   });
   window.addEventListener('unhandledrejection', (e) => {
-    if (e.reason && String(e.reason.message || '').includes('ResizeObserver')) return;
     if (isNonBlockingScriptError(e.reason)) {
       e.preventDefault();
       console.warn('[NonBlockingScriptError]', e.reason);
@@ -87,6 +86,8 @@ const SESSION_READ_STATE_KEY = "baiqiu.sessionReadRevisions";
 const SESSION_NOTICE_ACK_KEY = "baiqiu.sessionNoticeAcknowledgements";
 const SESSION_DRAFT_KEY = "baiqiu.sessionDrafts";
 const SESSION_SCROLL_KEY = "baiqiu.sessionScrollPositions";
+const SESSION_SCROLL_SAVE_DELAY_MS = 120;
+const SESSION_SCROLL_RESTORE_SETTLE_MS = 120;
 const MESSAGE_WINDOW_SIZE = 60;
 const MESSAGE_WINDOW_OVERLAP = 8;
 const INSTRUCTION_ANCHOR_TOP_GAP = 20;
@@ -152,6 +153,7 @@ const state = {
   lastMessageSignature: "",
   lastSessionChangedSequence: 0,
   messageWindowOffsets: new Map(),
+  sessionScrollPositions: new Map(),
   sessionMessageHistoryCache: new Map(),
   sessionMessageDomCache: new Map(),
   authoritativeMessagesBySession: new Map(),
@@ -163,6 +165,8 @@ const state = {
   taskBoardFocusId: "",
   taskBoardPreviewRows: {},
   taskBoardPreviewContent: {},
+  taskBoardOpenedFiles: {},
+  taskBoardDocumentDrafts: {},
   blackBallBrowser: { open: false, loading: false, url: "", title: "黑球浏览器", error: "", history: [] },
   wechat: { connected: false, available: false, qrDataUrl: "", reason: "", sessionId: "" },
   taskBoardLiveEvents: {},
@@ -176,6 +180,7 @@ const state = {
   taskBoardMessageSessionId: "",
   taskBoardEventCache: { signature: "", value: null },
   providerModels: {},
+  providerCatalogs: {},
   providerModelStatus: {},
   providerModelErrors: {},
   providerLastChecked: {},
@@ -215,6 +220,7 @@ const state = {
   pendingSuggestionMessageId: ""
 };
 const sessionTaskQueue = new window.BaiqiuSessionTaskQueue();
+const queueDispatches = new Set();
 const liveChatStreams = new Map();
 const activeSendOwners = new Map();
 const sessionExecutionIndicators = new Map();
@@ -670,6 +676,9 @@ const EXECUTION_STAGE_ORDER = Object.freeze({ understanding: 0, executing: 1, ty
 let streamingScrollFrame = 0;
 let messageBottomScrollFrame = 0;
 let sessionScrollRestoreFrame = 0;
+let sessionScrollSaveTimer = 0;
+let sessionScrollRestoreToken = 0;
+let pendingSessionScrollRestore = null;
 let instructionAnchorFrame = 0;
 let instructionAnchorScrollFrame = 0;
 let readingControlsFrame = 0;
@@ -678,6 +687,7 @@ let sessionAuxiliaryRenderTimer = null;
 let sessionAuxiliaryRenderIdle = null;
 let draftSaveTimer = null;
 let composerHeightFrame = 0;
+let composerHeightMeasure = null;
 let foregroundChatPrewarmTimer = null;
 let longReplyFocusTimer = null;
 let foregroundChatPrewarmIdleHandle = null;
@@ -689,6 +699,12 @@ const foregroundChatPrewarmRequests = new Map();
 function requestForegroundChatPrewarm(sessionId = state.selectedSessionId) {
   const targetId = String(sessionId || "").trim();
   if (!targetId || !api?.prewarmChat) return Promise.resolve(false);
+  const session = state.db?.sessions?.find((item) => item.id === targetId);
+  if (state.busy || sessionIsRunning(session)
+    || sessionTaskQueue.isPending(targetId)
+    || activeSendOwners.has(targetId)
+    || activeLiveChatStreamForSession(targetId)
+    || activeAssistantTypingForSession(targetId)) return Promise.resolve(false);
   if (foregroundChatPrewarmRequests.has(targetId)) return foregroundChatPrewarmRequests.get(targetId);
   const request = Promise.resolve(api.prewarmChat(targetId))
     .then((warmed) => warmed === true)
@@ -711,6 +727,12 @@ function scheduleForegroundChatPrewarm(sessionId = state.selectedSessionId, dela
     foregroundChatPrewarmTimer = null;
     const run = () => {
       foregroundChatPrewarmIdleHandle = null;
+      const session = state.db?.sessions?.find((item) => item.id === targetId);
+      if (state.busy || sessionIsRunning(session)
+        || sessionTaskQueue.isPending(targetId)
+        || activeSendOwners.has(targetId)
+        || activeLiveChatStreamForSession(targetId)
+        || activeAssistantTypingForSession(targetId)) return;
       void requestForegroundChatPrewarm(targetId);
     };
     if (window.requestIdleCallback) {
@@ -1123,6 +1145,8 @@ const unbindWechatBtn = $("unbindWechatBtn");
 const openWechatSessionBtn = $("openWechatSessionBtn");
 const wechatLastSync = $("wechatLastSync");
 let wechatQrPollTimer = 0;
+let wechatQrRevision = 0;
+let wechatUnbinding = false;
 let wechatConversationAutoEntered = false;
 
 async function enterWechatConversation() {
@@ -1144,6 +1168,8 @@ const publishNotesInput = $("publishNotesInput");
 const publishUpdateBtn = $("publishUpdateBtn");
 const startUpdateServerBtn = $("startUpdateServerBtn");
 let availableUpdateInfo = null;
+let updateBadgeCheckPromise = null;
+let updateBadgeCheckedAt = 0;
 let updateOperationActive = false;
 let updatePrepared = false;
 let pendingUpdateProgressStatus = null;
@@ -1399,10 +1425,10 @@ function getAssistantMarkdownRenderer() {
   return assistantMarkdownRenderer;
 }
 
-function renderMarkdown(text) {
+function renderMarkdown(text, envelope = {}) {
   const source = String(text || "").trim();
   if (!source) return "";
-  const normalizedSource = promoteNovelChapterHeadings(source);
+  const normalizedSource = source;
   if (!window.marked?.parse) return `<p>${escapeHtml(normalizedSource).replace(/\n/g, "<br>")}</p>`;
   const markdownSource = window.BaiqiuAssistantCodeUtils?.prepareAssistantMarkdownSource?.(normalizedSource)
     || escapeHtml(normalizedSource);
@@ -1410,7 +1436,15 @@ function renderMarkdown(text) {
   template.innerHTML = window.marked.parse(markdownSource, {
     gfm: true,
     breaks: true,
+    tokenizer: window.BaiqiuAssistantCodeUtils?.createAssistantMarkdownTokenizer?.(window.marked?.Tokenizer),
     renderer: getAssistantMarkdownRenderer()
+  });
+  const sourceCodeBlocks = [];
+  window.marked.walkTokens?.(window.marked.lexer(normalizedSource, { gfm: true, breaks: true }), token => {
+    if (token.type === "code") sourceCodeBlocks.push(token.text);
+  });
+  template.content.querySelectorAll("pre > code").forEach((code, index) => {
+    if (typeof sourceCodeBlocks[index] === "string") code.textContent = sourceCodeBlocks[index];
   });
   template.content.querySelectorAll("a").forEach((link) => {
     const href = String(link.getAttribute("href") || "").trim();
@@ -1423,6 +1457,10 @@ function renderMarkdown(text) {
       link.removeAttribute("href");
     }
   });
+  window.BaiqiuAnswerDocument?.applyAnswerDocumentRoles?.(
+    template.content,
+    envelope?.answerDocument || window.BaiqiuAnswerDocument?.documentFromMessage?.(envelope)
+  );
   return template.innerHTML;
 }
 
@@ -1430,6 +1468,7 @@ function createAnswerResultDocument(source = "", envelope = {}) {
   return window.BaiqiuResultAst?.createResultAst?.(source, {
     target: "answer",
     envelope,
+    tokenizer: window.BaiqiuAssistantCodeUtils?.createAssistantMarkdownTokenizer?.(window.marked?.Tokenizer),
     marked: window.marked
   }) || null;
 }
@@ -1449,7 +1488,12 @@ function setAnswerResultDocument(rendered, source = "", envelope = {}) {
 }
 
 function decorateAnswerResult(rendered, source = "", envelope = {}) {
-  return setAnswerResultDocument(rendered, source, envelope);
+  const documentModel = setAnswerResultDocument(rendered, source, envelope);
+  window.BaiqiuAnswerDocument?.applyAnswerDocumentRoles?.(
+    rendered,
+    envelope?.answerDocument || window.BaiqiuAnswerDocument?.documentFromMessage?.(envelope)
+  );
+  return documentModel;
 }
 
 function answerResultCopyText(rendered, fallback = "") {
@@ -1491,6 +1535,11 @@ function stripHmsOutlineEnvelopeTags(text = "") {
     .trim();
 }
 
+function stripAnswerDocumentEnvelopeTags(text = "") {
+  return window.BaiqiuAnswerDocument?.stripAnswerDocumentEnvelope?.(String(text || ""))
+    || String(text || "");
+}
+
 function clientPresentationFromText(text = "") {
   const source = String(text || "");
   const match = source.match(/<baiqiu-presentation>([\s\S]*?)<\/baiqiu-presentation>/i);
@@ -1524,7 +1573,9 @@ function filterAssistantExecutionOutput(text) {
   // Protocol demuxing happens before this point. Keep provider text intact so
   // the live answer and the persisted answer do not take different paths.
   const cleaned = String(text || "").trim();
-  const stripped = stripHmsOutlineEnvelopeTags(stripHmsProgressEnvelopeTags(stripHmsPresentationEnvelopeTags(cleaned)));
+  const stripped = stripAnswerDocumentEnvelopeTags(
+    stripHmsOutlineEnvelopeTags(stripHmsProgressEnvelopeTags(stripHmsPresentationEnvelopeTags(cleaned)))
+  );
   if (stripped) return rawBlackBallAnswerText(stripped);
   // Keep partial protocol text available while the stream is still open.
   return rawBlackBallAnswerText(text);
@@ -1532,7 +1583,7 @@ function filterAssistantExecutionOutput(text) {
 
 function normalizeEscapedBaiqiuProtocolClosers(text = "") {
   return String(text || "").replace(
-    /<\\+\/(baiqiu-(?:progress|answer|final|presentation|outcome|clarification|outline))\b/ig,
+    /<\\+\/(baiqiu-(?:progress|answer|final|presentation|outcome|clarification|outline|answer-document))\b/ig,
     "</$1"
   );
 }
@@ -1552,7 +1603,8 @@ function stripTrailingBaiqiuProtocolFragment(text = "") {
     "<baiqiu-presentation", "</baiqiu-presentation",
     "<baiqiu-outcome", "</baiqiu-outcome",
     "<baiqiu-clarification", "</baiqiu-clarification",
-    "<baiqiu-outline", "</baiqiu-outline"
+    "<baiqiu-outline", "</baiqiu-outline",
+    "<baiqiu-answer-document", "</baiqiu-answer-document"
   ];
   return boundaries.some((boundary) => boundary.startsWith(lower) || lower.startsWith(boundary))
     ? source.slice(0, start)
@@ -1564,12 +1616,12 @@ function rawBlackBallAnswerText(text = "") {
   const finalMatches = [...source.matchAll(/<baiqiu-final>([\s\S]*?)<\/baiqiu-final>/ig)];
   const answer = finalMatches.length ? finalMatches.at(-1)?.[1] || "" : source;
   const cleaned = stripTrailingBaiqiuProtocolFragment(String(answer)
-    .replace(/<baiqiu-(?:progress|presentation|outcome|clarification|outline)>[\s\S]*?<\/baiqiu-(?:progress|presentation|outcome|clarification|outline)>/ig, "")
+    .replace(/<baiqiu-(?:progress|presentation|outcome|clarification|outline|answer-document)>[\s\S]*?<\/baiqiu-(?:progress|presentation|outcome|clarification|outline|answer-document)>/ig, "")
     // Tolerate the provider typo where a progress envelope is closed with an
     // answer-shaped tag carrying a segment id. The demux recovers this live;
     // the final sanitizer must remove the same wrapper without replaying it.
     .replace(/<baiqiu-progress>[\s\S]*?<\/baiqiu-answer\b[^>]*>/ig, "")
-    .replace(/<baiqiu-(?:progress|presentation|outcome|clarification|outline)>(?![\s\S]*?<\/baiqiu-(?:progress|presentation|outcome|clarification|outline)>)/ig, "")
+    .replace(/<baiqiu-(?:progress|presentation|outcome|clarification|outline|answer-document)>(?![\s\S]*?<\/baiqiu-(?:progress|presentation|outcome|clarification|outline|answer-document)>)[\s\S]*$/ig, "")
     .replace(/<\/baiqiu-answer\b[^>]*\bsegment(?:Id|_id)\s*=\s*["'][^"']+["'][^>]*>/ig, "")
     .replace(/<\/?baiqiu-(?:answer|final)\b[^>]*>/ig, ""))
     .trim();
@@ -1647,8 +1699,175 @@ function openLinkInTaskBoard(url = "") {
   });
 }
 
+function localFilePathFromText(value = "") {
+  const text = String(value || "");
+  const match = text.match(/[A-Za-z]:[\\/][^<>"\u0000-\u001f]+/);
+  if (!match) return null;
+  let pathValue = match[0];
+  pathValue = pathValue.replace(/[\s\u00a0]*[，。；：、！？!?）)】】》>]+$/u, "");
+  return pathValue.length > 2 ? pathValue : null;
+}
+
+function localFilePathFromHref(href = "") {
+  if (/^[A-Za-z]:[\\/]/.test(href)) return href;
+  if (!/^file:/i.test(href)) return null;
+  try {
+    const url = new URL(href);
+    if (url.hostname && url.hostname !== "localhost") return null;
+    const decoded = decodeURIComponent(url.pathname).replace(/^\/(?=[A-Za-z]:)/, "");
+    return /^[A-Za-z]:[\\/]/.test(decoded) ? decoded : null;
+  } catch { return null; }
+}
+
+function openTaskBoardFileFromPath(pathValue = "") {
+  const sourcePath = String(pathValue || "").trim();
+  if (!/^[A-Za-z]:[\\/]/.test(sourcePath)) return;
+  const name = sourcePath.split(/[\\/]/).pop() || sourcePath;
+  const file = {
+    id: sourcePath,
+    name,
+    mimeType: generatedFileMimeType(name),
+    sourcePath,
+    path: sourcePath,
+    strictPath: true,
+    source: "对话文件"
+  };
+  workspaceRegister(file);
+  const tab = isTaskBoardImage(file) ? "images" : "files";
+  openTaskBoard(tab, sourcePath);
+  if (tab === "images") void loadTaskBoardImagePreview(file);
+  else void loadTaskBoardFilePreview(file);
+}
+
+async function openConversationFilePreview(rendered, pathValue) {
+  const bubble = rendered.closest(".bubble") || rendered.parentElement;
+  if (!bubble) return;
+  let panel = bubble.querySelector(":scope > .conversation-file-preview");
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.className = "conversation-file-preview";
+    panel.setAttribute("role", "region");
+    bubble.appendChild(panel);
+  }
+  const requestId = (panel.__previewRequest || 0) + 1;
+  panel.__previewRequest = requestId;
+  const name = pathValue.split(/[\\/]/).pop() || pathValue;
+  panel.setAttribute("aria-label", `${name} 文件预览`);
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  title.textContent = name;
+  title.title = pathValue;
+  header.appendChild(title);
+  const attachment = { sourcePath: pathValue, name, strictPath: true };
+  for (const [label, action] of [
+    ["打开原文件", () => api.openPath(pathValue)],
+    ["打开所在位置", () => api.showAttachmentInFolder(attachment)],
+    ["收起预览", () => { panel.__previewRequest++; panel.remove(); }]
+  ]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", async () => {
+      try {
+        const result = await action();
+        if (result?.ok === false) throw new Error(result.message || "文件操作失败");
+      } catch (error) { showCopyToast(error.message || "文件操作失败", 2600); }
+    });
+    header.appendChild(button);
+  }
+  const content = document.createElement("div");
+  content.className = "conversation-file-preview-content";
+  content.setAttribute("aria-busy", "true");
+  content.textContent = "正在读取文件…";
+  panel.replaceChildren(header, content);
+  panel.scrollIntoView?.({ block: "nearest", behavior: "auto" });
+  try {
+    const preview = await api.previewAttachment(attachment);
+    if (!panel.isConnected || panel.__previewRequest !== requestId) return;
+    if (!preview?.ok) {
+      content.textContent = preview?.previewText || "无法预览此文件，请打开原文件查看。";
+      return;
+    }
+    if (preview.kind === "frame" && /\.pdf$/i.test(name) && /^file:/i.test(preview.fileUrl || "")) {
+      const frame = document.createElement("iframe");
+      frame.src = preview.fileUrl;
+      frame.title = `${name} PDF 预览`;
+      content.replaceChildren(frame);
+    } else if (preview.kind === "image" && /^data:image\//i.test(preview.dataUrl || "")) {
+      const image = document.createElement("img");
+      image.src = preview.dataUrl;
+      image.alt = name;
+      image.addEventListener("error", () => { content.textContent = "图片加载失败，请打开原文件查看。"; });
+      content.replaceChildren(image);
+    } else {
+      const note = document.createElement("p");
+      note.className = "conversation-file-preview-note";
+      note.textContent = preview.kind === "document" ? "Word 内容预览；原始排版请查看原文件或对应 PDF。"
+        : preview.kind === "slides" ? "幻灯片文字预览；原始排版请查看原文件。"
+          : preview.truncated ? "仅预览前 12,000 个字符，完整内容请打开原文件。" : "文件内容预览";
+      const text = document.createElement("pre");
+      text.textContent = preview.kind === "slides"
+        ? (preview.slides || []).map(slide => [slide.title, ...(slide.lines || [])].filter(Boolean).join("\n")).join("\n\n")
+        : preview.previewText || "文件没有可预览的文字内容。";
+      content.replaceChildren(note, text);
+    }
+  } catch (error) {
+    if (panel.isConnected && panel.__previewRequest === requestId) content.textContent = error.message || "文件读取失败";
+  } finally {
+    if (panel.__previewRequest === requestId) content.removeAttribute("aria-busy");
+  }
+}
+
+function bindConversationFileLink(link, rendered, pathValue) {
+  if (link.dataset.localFilePath) return;
+  link.href = "#";
+  link.dataset.localFilePath = pathValue;
+  link.classList.add("local-file-path-link");
+  link.title = `点击在任务看板打开\n${pathValue}`;
+  link.addEventListener("click", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    openTaskBoardFileFromPath(pathValue);
+  });
+}
+
+function bindLocalFilePathLinks(rendered) {
+  if (!rendered) return;
+  const walker = document.createTreeWalker(rendered, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode);
+  for (const node of textNodes) {
+    const parent = node.parentElement;
+    if (!parent || parent.closest("a, button, pre, textarea, input, script, style, [data-local-file-path]")) continue;
+    const value = String(node.nodeValue || "");
+    const match = value.match(/[A-Za-z]:[\\/][^<>"\u0000-\u001f]+/);
+    if (!match) continue;
+    const pathValue = localFilePathFromText(match[0]);
+    if (!pathValue) continue;
+    const inlineCode = parent.closest("code");
+    if (inlineCode && inlineCode.textContent.trim() !== pathValue) continue;
+    const start = match.index || 0;
+    const pathEnd = start + pathValue.length;
+    const fragment = document.createDocumentFragment();
+    if (start) fragment.appendChild(document.createTextNode(value.slice(0, start)));
+    const link = document.createElement("a");
+    link.textContent = pathValue.split(/[\\/]/).pop() || pathValue;
+    bindConversationFileLink(link, rendered, pathValue);
+    fragment.appendChild(link);
+    if (pathEnd < value.length) fragment.appendChild(document.createTextNode(value.slice(pathEnd)));
+    node.replaceWith(fragment);
+  }
+}
+
 function bindRenderedLinks(rendered) {
+  bindLocalFilePathLinks(rendered);
   rendered.querySelectorAll("a[href]").forEach((link) => {
+    if (link.dataset.localFilePath) return;
+    const localPath = localFilePathFromHref(link.getAttribute("href") || "");
+    if (localPath) {
+      bindConversationFileLink(link, rendered, localPath);
+      return;
+    }
     link.addEventListener("click", (event) => {
       event.preventDefault();
       const href = link.getAttribute("href") || "";
@@ -1666,28 +1885,39 @@ function bindRenderedLinks(rendered) {
   });
 }
 
-function enhanceHiddenCodeBlocks(rendered, blocks = []) {
-  if (!blocks.length) return;
-  const placeholders = [...rendered.querySelectorAll("p, li")]
-    .filter((element) => /代码内容已隐藏/.test(element.textContent || ""));
-  if (!placeholders.length) return;
-  const combined = {
-    language: blocks.every((block) => block.language === blocks[0]?.language) ? blocks[0]?.language : "代码",
-    code: blocks.map((block) => block.code || "").filter(Boolean).join("\n\n")
-  };
+function hiddenCodeLanguageLabel(language = "代码") {
   const languageLabels = {
     bash: "Bash",
+    bat: "批处理",
+    batch: "批处理",
+    "baiqiu-evidence": "证据",
+    cmd: "命令提示符",
+    console: "控制台",
+    evidence: "证据",
     c: "C",
     cpp: "C++",
     csharp: "C#",
     css: "CSS",
+    diff: "差异",
+    dot: "DOT",
+    flowchart: "流程图",
     go: "Go",
+    graphviz: "Graphviz",
     html: "HTML",
     java: "Java",
     javascript: "JavaScript",
     js: "JavaScript",
     json: "JSON",
+    jsonc: "JSONC",
     jsx: "JSX",
+    log: "日志",
+    logs: "日志",
+    md: "Markdown",
+    markdown: "Markdown",
+    mermaid: "Mermaid",
+    mindmap: "思维导图",
+    output: "输出",
+    patch: "补丁",
     php: "PHP",
     powershell: "PowerShell",
     ps1: "PowerShell",
@@ -1697,6 +1927,8 @@ function enhanceHiddenCodeBlocks(rendered, blocks = []) {
     rust: "Rust",
     sh: "Shell",
     shell: "Shell",
+    stderr: "stderr",
+    stdout: "stdout",
     sql: "SQL",
     ts: "TypeScript",
     tsx: "TSX",
@@ -1705,51 +1937,521 @@ function enhanceHiddenCodeBlocks(rendered, blocks = []) {
     yaml: "YAML",
     yml: "YAML"
   };
-  const rawLanguage = String(combined.language || "代码").trim();
-  const languageLabel = languageLabels[rawLanguage.toLowerCase()] || rawLanguage || "代码";
+  const rawLanguage = String(language || "代码").trim();
+  return {
+    rawLanguage: rawLanguage || "代码",
+    label: languageLabels[rawLanguage.toLowerCase()] || rawLanguage || "代码"
+  };
+}
+
+function hiddenCodeKindLabel(kind = "code") {
+  return ({
+    code: "源代码",
+    command: "命令",
+    json: "结构化数据",
+    diff: "修改差异",
+    log: "运行日志",
+    evidence: "核查记录",
+    text: "文本记录",
+    document: "文档",
+    diagram: "图示描述"
+  })[kind] || "源代码";
+}
+
+function createJsonPresentationEntry(key, value) {
+  const isBranch = value !== null && typeof value === "object";
+  if (!isBranch) {
+    const row = document.createElement("div");
+    row.className = "hidden-code-json-entry";
+    const name = document.createElement("span");
+    name.className = "hidden-code-json-key";
+    name.textContent = key;
+    const content = document.createElement("code");
+    content.className = "hidden-code-json-value";
+    content.dataset.valueType = value === null ? "null" : typeof value;
+    content.textContent = typeof value === "string" ? JSON.stringify(value) : String(value);
+    row.append(name, content);
+    return row;
+  }
+
+  const details = document.createElement("details");
+  details.className = "hidden-code-json-node";
+  const entries = Array.isArray(value)
+    ? value.map((item, index) => [String(index), item])
+    : Object.entries(value);
+  const summary = document.createElement("summary");
+  const name = document.createElement("span");
+  name.className = "hidden-code-json-key";
+  name.textContent = key;
+  const count = document.createElement("span");
+  count.className = "hidden-code-json-count";
+  count.textContent = `${Array.isArray(value) ? "数组" : "对象"} · ${entries.length} 项`;
+  summary.append(name, count);
+  const children = document.createElement("div");
+  children.className = "hidden-code-json-children";
+  details.append(summary, children);
+  details.addEventListener("toggle", () => {
+    if (!details.open || details.dataset.loaded) return;
+    details.dataset.loaded = "true";
+    entries.forEach(([childKey, childValue]) => {
+      children.append(createJsonPresentationEntry(childKey, childValue));
+    });
+    if (!entries.length) children.textContent = "空";
+  });
+  return details;
+}
+
+function createCodeBlockPresentation(kind, source) {
+  if (kind === "evidence") return createEvidenceTextBlock(source);
+  if (kind === "text") return createPlainTextBlock(source);
+  if (kind === "json") {
+    let value;
+    try {
+      value = JSON.parse(source);
+    } catch {
+      return null;
+    }
+    const tree = document.createElement("div");
+    tree.className = "hidden-code-json-tree";
+    if (value !== null && typeof value === "object") {
+      const entries = Array.isArray(value)
+        ? value.map((item, index) => [String(index), item])
+        : Object.entries(value);
+      entries.forEach(([key, item]) => tree.append(createJsonPresentationEntry(key, item)));
+      if (!entries.length) tree.textContent = "空";
+    } else {
+      tree.append(createJsonPresentationEntry("值", value));
+    }
+    return tree;
+  }
+
+  if (kind === "document") {
+    const documentView = document.createElement("article");
+    documentView.className = "hidden-code-document rendered";
+    documentView.innerHTML = renderMarkdown(source);
+    bindRenderedLinks(documentView);
+    return documentView;
+  }
+
+  if (kind !== "diff" && kind !== "log") return null;
+  const lines = document.createElement("div");
+  lines.className = `hidden-code-lines hidden-code-lines-${kind}`;
+  String(source).replace(/\r\n?/g, "\n").split("\n").forEach((line, index) => {
+    const row = document.createElement("div");
+    row.className = "hidden-code-line";
+    row.dataset.lineNumber = String(index + 1);
+    if (kind === "diff") {
+      row.dataset.diffKind = /^\+\+\+|^---|^@@/.test(line)
+        ? "meta"
+        : line.startsWith("+") ? "added" : line.startsWith("-") ? "removed" : "context";
+    }
+    const content = document.createElement("code");
+    content.textContent = line;
+    row.append(content);
+    lines.append(row);
+  });
+  return lines;
+}
+
+function createEvidenceTextBlock(source) {
+  const block = document.createElement("div");
+  block.className = "evidence-code-text";
+  block.setAttribute("aria-label", "证据文本");
+  String(source).replace(/\r\n?/g, "\n").split("\n").forEach((line) => {
+    const row = document.createElement("div");
+    row.className = "evidence-code-line";
+    const status = line.match(/^\s*(OK|MISS|PASS|FAIL)\b/i)?.[1]?.toLowerCase();
+    if (status) row.dataset.status = status;
+    row.textContent = line;
+    block.append(row);
+  });
+  return block;
+}
+
+function createPlainTextBlock(source) {
+  const block = document.createElement("div");
+  block.className = "plain-code-text";
+  block.setAttribute("aria-label", "纯文本内容");
+  String(source).replace(/\r\n?/g, "\n").split("\n").forEach((line) => {
+    const row = document.createElement("div");
+    row.className = "plain-code-line";
+    row.textContent = line;
+    block.append(row);
+  });
+  return block;
+}
+
+function codeRevisionFromMessage(message = {}) {
+  if (message.role !== "user") return null;
+  const text = String(message.text || "");
+  if (!text.startsWith("用户在回复内容块中明确提交了修改。")) return null;
+  const boundary = text.indexOf("\n\n{");
+  if (boundary < 0) return null;
+  try {
+    const revision = JSON.parse(text.slice(boundary + 2));
+    if (revision?.type !== "code_block_revision" || typeof revision.revisionId !== "string"
+      || !revision.revisionId.startsWith("code-edit-") || typeof revision.sessionId !== "string"
+      || typeof revision.original !== "string" || typeof revision.revised !== "string"
+      || typeof revision.instruction !== "string") return null;
+    return revision;
+  } catch { return null; }
+}
+
+function codeRevisionDisplayText(revision) {
+  const instruction = revision.instruction.trim();
+  return instruction && instruction !== "请按修改后的内容继续当前任务，并返回修改后的完整结果。"
+    ? revision.instruction : "已提交内容修改，请按修改稿继续处理。";
+}
+
+function renderCodeRevisionMessage(rendered, revision) {
+  const line = document.createElement("div");
+  line.className = "code-revision-line";
+  const summary = document.createElement("span");
+  summary.className = "code-revision-summary";
+  summary.textContent = codeRevisionDisplayText(revision);
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "code-revision-toggle";
+  toggle.textContent = "查看修改";
+  toggle.setAttribute("aria-expanded", "false");
+  const details = document.createElement("div");
+  details.className = "code-revision-details";
+  details.hidden = true;
+  toggle.addEventListener("click", () => {
+    if (!details.childNodes.length) {
+      for (const [label, value] of [["修改前", revision.original], ["修改后", revision.revised]]) {
+        const heading = document.createElement("div");
+        heading.className = "code-revision-label";
+        heading.textContent = label;
+        const content = document.createElement("pre");
+        content.className = "code-revision-text";
+        content.textContent = value;
+        if (!value) {
+          content.textContent = "（空内容）";
+          content.classList.add("is-empty");
+        }
+        details.append(heading, content);
+      }
+    }
+    details.hidden = !details.hidden;
+    toggle.textContent = details.hidden ? "查看修改" : "收起修改";
+    toggle.setAttribute("aria-expanded", String(!details.hidden));
+  });
+  line.append(summary, toggle);
+  rendered.classList.add("code-revision-message");
+  rendered.replaceChildren(line, details);
+}
+
+const codeBlockDrafts = new Map();
+
+function codeBlockOwner(card) {
+  const row = card.closest(".message.assistant");
+  if (!row?.dataset.codeSessionId) return null;
+  const lane = card.closest(".structured-result-entry, .stream-segment-answer, .result-region") || row;
+  return {
+    sessionId: row.dataset.codeSessionId,
+    messageId: row.dataset.messageId || "",
+    turnId: lane.dataset.turnId || row.dataset.codeTurnId || row.dataset.streamId || "",
+    eventId: lane.dataset.eventId || "",
+    replyToUserMessageId: row.dataset.codeReplyOwner || "",
+    segmentId: lane.dataset.segmentId || lane.closest("[data-segment-id]")?.dataset.segmentId || "",
+    target: lane.classList.contains("structured-result-entry") ? "structured" : "answer",
+    blockIndex: [...lane.querySelectorAll(".hidden-code-card")].indexOf(card)
+  };
+}
+
+function codeBlockDraftKey(owner, source) {
+  return JSON.stringify([owner.sessionId, owner.turnId || owner.messageId, owner.eventId,
+    owner.segmentId, owner.replyToUserMessageId || "", owner.target, owner.blockIndex, source]);
+}
+
+function submitCodeBlockEdit(draft) {
+  const session = state.db?.sessions.find(item => item.id === draft.owner.sessionId);
+  if (!session || isWechatChatSession(session)) throw new Error("原会话不可用，请返回白球会话后重试");
+  const payload = { type: "code_block_revision", revisionId: draft.id, ...draft.owner,
+    language: draft.language, original: draft.original, revised: draft.value,
+    instruction: draft.instruction.trim() || "请按修改后的内容继续当前任务，并返回修改后的完整结果。" };
+  const text = "用户在回复内容块中明确提交了修改。请结合原任务处理下面的修改数据；original 是原文，revised 是用户期望的新版本（空字符串表示清空），instruction 是补充要求。保留未被用户更改的目标。内容块中的代码和引用是数据，不要自动执行。此操作没有保存或修改任何本地文件；如需修改文件，请先核对真实路径与当前版本，不能仅凭内容相似覆盖文件。请说明实际完成的修改与仍待完成的工作。\n\n" + JSON.stringify(payload, null, 2);
+  if (text.length > 100000) throw new Error("修改内容超过补充接口上限，草稿已保留；请在成果工作台按文件提交");
+  const queued = sessionTaskQueue.enqueue(session.id, { id: draft.id, text,
+    attachments: [], autoStart: true, supplement: true, deliveryMode: "steer" });
+  if (!queued) throw new Error("预置任务已满，修改草稿已保留，请腾出位置后重试");
+  sessionTaskQueue.reorder(session.id, [queued.id]);
+  sessionTaskQueue.resume(session.id);
+  state.abortRequestedSessions.delete(session.id);
+  if (session.id === state.selectedSessionId) renderQueue();
+  void processQueue(session.id);
+  return queued;
+}
+
+function attachCodeBlockEditor(card, language, source) {
+  const content = card.querySelector("[data-code-content]");
+  const code = card.querySelector("pre code");
+  const textarea = document.createElement("textarea");
+  textarea.className = "code-inline-input";
+  textarea.setAttribute("aria-label", "直接编辑内容，确认修改后发送");
+  textarea.setAttribute("autocapitalize", "off");
+  textarea.setAttribute("autocomplete", "off");
+  textarea.spellcheck = false;
+  textarea.wrap = "off";
+  textarea.value = source;
+  content.classList.add("code-inline-surface");
+  code.parentElement.setAttribute("aria-hidden", "true");
+  content.append(textarea);
+  const tools = card.querySelector(".hidden-code-tools");
+  const actions = document.createElement("span");
+  actions.className = "code-inline-actions";
+  actions.innerHTML = '<button type="button" class="hidden-code-preview" data-code-edit-cancel>撤销</button><button type="button" class="hidden-code-preview" data-code-edit-submit>确认修改</button>';
+  tools.prepend(actions);
+  const status = document.createElement("span");
+  status.className = "code-inline-status";
+  status.setAttribute("role", "status");
+  card.querySelector(".hidden-code-title").append(status);
+  const submit = actions.querySelector("[data-code-edit-submit]");
+  let draft = null;
+  let key = "";
+  let composing = false;
+  let paintFrame = 0;
+  const paint = () => {
+    paintFrame = 0;
+    const fragment = document.createDocumentFragment();
+    textarea.value.split("\n").forEach((line, index, lines) => {
+      const row = document.createElement("span");
+      const match = line.match(/\b(OK|PASS|FAIL|MISS)\b/);
+      if (match) row.dataset.codeStatus = match[1].toLowerCase();
+      if (card.dataset.blockKind === "diff") row.dataset.codeStatus = /^\+[^+]/.test(line) ? "pass" : /^-[^-]/.test(line) ? "fail" : "";
+      row.textContent = line + (index < lines.length - 1 ? "\n" : "");
+      fragment.append(row);
+    });
+    code.replaceChildren(fragment);
+    const pre = code.parentElement;
+    pre.scrollTop = textarea.scrollTop;
+    pre.scrollLeft = textarea.scrollLeft;
+  };
+  const syncActions = () => {
+    const dirty = textarea.value !== source;
+    actions.classList.toggle("has-changes", dirty);
+    submit.disabled = !dirty || composing;
+  };
+  const ensureDraft = () => {
+    if (draft) return true;
+    const owner = codeBlockOwner(card);
+    if (!owner) return false;
+    key = codeBlockDraftKey(owner, source);
+    draft = codeBlockDrafts.get(key);
+    if (!draft) {
+      const revisionId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      draft = { id: `code-edit-${revisionId}`, owner, language, original: source,
+        value: textarea.value, instruction: "", selectionStart: textarea.selectionStart,
+        selectionEnd: textarea.selectionEnd, scrollTop: textarea.scrollTop, scrollLeft: textarea.scrollLeft };
+      codeBlockDrafts.set(key, draft);
+    }
+    return true;
+  };
+  const remember = () => {
+    if (!ensureDraft()) return;
+    draft.value = textarea.value;
+    draft.selectionStart = textarea.selectionStart;
+    draft.selectionEnd = textarea.selectionEnd;
+    draft.scrollTop = textarea.scrollTop;
+    draft.scrollLeft = textarea.scrollLeft;
+    draft.height = content.style.height;
+  };
+  textarea.addEventListener("focus", ensureDraft);
+  textarea.addEventListener("input", () => {
+    if (!content.style.height) content.style.height = `${content.getBoundingClientRect().height}px`;
+    content.classList.add("is-size-fixed");
+    remember();
+    status.textContent = "";
+    syncActions();
+    if (!paintFrame) paintFrame = requestAnimationFrame(paint);
+  });
+  for (const type of ["select", "keyup", "pointerup", "scroll"]) textarea.addEventListener(type, () => {
+    remember();
+    code.parentElement.scrollTop = textarea.scrollTop;
+    code.parentElement.scrollLeft = textarea.scrollLeft;
+  });
+  textarea.addEventListener("compositionstart", () => { composing = true; syncActions(); });
+  textarea.addEventListener("compositionend", () => {
+    composing = false; remember(); syncActions();
+    if (!paintFrame) paintFrame = requestAnimationFrame(paint);
+  });
+  textarea.addEventListener("keydown", event => event.stopPropagation());
+  const restoreOriginal = () => {
+    codeBlockDrafts.delete(key);
+    draft = null;
+    textarea.value = source;
+    status.textContent = "";
+    if (paintFrame) cancelAnimationFrame(paintFrame);
+    paint();
+    syncActions();
+    textarea.focus({ preventScroll: true });
+  };
+  actions.querySelector("[data-code-edit-cancel]").addEventListener("click", restoreOriginal);
+  submit.addEventListener("click", () => {
+    if (composing || textarea.value === source || draft?.submitted) return;
+    remember();
+    if (!draft) { status.textContent = "请在原会话中提交修改"; return; }
+    submit.disabled = true;
+    try {
+      submitCodeBlockEdit(draft);
+      draft.submitted = true;
+      restoreOriginal();
+      showCopyToast("修改已加入补充队列，接收状态以任务回执为准", 2400);
+    } catch (error) {
+      status.textContent = error.message || "提交失败，草稿已保留";
+      submit.disabled = false;
+    }
+  });
+  card._copyCodeText = () => textarea.value;
+  paint();
+  syncActions();
+  queueMicrotask(() => {
+    const owner = codeBlockOwner(card);
+    if (!owner) return;
+    key = codeBlockDraftKey(owner, source);
+    const saved = codeBlockDrafts.get(key);
+    if (!saved || draft) return;
+    draft = saved;
+    textarea.value = saved.value;
+    content.style.height = saved.height || "";
+    content.classList.toggle("is-size-fixed", Boolean(saved.height));
+    textarea.setSelectionRange(saved.selectionStart, saved.selectionEnd);
+    paint();
+    textarea.scrollTop = saved.scrollTop;
+    textarea.scrollLeft = saved.scrollLeft || 0;
+    code.parentElement.scrollTop = textarea.scrollTop;
+    code.parentElement.scrollLeft = textarea.scrollLeft;
+    syncActions();
+  });
+}
+
+function createRenderedCodeBlock(block = {}) {
+  const code = String(block.code || "");
+  const language = String(block.language || "代码");
+  return createHiddenCodeCard([{ language, code }]);
+}
+
+function createHiddenCodeCard(blocks = [], { streaming = false } = {}) {
+  const sourceBlocks = (Array.isArray(blocks) ? blocks : [])
+    .filter((block) => block && typeof block === "object" && String(block.code || "").length);
+  if (!sourceBlocks.length) return null;
+  const firstLanguage = String(sourceBlocks[0].language || "代码").trim() || "代码";
+  const sameLanguage = sourceBlocks.every((block) => (
+    String(block.language || "代码").trim().toLowerCase() === firstLanguage.toLowerCase()
+  ));
+  const combined = {
+    language: sameLanguage ? firstLanguage : "代码",
+    code: sourceBlocks.map((block) => String(block.code || "")).join("\n\n")
+  };
+  const { rawLanguage, label: languageLabel } = hiddenCodeLanguageLabel(combined.language);
+  const blockKind = window.BaiqiuAssistantCodeUtils?.codeBlockKind?.(rawLanguage) || "code";
   const card = document.createElement("section");
   card.className = "hidden-code-card";
+  card._codeSource = combined.code;
+  card._codeLanguage = combined.language;
+  card._codeStreaming = streaming;
+  card.dataset.blockKind = blockKind;
+  card.setAttribute("aria-label", hiddenCodeKindLabel(blockKind));
   card.innerHTML = `
     <div class="hidden-code-head">
-      <span class="hidden-code-language">${escapeHtml(languageLabel)}</span>
+      <div class="hidden-code-title">
+        <span class="hidden-code-language">${escapeHtml(hiddenCodeKindLabel(blockKind))}</span>
+        <span class="hidden-code-kind">${escapeHtml(languageLabel)}</span>
+      </div>
       <div class="hidden-code-tools">
-        <button class="hidden-code-icon" type="button" data-code-toggle aria-expanded="true" aria-label="收起代码" title="收起代码">
-          <span class="hidden-code-chevron" aria-hidden="true"></span>
-        </button>
-        <button class="hidden-code-icon" type="button" data-code-copy aria-label="复制代码" title="复制代码">
+        <button class="hidden-code-icon" type="button" data-code-copy aria-label="复制当前内容" title="复制当前内容">
           <span class="hidden-code-copy-icon" aria-hidden="true"></span>
         </button>
       </div>
     </div>
-    <pre><code></code></pre>
+    <div class="hidden-code-content" data-code-content>
+      <pre><code></code></pre>
+    </div>
   `;
-  const pre = card.querySelector("pre");
   const code = card.querySelector("code");
-  const toggle = card.querySelector("[data-code-toggle]");
   const copy = card.querySelector("[data-code-copy]");
   code.textContent = combined.code;
-  toggle.addEventListener("click", () => {
-    pre.hidden = !pre.hidden;
-    const actionLabel = pre.hidden ? "展开代码" : "收起代码";
-    card.classList.toggle("is-collapsed", pre.hidden);
-    toggle.setAttribute("aria-expanded", pre.hidden ? "false" : "true");
-    toggle.setAttribute("aria-label", actionLabel);
-    toggle.title = actionLabel;
-  });
   copy.addEventListener("click", async () => {
-    await api.copyText(combined.code);
+    try {
+      await api.copyText(card._copyCodeText ? card._copyCodeText() : combined.code);
+    } catch {
+      copy.setAttribute("aria-label", "复制失败，请重试");
+      copy.title = "复制失败，请重试";
+      return;
+    }
     copy.classList.add("copied");
     copy.setAttribute("aria-label", "已复制");
     copy.title = "已复制";
     clearTimeout(copy._copiedTimer);
     copy._copiedTimer = setTimeout(() => {
       copy.classList.remove("copied");
-      copy.setAttribute("aria-label", "复制代码");
-      copy.title = "复制代码";
+      copy.setAttribute("aria-label", "复制当前内容");
+      copy.title = "复制当前内容";
     }, 900);
   });
-  placeholders[0].replaceWith(card);
-  placeholders.slice(1).forEach((placeholder) => placeholder.remove());
+  if (streaming) {
+    card._updateStreamingSource = value => {
+      combined.code = value;
+      card._codeSource = value;
+      code.textContent = value;
+    };
+  } else attachCodeBlockEditor(card, combined.language, combined.code);
+  return card;
+}
+
+function enhanceHiddenCodeBlocks(rendered, blocks = []) {
+  if (!rendered || !Array.isArray(blocks) || !blocks.length) return;
+  const placeholders = [...rendered.querySelectorAll("p, li")]
+    .filter((element) => /代码内容已隐藏/.test(element.textContent || ""));
+  if (!placeholders.length) return;
+  if (placeholders.length === 1 && blocks.length > 1) {
+    const fragment = document.createDocumentFragment();
+    blocks.forEach((block) => {
+      const renderedBlock = createRenderedCodeBlock(block);
+      if (renderedBlock) fragment.append(renderedBlock);
+    });
+    if (fragment.childNodes.length) placeholders[0].replaceWith(fragment);
+    return;
+  }
+  placeholders.forEach((placeholder, index) => {
+    const block = blocks[index];
+    if (!block) return;
+    const renderedBlock = createRenderedCodeBlock(block);
+    if (renderedBlock) placeholder.replaceWith(renderedBlock);
+  });
+}
+
+function codeLanguageFromElement(code) {
+  const className = String(code?.className || "");
+  return className.match(/(?:^|\s)language-([^\s]+)/i)?.[1] || "代码";
+}
+
+function enhanceRenderedCodeBlocks(rendered, blocks = [], reusableCards = []) {
+  if (!rendered) return;
+  enhanceHiddenCodeBlocks(rendered, blocks);
+  const availableBlocks = Array.isArray(blocks) ? blocks : [];
+  const consumedBlockIndexes = new Set();
+  [...rendered.querySelectorAll("pre > code")]
+    .filter((code) => !code.closest(".hidden-code-card"))
+    .forEach((code, index) => {
+      const pre = code.parentElement;
+      if (!pre || pre.closest(".hidden-code-card")) return;
+      const codeText = String(code.textContent || "");
+      let matchingIndex = availableBlocks.findIndex((block, blockIndex) => (
+        !consumedBlockIndexes.has(blockIndex)
+        && String(block?.code || "").trim() === codeText.trim()
+      ));
+      if (matchingIndex < 0 && availableBlocks[index] && !consumedBlockIndexes.has(index)) matchingIndex = index;
+      const matchingBlock = matchingIndex >= 0 ? availableBlocks[matchingIndex] : null;
+      if (matchingIndex >= 0) consumedBlockIndexes.add(matchingIndex);
+      const language = matchingBlock?.language || codeLanguageFromElement(code);
+      const source = codeText;
+      const reusableIndex = reusableCards.findIndex(card => !card._codeStreaming && card._codeSource === source && card._codeLanguage === language);
+      const renderedBlock = reusableIndex >= 0 ? reusableCards.splice(reusableIndex, 1)[0]
+        : createRenderedCodeBlock({ language, code: source });
+      if (renderedBlock) pre.replaceWith(renderedBlock);
+    });
 }
 
 function selectedSession() {
@@ -1892,8 +2594,26 @@ function readSessionScrollPositions() {
   }
 }
 
+function sessionScrollPosition(sessionId) {
+  const key = String(sessionId || "");
+  if (!key) return null;
+  const cached = state.sessionScrollPositions.get(key);
+  if (cached) return cached;
+  const stored = readSessionScrollPositions()[key] || null;
+  if (stored) state.sessionScrollPositions.set(key, stored);
+  return stored;
+}
+
+function rememberSessionScrollPosition(sessionId, position) {
+  const key = String(sessionId || "");
+  if (!key || !position) return;
+  state.sessionScrollPositions.set(key, { ...position, sessionId: key });
+}
+
 function captureMessageScrollPosition(sessionId = state.selectedSessionId) {
-  if (!messageList || !sessionId || state.lastRenderedSessionId !== sessionId) return null;
+  if (!messageList || !sessionId
+    || state.selectedSessionId !== sessionId
+    || state.lastRenderedSessionId !== sessionId) return null;
   const listRect = messageList.getBoundingClientRect();
   const anchor = [...messageList.querySelectorAll(".message[data-message-id]")]
     .find((row) => row.getBoundingClientRect().bottom > listRect.top + 1);
@@ -1914,13 +2634,23 @@ function captureMessageScrollPosition(sessionId = state.selectedSessionId) {
 function saveSessionScrollPosition(sessionId = state.selectedSessionId) {
   const position = captureMessageScrollPosition(sessionId);
   if (!position) return;
+  rememberSessionScrollPosition(sessionId, position);
   try {
     const positions = readSessionScrollPositions();
-    positions[sessionId] = position;
+    positions[String(sessionId)] = state.sessionScrollPositions.get(String(sessionId));
     localStorage.setItem(SESSION_SCROLL_KEY, JSON.stringify(positions));
   } catch {
     // Scroll restoration is best effort and must never block session switching.
   }
+}
+
+function scheduleSessionScrollPositionSave(sessionId = state.selectedSessionId) {
+  if (!sessionId || Date.now() < Number(state.programmaticScrollUntil || 0)) return;
+  if (sessionScrollSaveTimer) clearTimeout(sessionScrollSaveTimer);
+  sessionScrollSaveTimer = setTimeout(() => {
+    sessionScrollSaveTimer = 0;
+    saveSessionScrollPosition(sessionId);
+  }, SESSION_SCROLL_SAVE_DELAY_MS);
 }
 
 function applyMessageScrollPosition(position = null, { fallbackToBottom = false, keepInstructionAnchor = false } = {}) {
@@ -1942,24 +2672,53 @@ function applyMessageScrollPosition(position = null, { fallbackToBottom = false,
       nextTop = messageList.scrollTop + anchor.getBoundingClientRect().top - listRect.top - Number(position.anchorOffset || 0);
     }
   }
+  const instructionRow = messageRowForId(instructionAnchorId());
+  if (instructionRow) ensureInstructionAnchorSpace(instructionRow, { minimumScrollTop: nextTop });
+  state.programmaticScrollUntil = Date.now() + 80;
   messageList.scrollTop = Math.max(0, nextTop);
   messageList.style.scrollBehavior = previousBehavior;
   state.lastMessageScrollTop = messageList.scrollTop;
-  state.followOutput = keepInstructionAnchor ? false : restoreBottom || shouldFollowRestoredOutput;
+  const restoredAtBottom = messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight <= 4;
+  state.followOutput = keepInstructionAnchor ? false : restoreBottom || (shouldFollowRestoredOutput && restoredAtBottom);
   state.manualOutputPause = keepInstructionAnchor || !state.followOutput;
   state.newOutputAvailable = false;
   scheduleReadingControlsUpdate();
 }
 
 function restoreSessionScrollPosition(sessionId) {
-  const position = readSessionScrollPositions()[sessionId] || null;
-  // Wait for the replaced message rows to receive their final layout. Applying
-  // once now and again on the next frame creates the visible double rebound.
+  if (state.selectedSessionId !== sessionId || state.lastRenderedSessionId !== sessionId) return;
+  const position = sessionScrollPosition(sessionId);
   if (sessionScrollRestoreFrame) cancelAnimationFrame(sessionScrollRestoreFrame);
+  sessionScrollRestoreFrame = 0;
+  const restoreToken = ++sessionScrollRestoreToken;
+  pendingSessionScrollRestore = { sessionId, token: restoreToken };
+  const keepInstructionAnchor = Boolean(instructionAnchorId(sessionId));
+  if (position) releaseInstructionAnchorPosition(sessionId);
+  const restore = () => {
+    if (restoreToken !== sessionScrollRestoreToken
+      || pendingSessionScrollRestore?.sessionId !== sessionId
+      || state.selectedSessionId !== sessionId
+      || state.lastRenderedSessionId !== sessionId) return;
+    if (keepInstructionAnchor) applyInstructionAnchor(sessionId, { reposition: !position });
+    if (position || !keepInstructionAnchor) {
+      applyMessageScrollPosition(position, { fallbackToBottom: !position, keepInstructionAnchor });
+    }
+    if (!position) pendingSessionScrollRestore = null;
+  };
   sessionScrollRestoreFrame = requestAnimationFrame(() => {
-    sessionScrollRestoreFrame = 0;
-    if (state.selectedSessionId !== sessionId || state.lastRenderedSessionId !== sessionId) return;
-    applyMessageScrollPosition(position, { fallbackToBottom: !position });
+    sessionScrollRestoreFrame = requestAnimationFrame(() => {
+      sessionScrollRestoreFrame = 0;
+      restore();
+      if (restoreToken !== sessionScrollRestoreToken || !position) return;
+      window.setTimeout(() => {
+        if (restoreToken !== sessionScrollRestoreToken || state.selectedSessionId !== sessionId) return;
+        pendingSessionScrollRestore = { sessionId, token: restoreToken };
+        restore();
+        if (restoreToken === sessionScrollRestoreToken && state.selectedSessionId === sessionId) {
+          pendingSessionScrollRestore = null;
+        }
+      }, SESSION_SCROLL_RESTORE_SETTLE_MS);
+    });
   });
 }
 
@@ -2004,7 +2763,7 @@ function rememberPendingUserMessage(sessionId, message) {
 function rememberAuthoritativeMessage(sessionId, message) {
   const key = String(sessionId || "").trim();
   const id = String(message?.id || "").trim();
-  if (!key || !id || !message?.role) return;
+  if (!key || !id || !message?.role || message.raw?.replyPart) return;
   const messages = state.authoritativeMessagesBySession.get(key) || new Map();
   messages.set(id, message);
   while (messages.size > 120) messages.delete(messages.keys().next().value);
@@ -2196,15 +2955,20 @@ function messageViewportAnchor() {
   if (!messageList) return null;
   const instructionRow = messageRowForId(instructionAnchorId(state.selectedSessionId));
   const listRect = messageList.getBoundingClientRect();
-  if (instructionRow) {
+  if (instructionRow && instructionAnchorPositionLocked()) {
     const rect = instructionRow.getBoundingClientRect();
     if (rect.bottom > listRect.top && rect.top < listRect.bottom) return instructionRow;
   }
-  return [...messageList.querySelectorAll(":scope > .message")]
+  const visibleRow = [...messageList.querySelectorAll(":scope > .message")]
     .find((row) => {
       const rect = row.getBoundingClientRect();
       return rect.bottom > listRect.top && rect.top < listRect.bottom;
     }) || null;
+  const blocks = visibleRow?.querySelectorAll(".rendered p, .rendered li, .rendered h1, .rendered h2, .rendered h3, .rendered h4, .rendered h5, .rendered h6, .rendered pre, .rendered table") || [];
+  return [...blocks].find((block) => {
+    const rect = block.getBoundingClientRect();
+    return rect.height > 0 && rect.bottom > listRect.top && rect.top < listRect.bottom;
+  }) || visibleRow;
 }
 
 function mutatePreservingMessageViewport(mutation) {
@@ -2410,7 +3174,7 @@ function messageRuntimeOutcome(message = {}) {
   ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
   if (product.requiresModelConfiguration === true
     || product.requiresConfirmation === true
-    || statuses.some((status) => ["waiting", "awaiting_input", "awaiting_confirmation"].includes(status))) return "waiting";
+    || statuses.some((status) => ["unknown", "waiting", "awaiting_input", "awaiting_confirmation"].includes(status))) return "waiting";
   if (product.success === false
     || statuses.some((status) => ["failed", "blocked", "timeout", "timed_out", "aborted", "cancelled", "interrupted"].includes(status))) return "failed";
   return "completed";
@@ -2516,8 +3280,17 @@ async function selectSessionById(sessionId) {
     selectionEpoch
   });
   saveSessionDraft(previousSessionId, chatInput?.value || "");
+  if (sessionScrollSaveTimer) {
+    clearTimeout(sessionScrollSaveTimer);
+    sessionScrollSaveTimer = 0;
+  }
   saveSessionScrollPosition(previousSessionId);
-  cacheCurrentSessionMessageDom(previousSessionId);
+  pauseOutputFollowing();
+  cancelInstructionAnchorScroll();
+  if (sessionScrollRestoreFrame) cancelAnimationFrame(sessionScrollRestoreFrame);
+  sessionScrollRestoreFrame = 0;
+  sessionScrollRestoreToken += 1;
+  pendingSessionScrollRestore = null;
   clearSessionTransientState();
   state.selectedSessionId = resolvedSessionId;
   miniTheatre.select(resolvedSessionId);
@@ -2538,7 +3311,7 @@ async function selectSessionById(sessionId) {
   renderNewSessionButtonContext(session);
   renderProjectContext(session);
   if (session) renderComposerSessionMode(session);
-  const savedPosition = readSessionScrollPositions()[resolvedSessionId];
+  const savedPosition = sessionScrollPosition(resolvedSessionId);
   if (!state.messageWindowOffsets.has(resolvedSessionId) && Number.isFinite(Number(savedPosition?.windowOffset))) {
     state.messageWindowOffsets.set(resolvedSessionId, Math.max(0, Number(savedPosition.windowOffset)));
   }
@@ -2565,10 +3338,21 @@ async function selectSessionById(sessionId) {
       });
     }
     const prefetchedHistory = await historyRequest;
+    const renderCurrentSessionWithRetry = async (prefetched = null) => {
+      let rendered = await renderMessages(prefetched ? { prefetchedMessages: prefetched } : {});
+      if (!rendered && selectionEpoch === sessionSelectionEpoch) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        if (selectionEpoch === sessionSelectionEpoch) {
+          rendered = await renderMessages(prefetched ? { prefetchedMessages: prefetched } : {});
+        }
+      }
+      return rendered;
+    };
     if (selectionEpoch !== sessionSelectionEpoch) return;
     if (prefetchedHistory !== null || !cachedHistory) {
-      await renderMessages({
-        prefetchedMessages: { sessionId: resolvedSessionId, history: prefetchedHistory }
+      await renderCurrentSessionWithRetry({
+        sessionId: resolvedSessionId,
+        history: prefetchedHistory
       });
     }
     const selectionResult = await api.selectSession(resolvedSessionId).then(
@@ -2637,7 +3421,7 @@ function setTaskProgressStage(label, value) {
   renderMonitorLog(selectedSession(), state.currentMessages || []);
 }
 
-async function submitProductInput(session, text, { attachments = [], streamId = "", clientMessageId = "", clientMessageCreatedAt = 0 } = {}) {
+async function submitProductInput(session, text, { attachments = [], quote = null, streamId = "", clientMessageId = "", clientMessageCreatedAt = 0 } = {}) {
   if (typeof api.productSubmitTask !== "function") {
     throw new Error("Product SDK 通道不可用，请检查发布包是否已同步。");
   }
@@ -2653,6 +3437,7 @@ async function submitProductInput(session, text, { attachments = [], streamId = 
     text: requestText,
     message: requestText,
     attachments,
+    ...(quote ? { quote } : {}),
     context: {
       chatRuntime: true,
       hasAttachments: attachments.length > 0
@@ -2945,6 +3730,7 @@ function syncReasoningControlState(value) {
 }
 
 async function setReasoningLevel(nextValue, { preserveMenu = false } = {}) {
+  if (modelSettingsOperation) return;
   const providerKey = state.db?.settings?.defaultProvider || "deepseek";
   const modelName = state.db?.settings?.providers?.[providerKey]?.model || "";
   const levels = availableReasoningLevels(providerKey, modelName);
@@ -2956,26 +3742,26 @@ async function setReasoningLevel(nextValue, { preserveMenu = false } = {}) {
     return;
   }
   const revision = ++reasoningPersistRevision;
-  state.db.settings.reasoning = value;
-  syncReasoningControlState(value);
+  if (!beginModelSettingsOperation(providerKey, "正在切换推理等级…")) return;
   if (!preserveMenu && reasoningWaterControl?.dataset.open === "1") renderReasoningMode();
   try {
-    const result = await api.setModelReasoning(value);
+    const result = await api.setModelReasoning({ ...modelSettingsPayload(providerKey), reasoning: value });
     if (!result?.ok) throw new Error("黑球推理等级没有生效。");
     if (revision !== reasoningPersistRevision) return;
-    state.db.settings.reasoning = result.reasoning || value;
-    if (result.runtimeReceipt) state.db.settings.modelRuntime = result.runtimeReceipt;
+    acceptModelSettingsResult(result);
     syncReasoningControlState(state.db.settings.reasoning);
   } catch (error) {
     if (revision !== reasoningPersistRevision) return;
-    const refreshed = await api.init().catch(() => null);
+    const refreshed = await api.modelSettings().catch(() => null);
     if (revision !== reasoningPersistRevision) return;
-    if (refreshed) state.db = refreshed;
+    if (refreshed) state.db.settings = refreshed;
     else state.db.settings.reasoning = previousValue;
     syncReasoningControlState(state.db.settings.reasoning || previousValue);
     if (reasoningWaterControl?.dataset.open === "1") renderReasoningMode();
     console.error("[推理等级] 保存失败", error);
     showCopyToast("推理等级保存失败，请重试", 2200);
+  } finally {
+    await finishModelSettingsOperation();
   }
 }
 
@@ -3289,6 +4075,68 @@ function ensureAssistantCopyAction(bubble, answerText) {
   });
   actions.appendChild(copy);
   return copy;
+}
+
+function ensureProtocolContinueAction(bubble, message, sessionId) {
+  const raw = message?.raw || {};
+  const product = raw.productResult || {};
+  const sources = [raw, raw.raw, product, product.raw, product.result];
+  const existing = bubble?.querySelector(".protocol-continue");
+  existing?.remove();
+  const statuses = sources.map(item => String(item?.status || item?.executionOutcome || "").toLowerCase());
+  const cancelled = statuses.some(status => ["cancelled", "aborted", "interrupted"].includes(status));
+  const incomplete = sources.some(item => item?.protocolError === true || item?.stopReason === "invalid_public_protocol"
+    || item?.errorCode === "INVALID_PUBLIC_PROTOCOL");
+  const failed = !cancelled && (incomplete || sources.some(item => item?.success === false
+    || ["failed", "timed_out", "timeout", "blocked"].includes(String(item?.status || item?.executionOutcome || "").toLowerCase())));
+  if (!failed) {
+    existing?.remove();
+    bubble?.querySelector(".protocol-failure-notice")?.remove();
+    bubble?.querySelector(".execution-failure-notice")?.remove();
+    return;
+  }
+  const noticeClass = incomplete ? "protocol-failure-notice" : "execution-failure-notice";
+  if (!bubble.querySelector(`.${noticeClass}`)) {
+    const notice = document.createElement("div");
+    notice.className = `execution-live-notice ${noticeClass}`;
+    notice.textContent = sources.find(item => String(item?.failureNotice || "").trim())?.failureNotice
+      || (incomplete
+        ? "本次任务未完成：模型返回格式异常，自动恢复未成功。已保留当前结果。"
+        : "本次任务未完整完成，已保留当前已经生成的内容。");
+    bubble.appendChild(notice);
+  }
+  if (!incomplete || !sessionId) {
+    existing?.remove();
+    return;
+  }
+  if (!INTENT_PREDICTION_EXTERNAL_ENABLED) return;
+  const taskId = String(sources.find((item) => item?.taskBrain?.task_id || item?.taskId)?.taskBrain?.task_id
+    || sources.find((item) => item?.taskId)?.taskId || "").trim();
+  if (!taskId) return;
+  if (composerClarification?.dataset.guidanceSource === "protocol_recovery"
+    && composerClarification?.dataset.sessionId === String(sessionId)) return;
+  const guidanceMessage = {
+    role: "assistant",
+    text: "本次任务未完整完成，已经生成的内容已保留。请选择下一步。",
+    raw: {
+      clarification: {
+        cardType: "task_guidance",
+        source: "protocol_recovery",
+        interactionMode: "select",
+        sessionId: String(sessionId),
+        requestId: `protocol-recovery:${taskId}`,
+        taskId,
+        question: "本次任务未完整完成，你希望如何处理？",
+        reason: "模型返回格式不完整，继续前会沿用已获得的结果并核实未完成动作。",
+        input: { enabled: false },
+        options: [
+          { id: "retry", label: "继续任务", value: "继续任务", action: "retry", recommended: true },
+          { id: "cancel", label: "结束任务", value: "结束任务", action: "cancel" }
+        ]
+      }
+    }
+  };
+  renderComposerClarification(guidanceMessage);
 }
 
 function showCopyToast(text = "已复制", duration = 900) {
@@ -3916,8 +4764,54 @@ async function showAttachmentInFolder(item = {}) {
 }
 
 function openAttachmentInBoard(item = {}) {
-  const isImage = /^image\//i.test(String(item.mimeType || ""));
-  openTaskBoard(isImage ? "images" : "files", taskBoardFileKey(item));
+  const isImage = isTaskBoardImage(item);
+  const pathValue = String(item.sourcePath || item.path || item.originalPath || item.filePath || "");
+  const boardItem = /^[A-Za-z]:[\\/]/.test(pathValue)
+    ? { ...item, sourcePath: pathValue, path: pathValue, strictPath: true }
+    : item;
+  workspaceRegister(boardItem);
+  openTaskBoard(isImage ? "images" : "files", taskBoardFileKey(boardItem));
+  if (boardItem !== item) {
+    state.taskBoardOpenedFiles[pathValue] = boardItem;
+  }
+  if (isImage) void loadTaskBoardImagePreview(boardItem);
+  else void loadTaskBoardFilePreview(boardItem);
+}
+
+function shouldOpenAttachmentInTaskBoard(item = {}) {
+  const name = String(item.name || item.path || item.sourcePath || "");
+  const mimeType = String(item.mimeType || "");
+  return /^image\//i.test(mimeType)
+    || isSpreadsheetFile(item)
+    || /(?:text\/|json|markdown|javascript|xml|yaml|wordprocessingml|msword|presentationml|powerpoint|pdf)/i.test(mimeType)
+    || /\.(md|markdown|txt|json|log|html?|js|css|py|ts|xml|ya?ml|csv|xlsx?|docx?|pdf|pptx?)$/i.test(name);
+}
+
+function measureComposerInputHeight() {
+  if (!composerHeightMeasure?.isConnected) {
+    composerHeightMeasure = document.createElement("textarea");
+    composerHeightMeasure.tabIndex = -1;
+    composerHeightMeasure.setAttribute("aria-hidden", "true");
+    composerHeightMeasure.readOnly = true;
+    composerHeightMeasure.spellcheck = false;
+    composerHeightMeasure.style.cssText = "position:fixed;left:-10000px;top:0;height:0;min-height:0;max-height:none;margin:0;visibility:hidden;pointer-events:none;overflow:hidden;resize:none;contain:layout style paint;";
+    document.body.appendChild(composerHeightMeasure);
+  }
+  const style = getComputedStyle(chatInput);
+  const properties = ["width", "box-sizing", "font-family", "font-size", "font-weight", "font-style", "font-variant", "font-stretch",
+    "line-height", "letter-spacing", "word-spacing", "text-indent", "text-transform", "white-space", "word-break", "overflow-wrap", "tab-size",
+    "padding-top", "padding-bottom", "padding-left", "padding-right", "border-top-width", "border-bottom-width", "border-left-width", "border-right-width",
+    "border-top-style", "border-bottom-style", "border-left-style", "border-right-style"];
+  const values = properties.map(property => [property, style.getPropertyValue(property)]);
+  const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+  const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+  const heightAdjustment = style.boxSizing === "border-box" ? border : -padding;
+  for (const [property, value] of values) {
+    if (composerHeightMeasure.style.getPropertyValue(property) !== value) composerHeightMeasure.style.setProperty(property, value);
+  }
+  if (composerHeightMeasure.wrap !== chatInput.wrap) composerHeightMeasure.wrap = chatInput.wrap;
+  composerHeightMeasure.value = chatInput.value || chatInput.placeholder || "";
+  return Math.ceil(composerHeightMeasure.scrollHeight + heightAdjustment);
 }
 
 function adjustComposerHeight() {
@@ -3931,11 +4825,14 @@ function adjustComposerHeight() {
     applyManualComposerHeight(savedHeight);
     return;
   }
-  chatInput.style.height = "0px";
-  const nextHeight = Math.min(COMPOSER_AUTO_MAX_INPUT_HEIGHT, Math.max(COMPOSER_MIN_INPUT_HEIGHT, chatInput.scrollHeight));
-  chatInput.style.height = nextHeight + "px";
-  chatInput.style.overflowY = chatInput.scrollHeight > COMPOSER_AUTO_MAX_INPUT_HEIGHT ? "auto" : "hidden";
-  requestAnimationFrame(positionTaskBoard);
+  const contentHeight = measureComposerInputHeight();
+  const nextHeight = Math.min(COMPOSER_AUTO_MAX_INPUT_HEIGHT, Math.max(COMPOSER_MIN_INPUT_HEIGHT, contentHeight)) + "px";
+  const overflow = contentHeight > COMPOSER_AUTO_MAX_INPUT_HEIGHT ? "auto" : "hidden";
+  if (chatInput.style.overflowY !== overflow) chatInput.style.overflowY = overflow;
+  if (chatInput.style.height !== nextHeight) {
+    chatInput.style.height = nextHeight;
+    requestAnimationFrame(positionTaskBoard);
+  }
 }
 
 function scheduleComposerHeightAdjust() {
@@ -3954,6 +4851,8 @@ function maxComposerInputHeight() {
 function applyManualComposerHeight(value) {
   if (!chatForm || !chatInput) return COMPOSER_MIN_INPUT_HEIGHT;
   const height = Math.max(COMPOSER_MIN_INPUT_HEIGHT, Math.min(Number(value) || COMPOSER_MIN_INPUT_HEIGHT, maxComposerInputHeight()));
+  if (chatInput.dataset.manualResize === "1" && chatInput.style.height === height + "px"
+    && chatInput.style.overflowY === "auto" && chatForm.style.getPropertyValue("--composer-input-height") === height + "px") return height;
   chatInput.dataset.manualResize = "1";
   chatForm.dataset.manualResize = "1";
   chatForm.style.setProperty("--composer-input-height", `${height}px`);
@@ -4189,22 +5088,6 @@ function normalizeLongReplyAnchor(value = "") {
     .replace(/^[\s#>*_`~\-+|\d.、，,:：()（）\[\]【】]+/u, "")
     .replace(/[\s\p{P}\p{S}]+/gu, "")
     .toLocaleLowerCase();
-}
-
-const NOVEL_CHAPTER_HEADING_LINE = /^(?:序章|楔子|尾声|终章|后记|番外(?:篇)?|第\s*(?:\d+|[一二三四五六七八九十百千万零两]+)\s*[章节回卷篇])(?:\s*(?:[：:、.．\-—]\s*|\s+).{0,90})?$/u;
-
-function promoteNovelChapterHeadings(text = "") {
-  let inFence = false;
-  return String(text || "").split(/\r?\n/).map((rawLine) => {
-    const line = String(rawLine || "");
-    const trimmed = line.trim();
-    if (/^```/.test(trimmed)) {
-      inFence = !inFence;
-      return line;
-    }
-    if (inFence || !trimmed || /^#/.test(trimmed) || !NOVEL_CHAPTER_HEADING_LINE.test(trimmed)) return line;
-    return `## ${trimmed}`;
-  }).join("\n");
 }
 
 function outlineItemsFromMessage(message = {}) {
@@ -4539,16 +5422,25 @@ function compactLongReplyHeadingTitle(value = "") {
 function layoutComposerReplyNav() {
   if (!composerReplyNav || composerReplyNav.hidden || !composerReplyNavItems || !composerReplyNavOverflow || !composerReplyNavMenu) return;
   const buttons = [...composerReplyNavItems.children];
-  buttons.forEach((button) => { button.hidden = false; });
+  const available = Math.max(0, composerReplyNav.clientWidth);
+  if (!buttons.length || available <= 0) return;
+  const font = getComputedStyle(buttons[0]);
+  const signature = JSON.stringify([available, font.font, font.letterSpacing, composerReplyNav.dataset.signature,
+    buttons.map(button => [button.textContent, button.className])]);
+  if (composerReplyNav._layoutSignature === signature) return;
+  buttons.forEach((button) => { if (button.hidden) button.hidden = false; });
   composerReplyNavOverflow.hidden = true;
   composerReplyNavMenu.hidden = true;
   composerReplyNavMore?.setAttribute("aria-expanded", "false");
-  if (!buttons.length || composerReplyNav.clientWidth <= 0) return;
 
   const gap = 6;
-  const available = Math.max(0, composerReplyNav.clientWidth);
-  const total = buttons.reduce((sum, button) => sum + button.offsetWidth + gap, 0);
-  if (total <= available) return;
+  const widths = buttons.map(button => button.offsetWidth);
+  const total = widths.reduce((sum, width) => sum + width + gap, 0);
+  composerReplyNav._layoutSignature = signature;
+  if (total <= available) {
+    if (composerReplyNavMenu.childNodes.length) composerReplyNavMenu.replaceChildren();
+    return;
+  }
 
   composerReplyNavOverflow.hidden = false;
   const overflowWidth = (composerReplyNavOverflow.offsetWidth || 32) + gap;
@@ -4556,7 +5448,7 @@ function layoutComposerReplyNav() {
   let used = 0;
   const hiddenIndexes = [];
   buttons.forEach((button, index) => {
-    const width = button.offsetWidth + (used ? gap : 0);
+    const width = widths[index] + (used ? gap : 0);
     if (used + width <= itemWidth) used += width;
     else {
       button.hidden = true;
@@ -4613,6 +5505,7 @@ function renderComposerLongReplyNav(row) {
 const CLARIFICATION_MAX_ROUNDS = 4;
 
 function clarificationOptionsFromMessage(message = {}) {
+  if (!INTENT_PREDICTION_EXTERNAL_ENABLED) return null;
   if (message.role !== "assistant") return null;
   const text = String(message.text || "").trim();
   const raw = message.raw && typeof message.raw === "object" ? message.raw : {};
@@ -4622,6 +5515,7 @@ function clarificationOptionsFromMessage(message = {}) {
     || null);
   if (!structured || typeof structured !== "object") return null;
   if (structured.noSuggestion === true) return null;
+  const interactionMode = String(structured.interactionMode || structured.mode || "select_and_fill").trim().toLowerCase();
   const options = Array.isArray(structured.options)
     ? structured.options.map((option, index) => ({
       id: String(option.id || option.optionId || "").trim(),
@@ -4633,7 +5527,8 @@ function clarificationOptionsFromMessage(message = {}) {
       recommended: option.recommended === true
     })).filter((option) => option.label)
     : [];
-  if (!options.length) return null;
+  const inputConfig = structured.input && typeof structured.input === "object" ? structured.input : {};
+  if (!options.length && inputConfig.enabled !== true && interactionMode !== "fill") return null;
   const domainOptions = options.filter((option) => option.custom !== true).slice(0, 3);
   const suppliedCustom = options.find((option) => option.custom === true);
   const customKey = String.fromCharCode(65 + domainOptions.length);
@@ -4641,7 +5536,11 @@ function clarificationOptionsFromMessage(message = {}) {
   const originalRequest = String(structured.originalRequest || "").trim();
   const summary = String(structured.summary || "").trim();
   return {
-    cardType: "intent_clarification",
+    cardType: "task_guidance",
+    source: String(structured.source || "").trim(),
+    taskId: String(structured.taskId || "").trim(),
+    interactionMode,
+    reason: String(structured.reason || "").trim(),
     question: String(structured.question || text).trim(),
     originalRequest,
     requestId: String(structured.requestId || "").trim(),
@@ -4649,6 +5548,11 @@ function clarificationOptionsFromMessage(message = {}) {
     round,
     dimension: String(structured.dimension || "").trim(),
     summary,
+    input: {
+      enabled: inputConfig.enabled === true || interactionMode === "fill" || interactionMode === "select_and_fill",
+      placeholder: String(inputConfig.placeholder || "也可以直接填写你的要求").trim(),
+      required: inputConfig.required === true
+    },
     options: [...domainOptions, suppliedCustom
       ? { ...suppliedCustom, key: customKey, label: suppliedCustom.label || "自己输入", custom: true }
       : { key: customKey, label: "自己输入", action: "custom", custom: true }]
@@ -4657,7 +5561,7 @@ function clarificationOptionsFromMessage(message = {}) {
 
 function clarificationCardKey(prompt = {}, sessionId = "") {
   const ownerSessionId = String(prompt.sessionId || sessionId || "").trim();
-  if (prompt.cardType === "intent_clarification") {
+  if (["intent_clarification", "task_guidance"].includes(prompt.cardType)) {
     return [ownerSessionId, prompt.requestId, prompt.round, prompt.dimension].map((item) => String(item || "").trim()).join(":");
   }
   return [ownerSessionId, prompt.cardType, prompt.taskId].map((item) => String(item || "").trim()).join(":");
@@ -4665,7 +5569,7 @@ function clarificationCardKey(prompt = {}, sessionId = "") {
 
 function clarificationPromptBelongsToSession(prompt = {}, session = null) {
   if (!session?.id) return false;
-  if (!["intent_clarification", "suggestion_actions"].includes(prompt.cardType)) return true;
+  if (!["intent_clarification", "task_guidance", "suggestion_actions"].includes(prompt.cardType)) return true;
   return Boolean(prompt.sessionId && String(prompt.sessionId) === String(session.id));
 }
 
@@ -4964,6 +5868,7 @@ function clearComposerClarification() {
     composerClarification.hidden = true;
     composerClarification.classList.remove("profile-onboarding");
     delete composerClarification.dataset.cardType;
+    delete composerClarification.dataset.guidanceSource;
     delete composerClarification.dataset.sessionId;
     delete composerClarification.dataset.cardKey;
   }
@@ -5134,6 +6039,9 @@ function structuredCardContext(option, prompt, customValue = "") {
   if (prompt.cardType === "error_recovery" || prompt.cardType === "task_blocker") {
     return { recoveryAction: { taskId: prompt.taskId, action: option.action, value } };
   }
+  if (prompt.cardType === "task_guidance" && prompt.source === "protocol_recovery") {
+    return { recoveryAction: { taskId: prompt.taskId, action: option.action, value } };
+  }
   return {
     clarificationResponse: {
       sessionId: prompt.sessionId,
@@ -5173,7 +6081,7 @@ function dispatchStructuredCardAction(option, prompt = {}, customValue = "") {
     ui: { clarificationCardKey: cardKey }
   };
   if (sessionIsRunning(session)) {
-    sessionTaskQueue.enqueue(session.id, task);
+    sessionTaskQueue.enqueue(session.id, { ...task, autoStart: true });
     renderQueue();
     return;
   }
@@ -5230,8 +6138,14 @@ function suggestionPayloadFromMessage(message = {}, sessionId = state.selectedSe
 }
 
 function showFreshComposerSuggestions(message = {}, { sessionId = state.selectedSessionId } = {}) {
+  if (!INTENT_PREDICTION_EXTERNAL_ENABLED) {
+    clearComposerSuggestions();
+    return false;
+  }
   const ownerSessionId = String(sessionId || "");
   if (!ownerSessionId || ownerSessionId !== String(state.selectedSessionId || "")) return false;
+  if (composerClarification?.dataset.guidanceSource === "protocol_recovery"
+    && composerClarification?.dataset.sessionId === ownerSessionId) return true;
   const payload = suggestionPayloadFromMessage(message, ownerSessionId);
   setComposerSuggestionActions(payload.actions, { sessionId: ownerSessionId, messageId: payload.messageId });
   if (!payload.actions.length) return false;
@@ -5239,8 +6153,14 @@ function showFreshComposerSuggestions(message = {}, { sessionId = state.selected
 }
 
 function renderComposerSuggestions() {
+  if (!INTENT_PREDICTION_EXTERNAL_ENABLED) {
+    clearComposerSuggestions();
+    return false;
+  }
   if (!composerClarification || !composerClarificationOptions) return false;
   const session = selectedSession();
+  if (composerClarification.dataset.guidanceSource === "protocol_recovery"
+    && composerClarification.dataset.sessionId === String(session?.id || "")) return true;
   const actions = state.pendingSuggestionSessionId === String(session?.id || "")
     ? state.pendingSuggestionActions
     : [];
@@ -5275,6 +6195,7 @@ function renderComposerSuggestions() {
   composerClarification.dataset.cardType = "suggestion_actions";
   composerClarification.dataset.sessionId = String(session.id);
   composerClarification.dataset.cardKey = clarificationCardKey(prompt, session.id);
+  delete composerClarification.dataset.guidanceSource;
   composerClarification.hidden = false;
   conversationStage?.classList.add("clarification-open");
   if (composerReplyNav) composerReplyNav.hidden = true;
@@ -5286,6 +6207,10 @@ function renderComposerSuggestions() {
 // 意图预测面板渲染 —— 统一入口
 function renderComposerClarification(message = null) {
   if (!composerClarification || !composerClarificationOptions) return;
+  if (!INTENT_PREDICTION_EXTERNAL_ENABLED) {
+    clearComposerClarification();
+    return;
+  }
   if (state.onboardingOpen) return;
   composerClarification.classList.remove("profile-onboarding");
   if (composerClarificationQuestion) {
@@ -5314,10 +6239,6 @@ function renderComposerClarification(message = null) {
     clearComposerClarification();
     return;
   }
-  if (!INTENT_PREDICTION_EXTERNAL_ENABLED) {
-    clearComposerClarification();
-    return;
-  }
   const prompt = clarificationOptionsFromMessage(message);
   if (!prompt) {
     clearComposerClarification();
@@ -5332,7 +6253,7 @@ function renderComposerClarification(message = null) {
   if (panelTitle) panelTitle.textContent = prompt.cardType === "task_confirmation"
     ? "任务确认"
     : prompt.cardType === "task_blocker" ? "任务阻塞"
-      : prompt.cardType === "error_recovery" ? "错误恢复" : "意图预测";
+      : prompt.cardType === "error_recovery" ? "错误恢复" : "任务引导";
   const rows = [];
   // AI生成的选项行
   const domainOptions = prompt.options.filter((o) => !o.custom);
@@ -5348,12 +6269,13 @@ function renderComposerClarification(message = null) {
   }
   // 待输入行
   const customOption = prompt.options.find((o) => o.custom);
-  if (customOption) {
+  if (customOption && prompt.input?.enabled !== false) {
     const customRow = document.createElement("div");
     customRow.className = "intent-predict-row custom";
     customRow.innerHTML = `<span class="intent-predict-key">${escapeHtml(customOption.key)}</span>` +
       `<input class="intent-predict-custom-input" type="text" placeholder="待输入……" />`;
     const customInput = customRow.querySelector("input");
+    customInput.placeholder = prompt.input?.placeholder || "也可以直接填写你的要求";
     customInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -5368,6 +6290,7 @@ function renderComposerClarification(message = null) {
   composerClarificationOptions.replaceChildren(...rows);
   composerClarification.dataset.sessionId = String(session.id);
   composerClarification.dataset.cardKey = cardKey;
+  composerClarification.dataset.guidanceSource = prompt.source || "black_ball";
   composerClarification.hidden = false;
   conversationStage?.classList.add("clarification-open");
   if (composerReplyNav) composerReplyNav.hidden = true;
@@ -5451,6 +6374,7 @@ messageList?.addEventListener("scroll", () => {
     state.followOutput = false;
     state.manualOutputPause = true;
     if (instructionAnchorPositionLocked(state.selectedSessionId)) scheduleInstructionAnchor(state.selectedSessionId);
+    scheduleSessionScrollPositionSave(state.selectedSessionId);
     scheduleReadingControlsUpdate();
     return;
   }
@@ -5467,6 +6391,7 @@ messageList?.addEventListener("scroll", () => {
       state.composerReplyNavRequested = true;
     }
   }
+  scheduleSessionScrollPositionSave(state.selectedSessionId);
   scheduleReadingControlsUpdate();
 }, { passive: true });
 
@@ -5876,6 +6801,16 @@ function renderMetricBars(session, messages = []) {
   if (contextHeaderBar) contextHeaderBar.setAttribute("aria-valuenow", String(remain));
 }
 
+function syncComposerSendAction() {
+  if (!sendBtn) return;
+  const running = state.busy || sessionIsRunning(selectedSession());
+  const hasDraft = Boolean(chatInput.value.trim() || state.attachments.length || state.composerQuote);
+  const abort = running && !hasDraft;
+  sendBtn.classList.toggle("abort", abort);
+  sendBtn.title = abort ? "终止执行" : running ? "发送补充" : "发送";
+  sendBtn.setAttribute("aria-label", sendBtn.title);
+}
+
 function setBusy(value) {
   const wasBusy = state.busy;
   state.busy = value;
@@ -5884,8 +6819,7 @@ function setBusy(value) {
     document.body.dataset.taskStage = "idle";
     if (chatForm) chatForm.dataset.stageLabel = "待命";
   }
-  sendBtn.classList.toggle("abort", value);
-  sendBtn.title = value ? "终止执行" : "发送";
+  syncComposerSendAction();
   taskState.textContent = value ? "执行中" : "待命";
   if (monitorMode) monitorMode.textContent = value ? "执行中" : "待命";
   if (value) {
@@ -5908,8 +6842,13 @@ function renderReasoningMode() {
   reasoningWaterControl.dataset.level = value;
   reasoningWaterControl.dataset.maximum = index === levels.length - 1 ? "1" : "0";
   reasoningWaterControl.title = `${modelName} · ${reasoningLabel(value)} · ${profile.modeLabel}`;
-  if (reasoningModelLabel) reasoningModelLabel.textContent = compactModelLabel(modelName, provider.name || providerKey);
+  if (reasoningModelLabel) reasoningModelLabel.textContent = modelCatalogLabel(providerKey, modelName);
   const modelVersions = modelVersionsForProvider(providerKey, provider);
+  const catalogCandidate = state.providerCatalogs[providerKey];
+  const catalog = catalogCandidate?.identity === providerCatalogIdentity(provider) ? catalogCandidate : null;
+  const catalogStatus = catalog?.loading ? "正在同步目录" : catalog?.error ? "更新失败，保留上次列表" : `${provider.name || providerKey} · ${modelVersions.length} 个型号`;
+  const catalogDetail = catalog?.error || catalog?.result?.metadataWarning || provider.modelCatalogWarning
+    || `${catalog?.result?.catalogSource || provider.modelCatalogSource || "供应商模型目录"}\n上次更新：${catalog?.result?.fetchedAt || provider.availableModelsAt || "尚未同步"}`;
   const switchingModel = reasoningWaterControl.getAttribute("aria-busy") === "true";
   const view = ["models", "levels"].includes(reasoningModeMenu.dataset.view) ? reasoningModeMenu.dataset.view : "overview";
   const safeIndex = Math.max(0, index);
@@ -5917,12 +6856,12 @@ function renderReasoningMode() {
   if (view === "models") {
     reasoningModeMenu.innerHTML = `
       <section class="compact-model-versions" aria-label="模型版本">
-        <header class="compact-model-head"><strong>模型</strong><small>${switchingModel ? "正在验证模型，请稍候" : `${escapeHtml(provider.name || providerKey)} · ${modelVersions.length} 个型号`}</small></header>
+        <header class="compact-model-head"><strong>模型</strong><small title="${escapeHtml(catalogDetail)}" aria-live="polite">${switchingModel ? "正在验证模型，请稍候" : escapeHtml(catalogStatus)}</small></header>
         <div class="compact-model-version-list">
           ${modelVersions.length ? modelVersions.map((version) => {
             const active = version === modelName;
-            return `<button type="button" class="compact-model-version${active ? " active" : ""}" data-model-version="${escapeHtml(version)}" role="menuitemradio" aria-checked="${active ? "true" : "false"}"${switchingModel ? " disabled" : ""}>
-              <strong>${escapeHtml(compactModelLabel(version, provider.name || providerKey))}</strong><i>${active ? "✓" : ""}</i>
+            return `<button type="button" class="compact-model-version${active ? " active" : ""}" data-model-version="${escapeHtml(version)}" title="${escapeHtml(modelCatalogLabel(providerKey, version))}\nAPI ID: ${escapeHtml(version)}" role="menuitemradio" aria-checked="${active ? "true" : "false"}"${switchingModel ? " disabled" : ""}>
+              <strong>${escapeHtml(modelCatalogLabel(providerKey, version))}</strong><i>${active ? "✓" : ""}</i>
             </button>`;
           }).join("") : '<div class="compact-model-empty">暂无可用模型</div>'}
         </div>
@@ -8043,14 +8982,26 @@ function createEmptyConversation() {
 }
 
 function quoteSnapshotFromMessage(message = {}) {
-  const text = String(message.text || "").trim().slice(0, 4000) || "附件消息";
+  const text = String(message.text || "").trim() || "附件消息";
   const role = message.role === "user" ? "user" : "assistant";
+  const assets = messageAssetsFromMessage(message);
+  const attachments = [...assets.images, ...assets.files].map((item) => ({
+    id: item.id,
+    name: item.name,
+    mimeType: item.mimeType,
+    sizeBytes: item.sizeBytes,
+    path: item.path || item.sourcePath || item.originalPath || item.filePath || "",
+    url: item.url || "",
+    dataUrl: item.dataUrl || "",
+    textContent: String(item.textContent || "").slice(0, 120000)
+  }));
   return {
     sessionId: String(state.selectedSessionId || ""),
     messageId: String(message.id || ""),
     role,
     source: role === "user" ? "你" : "白球",
-    text
+    text,
+    attachments
   };
 }
 
@@ -8076,13 +9027,15 @@ function scrollToQuotedMessage(messageId = "") {
 }
 
 function renderComposerQuote() {
+  syncComposerSendAction();
   if (!composerQuote) return;
   const quote = state.composerQuote;
-  const visible = Boolean(quote && quote.sessionId === state.selectedSessionId);
+  const visible = Boolean(quote && (quote.composerSessionId || quote.sessionId) === state.selectedSessionId);
   composerQuote.hidden = !visible;
   if (!visible) return;
   composerQuoteSource.textContent = `引用 · ${quote.source || "消息"}`;
-  composerQuoteText.textContent = compactMonitorText(quote.text, 140);
+  composerQuoteText.textContent = compactMonitorText(quote.selectionText || quote.text, 140)
+    + (quote.attachments?.length ? ` · ${quote.attachments.length} 个附件` : "");
   composerQuoteJump.disabled = !quote.messageId;
 }
 
@@ -8095,7 +9048,7 @@ function clearComposerQuote() {
 
 function setComposerQuote(quote = null) {
   if (!quote?.text) return;
-  state.composerQuote = { ...quote, sessionId: String(state.selectedSessionId || quote.sessionId || "") };
+  state.composerQuote = { ...quote, sessionId: String(quote.sessionId || state.selectedSessionId || ""), composerSessionId: state.selectedSessionId };
   renderComposerQuote();
   chatInput?.focus();
 }
@@ -8533,12 +9486,33 @@ function renderedMessageWindowMatches(messages = []) {
   return renderedRows.every((row, index) => String(row.dataset.messageId || "") === String(messages[index]?.id || ""));
 }
 
+function messageRenderFingerprint(message = {}) {
+  return JSON.stringify({
+    id: String(message.id || ""),
+    role: String(message.role || ""),
+    text: String(message.text || message.content || ""),
+    answerSegments: answerSegmentsFromMessage(message),
+    structuredEvents: structuredEventsFromMessage(message),
+    executionLog: publicExecutionDetailsFromMessage(message)
+  });
+}
+
+function renderedMessageWindowContentMatches(messages = []) {
+  if (!messageList || !Array.isArray(messages)) return false;
+  const renderedRows = [...messageList.querySelectorAll(":scope > .message[data-message-id]")];
+  if (renderedRows.length !== messages.length) return false;
+  return renderedRows.every((row, index) => (
+    row.dataset.renderFingerprint === messageRenderFingerprint(messages[index])
+  ));
+}
+
 function cancelAssistantTyping(sessionId) {
   const key = String(sessionId || "");
   const entry = activeAssistantTypings.get(key);
   if (!entry) return;
   activeAssistantTypings.delete(key);
   entry.cancel?.();
+  queueMicrotask(() => processQueue(key));
 }
 
 function cancelAssistantTypingsExcept(sessionId) {
@@ -8547,6 +9521,7 @@ function cancelAssistantTypingsExcept(sessionId) {
     if (key === activeKey) continue;
     activeAssistantTypings.delete(key);
     entry.cancel?.();
+    queueMicrotask(() => processQueue(key));
   }
 }
 
@@ -8554,10 +9529,11 @@ function completeAssistantTyping(sessionId, entry) {
   const key = String(sessionId || "");
   if (!key || activeAssistantTypings.get(key) !== entry) return;
   activeAssistantTypings.delete(key);
+  queueMicrotask(() => processQueue(key));
   if (state.selectedSessionId !== sessionId || !entry.pendingSignature) return;
   // Persistence may finish before the local reveal. Adopt that snapshot in
   // place; a second full render here visibly repositions the reading anchor.
-  if (renderedMessageWindowMatches(state.currentMessages)) {
+  if (renderedMessageWindowMatches(persistedReplay.expandSupplementReplies(state.currentMessages || []))) {
     state.lastMessageSignature = entry.pendingSignature;
   }
 }
@@ -8576,6 +9552,12 @@ function appendTypingCharacters(rendered, chars = []) {
 
 function progressiveMarkdownStableBoundary(text = "") {
   const source = String(text || "");
+  if (window.marked?.lexer) {
+    const tokens = window.marked.lexer(source, { gfm: true, breaks: true });
+    if (tokens.map(token => token.raw || "").join("") !== source) return 0;
+    const lastBlock = tokens.findLastIndex(token => token.type !== "space");
+    return tokens.slice(0, Math.max(0, lastBlock)).reduce((length, token) => length + token.raw.length, 0);
+  }
   let boundary = 0;
   let offset = 0;
   let fenced = false;
@@ -8589,20 +9571,54 @@ function progressiveMarkdownStableBoundary(text = "") {
   return boundary;
 }
 
-function renderProgressiveMarkdown(rendered, text = "", { final = false, envelope = {} } = {}) {
+function renderCodeMarkdownRegion(region, source, reusableCards = [], { streaming = false, envelope = {} } = {}) {
+  if (streaming) {
+    const fence = source.match(/^ {0,3}(`{3,}|~{3,})([^\n]*)\n([\s\S]*)$/);
+    if (fence && !new RegExp(`^ {0,3}${fence[1][0]}{${fence[1].length},}[ \\t]*$`, "m").test(fence[3])) {
+      const language = fence[2].trim().split(/\s+/)[0] || "代码";
+      const value = fence[3].replace(/\n$/, "");
+      const current = region.firstElementChild;
+      if (current?._codeStreaming && current._codeLanguage === language) current._updateStreamingSource(value);
+      else {
+        const card = createHiddenCodeCard([{ language, code: value || "\n" }], { streaming: true });
+        card._updateStreamingSource(value);
+        region.replaceChildren(card);
+      }
+      return;
+    }
+  }
+  const fragment = document.createElement("div");
+  fragment.innerHTML = renderMarkdown(source, envelope);
+  enhanceRenderedCodeBlocks(fragment, envelope?.raw?.hiddenCodeBlocks || envelope?.hiddenCodeBlocks || [], reusableCards);
+  region.replaceChildren(...fragment.childNodes);
+}
+
+function renderProgressiveMarkdown(rendered, text = "", { final = false, envelope = {}, target = "answer" } = {}) {
   if (!rendered) return;
   const source = String(text || "");
+  const reusableCards = [...rendered.querySelectorAll(".hidden-code-card")];
+  const focused = document.activeElement;
+  const restoreFocus = () => {
+    if (focused?.isConnected && rendered.contains(focused) && document.activeElement !== focused) focused.focus({ preventScroll: true });
+  };
   if (final) {
     const alreadyRendered = rendered.classList.contains("progressive-markdown")
       && rendered._progressiveMarkdownSource === source;
     rendered.classList.remove("native-black-ball-text", "progressive-markdown");
-    if (!alreadyRendered) rendered.innerHTML = renderMarkdown(source);
+    if (!alreadyRendered || reusableCards.some(card => card._codeStreaming)) renderCodeMarkdownRegion(rendered, source, reusableCards, { envelope });
     bindRenderedLinks(rendered);
+    if (target === "answer") {
+      enhanceRenderedCodeBlocks(rendered, envelope?.raw?.hiddenCodeBlocks || envelope?.hiddenCodeBlocks || []);
+    } else if (target === "structured") {
+      enhanceRenderedCodeBlocks(rendered);
+    }
     classifyRenderedDataLayout(rendered, { preserveWide: true, source });
-    decorateAnswerResult(rendered, source, envelope);
+    if (target === "answer") decorateAnswerResult(rendered, source, envelope);
     rendered._progressiveMarkdownStableSource = null;
     rendered._progressiveMarkdownSource = null;
     rendered._progressiveMarkdownEnhancedAt = null;
+    rendered._progressiveMarkdownTailSource = null;
+    restoreFocus();
     return;
   }
   rendered.classList.remove("native-black-ball-text");
@@ -8622,11 +9638,18 @@ function renderProgressiveMarkdown(rendered, text = "", { final = false, envelop
   const tailSource = source.slice(boundary);
   const stableChanged = rendered._progressiveMarkdownStableSource !== stableSource;
   if (stableChanged) {
-    stable.innerHTML = renderMarkdown(stableSource);
+    const previousStable = rendered._progressiveMarkdownStableSource;
+    if (previousStable && stableSource.startsWith(previousStable)) {
+      const addition = document.createElement("div");
+      renderCodeMarkdownRegion(addition, stableSource.slice(previousStable.length), reusableCards.filter(card => !stable.contains(card)));
+      stable.append(...addition.childNodes);
+    } else renderCodeMarkdownRegion(stable, stableSource, reusableCards);
     rendered._progressiveMarkdownStableSource = stableSource;
   }
-  tail.innerHTML = renderMarkdown(tailSource);
-  setAnswerResultDocument(rendered, source, envelope);
+  if (rendered._progressiveMarkdownTailSource !== tailSource || stableChanged) {
+    renderCodeMarkdownRegion(tail, tailSource, reusableCards.filter(card => !stable.contains(card)), { streaming: true });
+    rendered._progressiveMarkdownTailSource = tailSource;
+  }
   // Link binding and table classification scan the whole rendered subtree.
   // They do not need to run for every paint of the unstable tail.
   const now = performance.now();
@@ -8634,10 +9657,21 @@ function renderProgressiveMarkdown(rendered, text = "", { final = false, envelop
     || !Number.isFinite(Number(rendered._progressiveMarkdownEnhancedAt))
     || now - Number(rendered._progressiveMarkdownEnhancedAt) >= 240;
   if (enhanceDue) {
+    if (target === "answer") setAnswerResultDocument(rendered, source, envelope);
     bindRenderedLinks(rendered);
     classifyRenderedDataLayout(rendered, { preserveWide: true, source });
     rendered._progressiveMarkdownEnhancedAt = now;
   }
+  restoreFocus();
+}
+
+function renderStructuredEntryText(node, text, { final = false } = {}) {
+  if (node.dataset.durable !== "1") {
+    node.textContent = text;
+    return;
+  }
+  node.classList.add("rendered");
+  renderProgressiveMarkdown(node, text, { final, target: "structured" });
 }
 
 function softenProgressiveTail(rendered, maximumCharacters = 5) {
@@ -8704,7 +9738,7 @@ function startAssistantTyping(rendered, text, { codeBlocks = [], onComplete = nu
     rendered._typingCancel = null;
     rendered.classList.remove("typing-response");
     renderProgressiveMarkdown(rendered, source, { final: true });
-    enhanceHiddenCodeBlocks(rendered, codeBlocks);
+    enhanceRenderedCodeBlocks(rendered, codeBlocks);
     onComplete?.();
   };
   const paint = (now) => {
@@ -8933,6 +9967,10 @@ function classifyRenderedDataLayout(rendered, { preserveWide = false, source = "
   const wideContent = rendered.querySelector("table, pre, img, video, iframe, canvas, svg");
   const keepWide = preserveWide && rendered.dataset.layout === "wide";
   rendered.dataset.layout = wideContent || keepWide || progressiveSourceUsesWideLayout(source) ? "wide" : "prose";
+  const stream = rendered.closest(".streaming-rendered");
+  if (stream && stream !== rendered) {
+    stream.dataset.layout = stream.dataset.layout === "wide" || rendered.dataset.layout === "wide" ? "wide" : "prose";
+  }
   for (const table of tables) {
     const rows = [...table.querySelectorAll("tr")];
     const columnCount = Math.max(0, ...rows.map((row) => row.children.length));
@@ -9033,8 +10071,11 @@ function isStageResultStructuredEvent(event = {}) {
   return String(event.semanticType ?? event.semantic_type ?? "").trim().toLowerCase() === "stage_result";
 }
 
+function isDurableStructuredEvent(event = {}) {
+  return isCrossStructuredEvent(event) || isStageResultStructuredEvent(event);
+}
+
 function isPrimaryExecutionSummaryEvent(event = {}) {
-  if (isCrossStructuredEvent(event) || isStageResultStructuredEvent(event)) return true;
   const semanticType = String(event.semanticType ?? event.semantic_type ?? "").trim().toLowerCase();
   const target = String(event.target ?? event.outputType ?? "").trim().toLowerCase();
   const provenance = String(event.provenance || "").trim().toLowerCase();
@@ -9129,14 +10170,13 @@ function renderPersistedSegmentPairs(message, rendered) {
     processFlow.className = "execution-activity-flow";
     process.appendChild(processFlow);
     const processItems = [
-      ...(processBySegment.get(segmentId) || []),
-      ...segmentStructuredEvents.filter(isStageResultStructuredEvent)
+      ...(processBySegment.get(segmentId) || [])
     ].sort((a, b) => Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0));
     replaceExecutionActivityLines(processFlow, processItems, {
       detailCount: processItems.length
     });
     const structured = document.createElement("section");
-    structured.className = "stream-segment-structured streaming-structured-result";
+    structured.className = "stream-segment-structured persisted-structured-result streaming-structured-result";
     structured.setAttribute("aria-live", "polite");
     const structuredItems = segmentStructuredEvents
       .filter((event) => !isPrimaryExecutionSummaryEvent(event));
@@ -9149,18 +10189,32 @@ function renderPersistedSegmentPairs(message, rendered) {
       node.className = `structured-result-entry${isPublicStructuredThought(event, kind, progressType) ? " structured-result-entry-thinking" : ""}`;
       node.dataset.eventId = String(event.eventId || "");
       node.dataset.segmentId = segmentId;
+      node.dataset.sequence = String(event.turnSequence || event.sequence || 0);
+      node.dataset.durable = isDurableStructuredEvent(event) ? "1" : "0";
       node.dataset.kind = kind;
-      node.textContent = text;
+      renderStructuredEntryText(node, text, { final: true });
       structured.appendChild(node);
     });
     // Keep real structured summaries visible; only an empty lane stays hidden.
     structured.hidden = structuredItems.length === 0;
     const answer = document.createElement("div");
     answer.className = "rendered stream-segment-answer";
-    const answerText = String(answerBySegment.get(segmentId)?.text || "");
+    answer.dataset.sequence = String(segmentSequence(segmentId));
+    const segment = answerBySegment.get(segmentId) || {};
+    const answerText = String(segment.text || "");
     if (answerText) {
-      answer.innerHTML = renderMarkdown(answerText);
+      answer.innerHTML = renderMarkdown(answerText, answerBySegment.get(segmentId));
       bindRenderedLinks(answer);
+      const segmentCodeBlocks = Array.isArray(segment.hiddenCodeBlocks)
+        ? segment.hiddenCodeBlocks
+        : extractClientCodeBlocks(answerText);
+      const persistedCodeBlocks = Array.isArray(message.raw?.hiddenCodeBlocks)
+        ? message.raw.hiddenCodeBlocks
+        : [];
+      const codeBlocks = segmentCodeBlocks.length
+        ? segmentCodeBlocks
+        : orderedSegments.length === 1 ? persistedCodeBlocks : [];
+      enhanceRenderedCodeBlocks(answer, codeBlocks);
       classifyRenderedDataLayout(answer);
       decorateAnswerResult(answer, answerText, answerBySegment.get(segmentId));
     }
@@ -9243,9 +10297,16 @@ function mergeSessionChangedDb(currentDb = {}, incomingDb = {}, options = {}) {
     }
     mergedMessages[sessionId] = output;
   }
-  return options.staleSnapshot === true
+  const mergedDb = options.staleSnapshot === true
     ? { ...currentDb, messages: mergedMessages }
     : { ...currentDb, ...incomingDb, messages: mergedMessages };
+  if (Number(currentDb.settings?.modelConfigGeneration || 0) > Number(mergedDb.settings?.modelConfigGeneration || 0)) {
+    mergedDb.settings = { ...mergedDb.settings };
+    for (const field of ["providers", "defaultProvider", "reasoning", "modelRuntime", "modelConfigRevision", "modelConfigGeneration"]) {
+      mergedDb.settings[field] = currentDb.settings[field];
+    }
+  }
+  return mergedDb;
 }
 
 function addMessage(message, target = messageList, options = {}) {
@@ -9255,14 +10316,19 @@ function addMessage(message, target = messageList, options = {}) {
   const messageStatus = String(message.raw?.productResult?.status || message.raw?.status || message.status || "").trim();
   if (messageStatus) row.dataset.messageStatus = messageStatus;
   if (message.id) row.dataset.messageId = String(message.id);
+  row.dataset.codeSessionId = String(options.sessionId || state.selectedSessionId || "");
+  row.dataset.codeReplyOwner = String(message.raw?.replyToUserMessageId || "");
+  row.dataset.codeTurnId = String(message.turnId || message.raw?.turnId || message.raw?.productResult?.turnId || requestRunFromMessage(message)?.runId || "");
+  row.dataset.renderFingerprint = messageRenderFingerprint(message);
   if (message.role === "assistant") row._longReplyOutline = outlineItemsFromMessage(message);
   row.addEventListener("contextmenu", (event) => showMessageContextMenu(event, message));
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   const rendered = document.createElement("div");
   rendered.className = message.role === "assistant" ? "rendered result-region" : "rendered";
+  const codeRevision = codeRevisionFromMessage(message);
   const nativeBlackBallText = isNativeBlackBallMessage(message);
-  const sourceText = nativeBlackBallText
+  const sourceText = codeRevision ? codeRevisionDisplayText(codeRevision) : nativeBlackBallText
     ? String(message.text || "")
     : message.role === "assistant"
       ? blackBallBrandText(message.text || "")
@@ -9291,16 +10357,19 @@ function addMessage(message, target = messageList, options = {}) {
   const requestRun = message.role === "assistant" ? requestRunFromMessage(message) : null;
   const useTypingAnimation = message.role === "assistant" && options.progressive === true && Boolean(displayText);
   if (!useTypingAnimation) {
-    if (nativeBlackBallText) {
+    if (codeRevision) {
+      renderCodeRevisionMessage(rendered, codeRevision);
+    } else if (nativeBlackBallText) {
       rendered.classList.add("native-black-ball-text");
-      rendered.innerHTML = renderMarkdown(displayText);
+      rendered.innerHTML = renderMarkdown(displayText, message);
       bindRenderedLinks(rendered);
+      enhanceRenderedCodeBlocks(rendered, extractClientCodeBlocks(displayText));
       classifyRenderedDataLayout(rendered);
       decorateAnswerResult(rendered, displayText, message);
     } else {
-      rendered.innerHTML = renderMarkdown(displayText);
+      rendered.innerHTML = renderMarkdown(displayText, message);
       bindRenderedLinks(rendered);
-      enhanceHiddenCodeBlocks(rendered, codeBlocks);
+      enhanceRenderedCodeBlocks(rendered, codeBlocks);
       classifyRenderedDataLayout(rendered);
       decorateAnswerResult(rendered, displayText, message);
     }
@@ -9331,6 +10400,7 @@ function addMessage(message, target = messageList, options = {}) {
     if (persistedExecution) {
       placeKnowledgeReferencesInExecutionHeader(persistedExecution, knowledgeReferences);
       bubble.insertBefore(persistedExecution, rendered);
+      syncExecutionReplyTimeline(persistedExecution, rendered);
     }
   }
   const employeeResults = message.role === "assistant" ? createProjectEmployeeResults(message) : null;
@@ -9369,20 +10439,41 @@ function addMessage(message, target = messageList, options = {}) {
   if (deliveredFiles.length) {
     const files = document.createElement("div");
     files.className = "message-files";
+    if (message.raw?.wechat) files.classList.add("wechat-message-files");
     for (const item of deliveredFiles) {
       const fileLink = document.createElement("button");
       fileLink.type = "button";
       fileLink.className = "message-file-link";
       fileLink.title = `用系统默认程序打开 ${item.name || "附件"}`;
       fileLink.innerHTML = `<span aria-hidden="true">▣</span><span>${escapeHtml(item.name || "附件")}</span>${item.sizeBytes ? `<small>${escapeHtml(formatTaskBoardBytes(item.sizeBytes))}</small>` : ""}`;
-      fileLink.addEventListener("click", () => openAttachmentExternally(item).catch(() => showCopyToast("当前文件无法打开")));
-      files.appendChild(fileLink);
+      fileLink.addEventListener("click", () => {
+        if (shouldOpenAttachmentInTaskBoard(item)) {
+          openAttachmentInBoard(item);
+          return;
+        }
+        openAttachmentExternally(item).catch(() => showCopyToast("当前文件无法打开"));
+      });
+      if (message.raw?.wechat) {
+        const card = document.createElement("div");
+        card.className = "wechat-file-card";
+        const extension = String(item.name || "").split(".").pop();
+        const type = /^[a-z0-9]{1,6}$/i.test(extension) ? extension.toUpperCase() : "文件";
+        fileLink.innerHTML = `<span aria-hidden="true">${escapeHtml(type)}</span><span>${escapeHtml(item.name || "附件")}<small>${escapeHtml(item.sizeBytes ? formatTaskBoardBytes(item.sizeBytes) : "文件附件")} · 点击打开</small></span>`;
+        const folder = document.createElement("button");
+        folder.type = "button";
+        folder.className = "wechat-file-folder";
+        folder.textContent = "所在位置";
+        folder.addEventListener("click", () => showAttachmentInFolder(item));
+        card.append(fileLink, folder);
+        files.appendChild(card);
+      } else files.appendChild(fileLink);
     }
     bubble.appendChild(files);
   }
   const suggestionEligible = options.suggestionEligible === true;
   if (message.role === "assistant") {
     ensureAssistantCopyAction(bubble, () => answerResultCopyText(rendered, filteredText || rendered.textContent || ""));
+    ensureProtocolContinueAction(bubble, message, options.suggestionSessionId || state.selectedSessionId);
   }
   // 沉淀已移入右键菜单（messageContextMenu），不再显示在消息悬浮按钮上，
   // 避免"复制/沉淀"挤在一起。
@@ -9778,7 +10869,7 @@ function executionActivityRenderLimit(root) {
 }
 
 function executionActivityRenderedDetails(root, details = []) {
-  const history = uniqueExecutionActivityEntries(details);
+  const history = uniqueExecutionActivityEntries(details).filter(event => root?.dataset?.lifecycle === "interrupted" || !executionWaitHint(event));
   if (root?.dataset?.lifecycle === "completed" && root?.dataset?.activityExpanded !== "1") return [];
   return root?.dataset?.activityExpanded === "1"
     ? history
@@ -9798,13 +10889,153 @@ function crossConclusionText(event = {}) {
   return String(eventText || event.publicSummary || event.conclusion || "").trim();
 }
 
+function executionToolKey(event = {}) {
+  const id = event.toolCallId || event.publicActionId || event.actionId;
+  return id ? JSON.stringify([event.turnId || "", id]) : "";
+}
+
+function executionActiveTools(events = []) {
+  const latest = new Map();
+  for (const event of events) {
+    if (event.semanticType !== "tool" || event.provenance !== "blackball_tool"
+      || !["execution", "execution_activity"].includes(event.target)) continue;
+    const key = executionToolKey(event);
+    if (!key) continue;
+    const previous = latest.get(key);
+    if (!previous || Number(event.turnSequence || event.sequence || 0) >= Number(previous.turnSequence || previous.sequence || 0)) {
+      latest.set(key, event);
+    }
+  }
+  return new Map([...latest].filter(([, event]) =>
+    ["running", "pending", "in_progress", "started", "retry", "retrying"].includes(event.status)));
+}
+
+function updateExecutionOperationClocks(root, now = Date.now()) {
+  const panel = root?.__executionOperationPanel;
+  if (!panel) return;
+  if (root.dataset.lifecycle === "interrupted") return;
+  panel.hidden = root.dataset.lifecycle !== "running" || !panel.childElementCount;
+  if (panel.hidden) return;
+  const updates = [];
+  for (const row of panel.children) {
+    if (row.dataset.metricsOnly === "1") continue;
+    const timestamp = Number(row.dataset.updatedAt);
+    const elapsed = timestamp > 0 ? Math.max(0, Math.floor((now - timestamp) / 1000)) : null;
+    const transportAt = Number(root.__transportActivityAt || 0);
+    const transportElapsed = transportAt > 0 ? Math.max(0, Math.floor((now - transportAt) / 1000)) : null;
+    const hasTransport = row.dataset.tool !== "1" && transportAt >= timestamp && transportElapsed !== null;
+    const text = hasTransport
+      ? `接口仍在传输数据，等待新的公开内容 · 距上次内容更新 ${transportElapsed}s`
+      : (row.dataset.tool === "1" ? "等待工具后续事件" : "等待黑球后续事件")
+        + (elapsed === null ? "" : ` · 距上次更新 ${elapsed}s`);
+    const clock = row.querySelector(".execution-operation-wait");
+    if (clock && clock.textContent !== text) updates.push([clock, text]);
+  }
+  if (updates.length) mutatePreservingMessageViewport(() => {
+    for (const [clock, text] of updates) clock.textContent = text;
+  });
+}
+
+function paintExecutionReceivedBytes(root, bytesReceived = root?.__receivedBytes) {
+  if (!root || !Number.isSafeInteger(bytesReceived) || bytesReceived < 0) return;
+  root.__receivedBytes = Math.max(root.__receivedBytes || 0, bytesReceived);
+  const running = root.dataset.lifecycle === "running";
+  const panel = root.__executionOperationPanel;
+  let row = panel?.firstElementChild;
+  if (panel && !row && running) {
+    row = root.__receivedMetricsRow ||= document.createElement("div");
+    row.className = "execution-current-operation execution-transport-only";
+    row.dataset.metricsOnly = "1";
+    panel.appendChild(row);
+    panel.hidden = false;
+  }
+  let badge = root.__receivedBytesBadge;
+  if (!badge && (!row || !running)) return;
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "execution-received-bytes";
+    badge.setAttribute("aria-live", "off");
+    badge.innerHTML = '<span class="execution-received-separator">· </span>已接收<span class="execution-received-value"></span>KB';
+    root.__receivedBytesBadge = badge;
+  }
+  if (row && running && badge.parentElement !== row) {
+    row.insertBefore(badge, row.querySelector(".execution-operation-wait"));
+  }
+  badge.title = `本轮模型接口累计接收 ${root.__receivedBytes.toLocaleString()} 字节（1 KB = 1024 字节，非 Token 用量）`;
+  const value = badge.querySelector(".execution-received-value");
+  const target = Math.floor(root.__receivedBytes / 1024);
+  globalThis.BaiqiuTokenUsage?.updateCounter(value, target,
+    running && root.isConnected && !document.hidden, count => String(count));
+}
+
+function paintExecutionCurrentOperations(root, viewModel, activeTools) {
+  if (!["running", "interrupted"].includes(root.dataset.lifecycle)) {
+    paintExecutionReceivedBytes(root);
+    if (root.__executionOperationPanel) root.__executionOperationPanel.hidden = true;
+    return;
+  }
+  const head = root.querySelector(".execution-activity-head");
+  if (!head) return;
+  let panel = root.__executionOperationPanel;
+  if (!panel || !root.contains(panel)) {
+    panel = document.createElement("div");
+    panel.className = "execution-current-operations";
+    head.after(panel);
+    root.__executionOperationPanel = panel;
+  }
+  const operations = [...activeTools.values()];
+  if (!operations.length) {
+    const latest = [...viewModel.events].sort((left, right) =>
+      Number(right.turnSequence || right.sequence || 0) - Number(left.turnSequence || left.sequence || 0))[0];
+    if (latest && ["blackball_runtime", "blackball_tool"].includes(latest.provenance)
+      && ["execution", "execution_activity"].includes(latest.target)) operations.push(latest);
+  }
+  const previous = new Map([...panel.children].map(row => [row.dataset.operationKey, row]));
+  const rows = operations.map(event => {
+    const key = executionToolKey(event) || event.eventId;
+    const row = previous.get(key) || document.createElement("div");
+    row.className = "execution-current-operation";
+    row.dataset.operationKey = key;
+    row.dataset.tool = activeTools.has(key) ? "1" : "0";
+    if (row.dataset.eventId !== event.eventId) {
+      row.dataset.eventId = event.eventId;
+      const timestamp = event.timestamp || event.createdAt || event.receivedAt;
+      row.dataset.updatedAt = String(typeof timestamp === "number" ? timestamp : Date.parse(timestamp) || 0);
+      const label = document.createElement("span");
+      label.className = "execution-operation-label";
+      label.textContent = event.publicSummary === "正在搜索" && event.title
+        ? event.title
+        : event.publicSummary || event.title || event.message || event.text || "";
+      label.title = [event.sourceText || event.inputPreview, event.resultPreview].filter(Boolean).join("\n");
+      const clock = document.createElement("span");
+      clock.className = "execution-operation-wait";
+      row.replaceChildren(label, clock);
+    }
+    return row;
+  });
+  reconcileExecutionChildren(panel, rows);
+  paintExecutionReceivedBytes(root);
+  updateExecutionOperationClocks(root);
+}
+
 function executionThreeRowViewModel(viewModel = null) {
   const events = Array.isArray(viewModel?.events) ? viewModel.events : [];
+  const timestampOf = (event) => {
+    const value = event?.timestamp || event?.createdAt || event?.receivedAt;
+    const timestamp = typeof value === "number" ? value : Date.parse(String(value || ""));
+    return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+  };
+  const startEvent = events.find(event => event.provenance === "blackball_runtime"
+    && (event.type === "execution_start" || event.phase === "blackball-start"
+      || (event.kind === "lifecycle" && event.action === "connect" && /:execution:0$/.test(String(event.eventId || ""))))
+    && timestampOf(event));
+  const startedAt = timestampOf(startEvent);
   const phases = [];
   const stages = new Map();
   const owners = new Map();
   const eventsById = new Map();
   const visited = new Set();
+  const closedPhases = new Set();
   for (const event of events) {
     if (event.eventId) eventsById.set(String(event.eventId), event);
     if (event.sourceEventId && !eventsById.has(String(event.sourceEventId))) {
@@ -9813,6 +11044,7 @@ function executionThreeRowViewModel(viewModel = null) {
   }
   let current = null;
   const eventSequence = (event) => Number(event?.turnSequence || event?.sequence || 0);
+  const orderedEvents = [...events].sort((left, right) => eventSequence(left) - eventSequence(right));
   const eventText = (event) => String(event?.message || event?.text || event?.payload?.text
     || (typeof event?.payload === "string" ? event.payload : ""));
   const toolRowText = (event) => {
@@ -9827,8 +11059,13 @@ function executionThreeRowViewModel(viewModel = null) {
     const semanticType = String(event?.semanticType || "");
     const target = String(event?.target || "");
     const provenance = String(event?.provenance || "");
+    if (event.kind === "lifecycle" && provenance === "blackball_runtime"
+      && ["execution", "execution_activity"].includes(target) && eventText(event).trim()) {
+      return { semanticType: "lifecycle", text: eventText(event) };
+    }
     if (["thinking", "action"].includes(semanticType)
-      && ["structured", "structured_result"].includes(target)
+      && (["structured", "structured_result"].includes(target)
+        || (semanticType === "action" && ["execution", "execution_activity"].includes(target)))
       && provenance === "blackball_public"
       && eventText(event).trim()) {
       return { semanticType, text: eventText(event) };
@@ -9846,6 +11083,7 @@ function executionThreeRowViewModel(viewModel = null) {
     const phase = {
       id: stageId && !stages.has(stageId) ? "stage:" + stageId : "phase:" + String(event?.eventId || eventSequence(event)),
       stageId,
+      replyOwner: String(event?.replyToUserMessageId || ""),
       sourceEventIds: [],
       progressEvents: [],
       resultEvents: []
@@ -9865,24 +11103,34 @@ function executionThreeRowViewModel(viewModel = null) {
     const anchored = owners.get(String(event?.afterEventId || ""));
     return anchored || stages.get(stageId) || null;
   };
-  const answerTypes = ["answer", "answer_delta", "answer_segment", "final", "result", "public_result", "turn_complete"];
-  const visit = (event) => {
-    if (visited.has(event)) return;
-    visited.add(event);
-    const anchor = eventsById.get(String(event.afterEventId || ""));
-    if (anchor && anchor !== event) visit(anchor);
-    const semanticType = String(event?.semanticType || "");
-    if (answerTypes.includes(semanticType) || answerTypes.includes(String(event?.type || ""))
-      || answerTypes.includes(String(event?.kind || ""))
-      || ["answer", "result", "public_result"].includes(String(event?.target || ""))) return;
-    if (!["thinking", "action", "tool", "stage_result", "cross"].includes(semanticType)) return;
+    const answerTypes = ["answer", "answer_delta", "answer_segment", "final", "result", "public_result", "turn_complete"];
+    const visit = (event) => {
+      if (visited.has(event)) return;
+      visited.add(event);
+      if (executionWaitHint(event)) return;
+      const anchor = eventsById.get(String(event.afterEventId || ""));
+      if (anchor && anchor !== event) visit(anchor);
+      const semanticType = String(event?.semanticType || "");
+      const target = String(event?.target || "");
+      if (answerTypes.includes(semanticType) || answerTypes.includes(String(event?.type || ""))
+        || answerTypes.includes(String(event?.kind || ""))
+        || ["answer", "result", "public_result"].includes(target)) {
+        phases.forEach((phase) => closedPhases.add(phase));
+        current = null;
+        return;
+      }
+    const runtimeEvent = event.kind === "lifecycle" && event.provenance === "blackball_runtime"
+      && ["execution", "execution_activity"].includes(String(event.target || ""));
+    if (!runtimeEvent && !["thinking", "action", "tool", "stage_result", "cross"].includes(semanticType)) return;
     const stageId = String(event?.stageId || event?.stage || "");
     const isResult = ["stage_result", "cross"].includes(semanticType);
     let owner = phaseForEvent(event)
       || (!stageId && !event.afterEventId ? current : null)
       || createPhase(event);
-    if (!isResult && owner.resultEvents.length) {
+    if (owner.replyOwner !== String(event.replyToUserMessageId || "")) owner = createPhase(event);
+    if (!isResult && (owner.resultEvents.length || closedPhases.has(owner))) {
       owner = current && current !== owner && current.stageId === owner.stageId
+        && current.replyOwner === owner.replyOwner
         && !current.resultEvents.length
         ? current : createPhase(event, owner.stageId);
     }
@@ -9895,22 +11143,54 @@ function executionThreeRowViewModel(viewModel = null) {
         semanticType: row.semanticType,
         sequence: eventSequence(event),
         turnId: String(event.turnId || ""),
+        toolKey: executionToolKey(event),
         target: String(event.target || ""),
         status: String(event.status || ""),
         text: row.text
       };
-      if (!isResult) item.payloadText = String(event.payloadText ?? event.payload?.text ?? "").trim();
+      if (!isResult) {
+        item.payloadText = String(event.payloadText ?? event.payload?.text ?? "").trim();
+        const timestamp = timestampOf(event);
+        item.elapsedMs = startedAt > 0 && timestamp >= startedAt ? timestamp - startedAt : null;
+      }
       (isResult ? owner.resultEvents : owner.progressEvents).push(item);
     }
     if (!isResult) current = owner;
     else if (owner === current) current = null;
   };
-  [...events].sort((left, right) => eventSequence(left) - eventSequence(right)).forEach(visit);
+  orderedEvents.forEach(visit);
   for (const phase of phases) {
     phase.progressEvents.sort((left, right) => left.sequence - right.sequence);
     phase.resultEvents.sort((left, right) => left.sequence - right.sequence);
+    phase.hasAnswerResult = closedPhases.has(phase);
   }
   return phases.filter((phase) => phase.progressEvents.length || phase.resultEvents.length);
+}
+
+function executionWaitHint(event = {}) {
+  return event.kind === "lifecycle" && event.provenance === "blackball_runtime"
+    && ["execution", "execution_activity"].includes(event.target)
+    && ["", "running", "completed"].includes(String(event.status || ""))
+    && ["runtime_wait", "config_sync", "client_start", "request_context",
+      "context_prepare", "context_ready", "promptDispatched", "client_prepare", "client_ready",
+      "http_request", "connection_connect_tcp_started", "connection_start_tls_started",
+      "http11_send_request_body_complete", "http2_send_request_body_complete",
+      "http_headers", "first_byte", "firstThoughtTextUpdate", "answer_stream_started"].includes(event.phase);
+}
+
+function executionStageViewPhases(viewModel = null) {
+  return executionThreeRowViewModel(viewModel)
+    .map((phase) => {
+      const resultEvents = phase.resultEvents.filter((item) => (
+        !["structured", "structured_result"].includes(String(item.target || "").toLowerCase())
+      ));
+      return {
+        ...phase,
+        resultEvents,
+        hasStructuredResult: phase.hasAnswerResult || resultEvents.length !== phase.resultEvents.length
+      };
+    })
+    .filter((phase) => phase.progressEvents.length || phase.resultEvents.length);
 }
 
 function completedExecutionHeaderText(phases = []) {
@@ -9925,7 +11205,7 @@ function completedExecutionHeaderText(phases = []) {
 function paintExecutionPhaseResult(root, node, result = {}) {
   const text = String(result.text || "");
   const identity = `${String(result.eventId || "")}:${text}`;
-  const completed = root?.dataset?.lifecycle === "completed";
+  const completed = ["completed", "interrupted"].includes(root?.dataset?.lifecycle);
   const finish = () => {
     delete node.dataset.typing;
     root?.__reportFirstProcessPaint?.(node, result);
@@ -9957,7 +11237,11 @@ function paintExecutionPhaseResult(root, node, result = {}) {
   node.dataset.typing = "1";
   const paint = (now) => {
     node.__executionResultFrame = null;
-    if (!node.isConnected || root?.dataset?.lifecycle === "completed") {
+    const eventRow = node.closest(".execution-phase-event");
+    const phase = eventRow?.closest(".execution-phase-group");
+    const collapsed = eventRow?.closest(".execution-phase-process") && phase?.dataset.expanded !== "1"
+      && (eventRow?.dataset.collapsedHidden === "1" || phase?.querySelector(".execution-phase-process")?.hidden);
+    if (!node.isConnected || ["completed", "interrupted"].includes(root?.dataset?.lifecycle) || collapsed) {
       node.textContent = text;
       finish();
       return;
@@ -9979,105 +11263,256 @@ function paintExecutionPhaseResult(root, node, result = {}) {
   node.__executionResultFrame = requestAnimationFrame(paint);
 }
 
+const executionPhaseOverflowWindows = new Set();
+let executionPhaseOverflowFrame = 0;
+
 function updateExecutionPhaseOverflow(node) {
   const windowNode = node?.closest?.(".execution-phase-event-window");
-  const list = windowNode?.querySelector?.(".execution-phase-event-list");
-  if (!windowNode || !list) return;
-  windowNode.dataset.overflow = list.children.length > EXECUTION_ACTIVITY_VISIBLE_LIMIT
-    || list.scrollHeight > windowNode.clientHeight + 1 ? "1" : "0";
+  if (!windowNode) return;
+  executionPhaseOverflowWindows.add(windowNode);
+  if (executionPhaseOverflowFrame) return;
+  executionPhaseOverflowFrame = requestAnimationFrame(() => {
+    executionPhaseOverflowFrame = 0;
+    const measurements = [...executionPhaseOverflowWindows].filter(window => window.isConnected).map(window => {
+      const list = window.querySelector(".execution-phase-event-list");
+      const overflow = list && (list.children.length > EXECUTION_ACTIVITY_VISIBLE_LIMIT
+        || list.scrollHeight > window.clientHeight + 1);
+      return [window, overflow ? "1" : "0"];
+    });
+    executionPhaseOverflowWindows.clear();
+    for (const [window, overflow] of measurements) {
+      if (window.dataset.overflow !== overflow) window.dataset.overflow = overflow;
+    }
+  });
+}
+
+function reconcileExecutionChildren(parent, nodes) {
+  const retained = new Set(nodes);
+  nodes.forEach((node, index) => {
+    if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] || null);
+  });
+  for (const child of [...parent.children]) {
+    if (!retained.has(child)) child.remove();
+  }
 }
 
 function paintExecutionStageView(root, details = [], turnId = "") {
   const panel = root?.querySelector?.(".execution-stage-summary");
   if (!panel) return null;
-  const history = uniqueExecutionActivityEntries([...(root.__executionStageDetails || []), ...details]);
-  const viewModel = executionViewModelFromDetails(history, turnId);
-  root.__executionStageDetails = history;
-  root.__executionViewModel = viewModel;
-  const phases = executionThreeRowViewModel(viewModel);
-  const completedCollapsed = root.dataset.lifecycle === "completed"
-    && root.dataset.activityExpanded !== "1";
-  panel.setAttribute("aria-hidden", completedCollapsed ? "true" : "false");
-  panel.hidden = completedCollapsed || !phases.length;
-  const completedTitle = root.querySelector?.(".execution-activity-title");
-  if (completedTitle) completedTitle.textContent = completedExecutionHeaderText(phases);
-  const directLegacyCross = panel.parentElement?.querySelector?.(":scope > .execution-cross-summary");
-  directLegacyCross?.remove?.();
-  const existingPhases = new Map([...panel.children].map((node) => [node.dataset.phaseId, node]));
-  const paintRow = (item, existingRows, result = false) => {
-    const node = existingRows.get(item.eventId) || document.createElement("div");
-    node.className = result && item.semanticType === "stage_result"
-      ? "execution-phase-result"
-      : "execution-stage-summary-row execution-phase-event";
-    node.dataset.eventId = item.eventId;
-    node.dataset.sourceEventId = item.sourceEventId || item.eventId;
-    node.dataset.semanticType = item.semanticType;
-    node.dataset.sequence = String(item.sequence);
-    node.dataset.turnId = item.turnId;
-    node.dataset.target = item.target;
-    node.dataset.status = item.status;
-    if (item.semanticType === "cross") {
-      paintExecutionPhaseResult(root, node, item);
-    } else {
-      let textNode = node.querySelector(".execution-event-text");
-      if (!textNode) {
-        textNode = document.createElement("span");
-        textNode.className = "execution-event-text";
-        const statusNode = document.createElement("span");
-        statusNode.className = "execution-event-status";
-        node.replaceChildren(textNode, statusNode);
-      }
-      const statusNode = node.querySelector(".execution-event-status");
-      const status = String(item.status || "").toLowerCase();
-      const isSuccess = ["completed", "success", "succeeded", "done"].includes(status);
-      const isFailure = ["failed", "failure", "error", "cancelled", "timeout", "timed_out"].includes(status);
-      statusNode.textContent = isSuccess ? "✅" : isFailure ? "❌" : "";
-      statusNode.className = `execution-event-status${isSuccess ? " success" : isFailure ? " failure" : ""}`;
-      statusNode.hidden = !isSuccess && !isFailure;
-      statusNode.setAttribute("aria-label", isSuccess ? "已完成" : isFailure ? "失败" : "");
-      paintExecutionPhaseResult(root, textNode, item);
-    }
-    return node;
-  };
-  const nodes = phases.map((phase) => {
-    let phaseNode = existingPhases.get(phase.id);
-    if (!phaseNode) {
-      phaseNode = document.createElement("section");
-      phaseNode.className = "execution-phase-group";
-      phaseNode.innerHTML = '<div class="execution-phase-process"><div class="execution-phase-event-window"><div class="execution-phase-event-list"></div></div></div><div class="execution-phase-results"></div>';
-    }
-    phaseNode.dataset.expanded = root.dataset.activityExpanded === "1" ? "1" : "0";
-    phaseNode.dataset.phaseId = phase.id;
-    phaseNode.dataset.stageId = phase.stageId;
-    phaseNode.dataset.sourceEventIds = phase.sourceEventIds.join(",");
-    const process = phaseNode.querySelector(".execution-phase-process");
-    process.hidden = phase.progressEvents.length === 0;
-    const list = phaseNode.querySelector(".execution-phase-event-list");
-    const existingRows = new Map([...list.children].map((node) => [node.dataset.eventId, node]));
-    const rows = phase.progressEvents.map((item, index) => {
-      const node = paintRow(item, existingRows);
-      node.dataset.collapsedHidden = index < phase.progressEvents.length - EXECUTION_ACTIVITY_VISIBLE_LIMIT ? "1" : "0";
-      return node;
-    });
-    list.replaceChildren(...rows);
-    phaseNode.querySelector(".execution-phase-event-window").dataset.overflow = phase.progressEvents.length > EXECUTION_ACTIVITY_VISIBLE_LIMIT ? "1" : "0";
-    const results = phaseNode.querySelector(".execution-phase-results");
-    const existingResults = new Map([...results.children].map((node) => [node.dataset.eventId, node]));
-    results.replaceChildren(...phase.resultEvents.map((item) => paintRow(item, existingResults, true)));
-    results.hidden = phase.resultEvents.length === 0;
-    const resultTexts = [...results.children].map((node) => node.querySelector(".execution-event-text") || node);
-    const updateProcessVisibility = () => {
-      const replyFinished = resultTexts.some((node) => node.textContent.length > 0)
-        && resultTexts.every((node) => node.dataset.typing !== "1");
-      process.hidden = phase.progressEvents.length === 0
-        || (phaseNode.dataset.expanded !== "1" && replyFinished);
+  let viewModel;
+  mutatePreservingMessageViewport(() => {
+    const history = uniqueExecutionActivityEntries([...(root.__executionStageDetails || []), ...details]);
+    viewModel = executionViewModelFromDetails(history, turnId);
+    root.__executionStageDetails = history;
+    root.__executionViewModel = viewModel;
+    const activeTools = root.dataset.lifecycle === "running" ? executionActiveTools(viewModel.events) : new Map();
+    const currentView = {
+      ...viewModel,
+      events: [...viewModel.events, ...(root.__executionAnswerBoundaries || [])]
     };
-    resultTexts.forEach((node) => { node.__executionResultComplete = updateProcessVisibility; });
-    updateProcessVisibility();
-    return phaseNode;
+    paintExecutionCurrentOperations(root, currentView, activeTools);
+    const phases = executionStageViewPhases(currentView);
+    const completedCollapsed = root.dataset.lifecycle === "completed"
+      && root.dataset.activityExpanded !== "1";
+    panel.setAttribute("aria-hidden", completedCollapsed ? "true" : "false");
+    panel.hidden = completedCollapsed || !phases.length;
+    const completedTitle = root.querySelector?.(".execution-activity-title");
+    const completedText = completedExecutionHeaderText(phases);
+    if (completedTitle && completedTitle.textContent !== completedText) completedTitle.textContent = completedText;
+    const directLegacyCross = panel.parentElement?.querySelector?.(":scope > .execution-cross-summary");
+    directLegacyCross?.remove?.();
+    const existingPhases = root.__executionPhaseNodes
+      || new Map([...panel.children].map((node) => [node.dataset.phaseId, node]));
+    const paintRow = (item, existingRows, result = false) => {
+      const node = existingRows.get(item.eventId) || document.createElement("div");
+      const paintKey = JSON.stringify([item, result, root.dataset.lifecycle]);
+      if (node.__executionPaintKey === paintKey) return node;
+      node.__executionPaintKey = paintKey;
+      node.className = result && item.semanticType === "stage_result"
+        ? "execution-phase-result"
+        : "execution-stage-summary-row execution-phase-event";
+      node.dataset.eventId = item.eventId;
+      node.dataset.sourceEventId = item.sourceEventId || item.eventId;
+      node.dataset.semanticType = item.semanticType;
+      node.dataset.sequence = String(item.sequence);
+      node.dataset.turnId = item.turnId;
+      node.dataset.target = item.target;
+      node.dataset.status = item.status;
+      if (item.semanticType === "cross") {
+        paintExecutionPhaseResult(root, node, item);
+      } else {
+        let textNode = node.querySelector(".execution-event-text");
+        if (!textNode) {
+          textNode = document.createElement("span");
+          textNode.className = "execution-event-text";
+          const statusNode = document.createElement("span");
+          statusNode.className = "execution-event-status";
+          node.replaceChildren(textNode, statusNode);
+        }
+        const statusNode = node.querySelector(".execution-event-status");
+        if (!result) {
+          let timeNode = node.querySelector(".execution-event-time");
+          if (!timeNode) {
+            timeNode = document.createElement("span");
+            timeNode.className = "execution-event-time";
+            node.replaceChildren(timeNode, textNode, statusNode);
+          }
+          const hasTime = Number.isFinite(item.elapsedMs) && item.elapsedMs >= 0;
+          timeNode.hidden = !hasTime;
+          timeNode.textContent = hasTime ? `${Math.floor(item.elapsedMs / 1000)}s` : "";
+          timeNode.setAttribute("title", hasTime ? `事件发生于本次请求开始后 ${(item.elapsedMs / 1000).toFixed(1)} 秒，并非该步骤的耗时` : "");
+        }
+        const status = String(item.status || "").toLowerCase();
+        const isSuccess = ["completed", "success", "succeeded", "done"].includes(status);
+        const isFailure = ["failed", "failure", "error", "cancelled", "timeout", "timed_out"].includes(status);
+        statusNode.textContent = isSuccess ? "✅" : isFailure ? "❌" : "";
+        statusNode.className = `execution-event-status${isSuccess ? " success" : isFailure ? " failure" : ""}`;
+        statusNode.hidden = !isSuccess && !isFailure;
+        statusNode.setAttribute("aria-label", isSuccess ? "已完成" : isFailure ? "失败" : "");
+        if (item.semanticType === "lifecycle") textNode.textContent = item.text;
+        else paintExecutionPhaseResult(root, textNode, item);
+      }
+      return node;
+    };
+    const nodes = phases.map((phase) => {
+      let phaseNode = existingPhases.get(phase.id);
+      if (!phaseNode) {
+        phaseNode = document.createElement("section");
+        phaseNode.className = "execution-phase-group";
+        phaseNode.innerHTML = '<div class="execution-phase-process"><div class="execution-phase-event-window"><div class="execution-phase-event-list"></div></div></div><div class="execution-phase-results"></div>';
+      }
+      phaseNode.dataset.expanded = root.dataset.activityExpanded === "1" ? "1" : "0";
+      phaseNode.dataset.phaseId = phase.id;
+      phaseNode.dataset.sequence = String(phase.progressEvents[0]?.sequence || phase.resultEvents[0]?.sequence || 0);
+      phaseNode.dataset.stageId = phase.stageId;
+      phaseNode.dataset.replyOwner = phase.replyOwner || "";
+      phaseNode.dataset.sourceEventIds = phase.sourceEventIds.join(",");
+      const hasActiveTool = root.dataset.lifecycle === "running"
+        && phase.progressEvents.some(item => activeTools.has(item.toolKey));
+      phaseNode.dataset.activeTool = hasActiveTool ? "1" : "0";
+      const process = phaseNode.querySelector(".execution-phase-process");
+      process.hidden = phase.progressEvents.length === 0;
+      const list = phaseNode.querySelector(".execution-phase-event-list");
+      const existingRows = new Map([...list.children].map((node) => [node.dataset.eventId, node]));
+      const rows = phase.progressEvents.map((item, index) => {
+        const node = paintRow(item, existingRows);
+        const previous = phase.progressEvents[index - 1];
+        const firstVisible = root.dataset.activityExpanded !== "1"
+          && index === Math.max(0, phase.progressEvents.length - EXECUTION_ACTIVITY_VISIBLE_LIMIT);
+        const repeatedTime = !firstVisible && Number.isFinite(item.elapsedMs) && Number.isFinite(previous?.elapsedMs)
+          && Math.floor(item.elapsedMs / 1000) === Math.floor(previous.elapsedMs / 1000);
+        const timeNode = node.querySelector(".execution-event-time");
+        if (timeNode) {
+          const repeated = repeatedTime ? "1" : "0";
+          if (timeNode.dataset.repeated !== repeated) {
+            timeNode.dataset.repeated = repeated;
+            timeNode.setAttribute("aria-hidden", repeatedTime ? "true" : "false");
+          }
+        }
+        const collapsedHidden = index < phase.progressEvents.length - EXECUTION_ACTIVITY_VISIBLE_LIMIT ? "1" : "0";
+        if (node.dataset.collapsedHidden !== collapsedHidden) node.dataset.collapsedHidden = collapsedHidden;
+        return node;
+      });
+      reconcileExecutionChildren(list, rows);
+      phaseNode.querySelector(".execution-phase-event-window").dataset.overflow = phase.progressEvents.length > EXECUTION_ACTIVITY_VISIBLE_LIMIT ? "1" : "0";
+      const results = phaseNode.querySelector(".execution-phase-results");
+      const existingResults = new Map([...results.children].map((node) => [node.dataset.eventId, node]));
+      reconcileExecutionChildren(results, phase.resultEvents.map((item) => paintRow(item, existingResults, true)));
+      results.hidden = phase.resultEvents.length === 0;
+      const resultTexts = [...results.children].map((node) => node.querySelector(".execution-event-text") || node);
+      const updateProcessVisibility = () => {
+        const replyFinished = resultTexts.some((node) => node.textContent.length > 0)
+          && resultTexts.every((node) => node.dataset.typing !== "1");
+        const structuredReplyFinished = Boolean(phase.hasStructuredResult)
+          && resultTexts.every((node) => node.dataset.typing !== "1");
+        const hidden = phase.progressEvents.length === 0
+          || completedCollapsed
+          || (!hasActiveTool && phaseNode.dataset.expanded !== "1" && (replyFinished || structuredReplyFinished));
+        const item = phaseNode.__timelineItem;
+        const itemHidden = hidden && results.hidden;
+        if (process.hidden !== hidden || (item && item.hidden !== itemHidden)) {
+          mutatePreservingMessageViewport(() => {
+            process.hidden = hidden;
+            if (item) item.hidden = itemHidden;
+          });
+        }
+      };
+      resultTexts.forEach((node) => { node.__executionResultComplete = updateProcessVisibility; });
+      updateProcessVisibility();
+      return phaseNode;
+    });
+    if (!root.__executionTimeline?.isConnected) reconcileExecutionChildren(panel, nodes);
+    root.__executionPhaseNodes = new Map(nodes.map((node) => [node.dataset.phaseId, node]));
+    if (root.__executionTimelineRendered) syncExecutionReplyTimeline(root, root.__executionTimelineRendered);
   });
-  panel.replaceChildren(...nodes);
   return viewModel;
+}
+
+function syncExecutionReplyTimeline(root, rendered) {
+  if (!root || !rendered) return;
+  root.__executionTimelineRendered = rendered;
+  const surfaces = root.__executionReplySurfaces;
+  if (surfaces?.size) {
+    for (const surface of new Set([rendered, ...surfaces.values()])) {
+      if (!surface?.isConnected) continue;
+      const phases = [...(root.__executionPhaseNodes?.values() || [])].filter((node) => (
+        (surfaces.get(node.dataset.replyOwner || "") || rendered) === surface
+      ));
+      syncExecutionReplySurface(root, surface, phases, true);
+    }
+    return;
+  }
+  syncExecutionReplySurface(root, rendered, [...(root.__executionPhaseNodes?.values() || [])]);
+}
+
+function syncExecutionReplySurface(root, rendered, phases, force = false) {
+  const replies = [...rendered.querySelectorAll('.structured-result-entry[data-durable="1"]')];
+  const answers = [...rendered.querySelectorAll(".stream-segment-answer")]
+    .filter((node) => node.textContent || node.childElementCount);
+  let timeline = rendered.__executionReplyTimeline;
+  if (!force && !replies.length && answers.length < 2 && !timeline?.isConnected) return;
+  if (!timeline || timeline.parentElement !== rendered) {
+    timeline = document.createElement("div");
+    timeline.className = "execution-reply-timeline";
+    rendered.__executionReplyTimeline = timeline;
+    rendered.prepend(timeline);
+  }
+  if (rendered === root.__executionTimelineRendered) root.__executionTimeline = timeline;
+  const items = [];
+  const place = (node, className, sequence, kind) => {
+    let item = node.__timelineItem;
+    if (!item || !item.contains(node)) {
+      item = document.createElement("section");
+      item.className = className;
+      item.appendChild(node);
+      node.__timelineItem = item;
+    }
+    item.dataset.sequence = String(sequence || Number.MAX_SAFE_INTEGER);
+    item.dataset.timelineKind = kind;
+    items.push(item);
+    return item;
+  };
+  for (const node of phases) {
+    const item = place(node, "execution-stage-summary", Number(node.dataset.sequence), "execution");
+    item.hidden = node.querySelector(".execution-phase-process").hidden
+      && node.querySelector(".execution-phase-results").hidden;
+  }
+  for (const node of replies) {
+    const previousPanel = node.parentElement;
+    place(node, "stream-segment-structured persisted-structured-result streaming-structured-result",
+      Number(node.dataset.sequence), "structured");
+    if (previousPanel && !previousPanel.children.length) previousPanel.hidden = true;
+  }
+  for (const node of answers) {
+    place(node, "stream-segment-block", Number(node.dataset.sequence), "answer");
+  }
+  items.sort((left, right) => Number(left.dataset.sequence) - Number(right.dataset.sequence));
+  items.forEach((item, index) => {
+    if (timeline.children[index] !== item) timeline.insertBefore(item, timeline.children[index] || null);
+  });
+  [...timeline.children].filter((item) => !items.includes(item)).forEach((item) => item.remove());
+  const panel = root.querySelector(".execution-stage-summary");
+  if (panel) panel.hidden = true;
 }
 
 function executionActivityViewportIsAtBottom(viewport, threshold = 2) {
@@ -10148,7 +11583,7 @@ function updateExecutionActivityToggle(root, detailCount = 0) {
   const toggle = root?.querySelector?.(".execution-activity-toggle");
   if (!toggle) return;
   const processCount = Array.isArray(root.__executionViewModel?.events)
-    ? executionThreeRowViewModel(root.__executionViewModel)
+    ? executionStageViewPhases(root.__executionViewModel)
       .reduce((count, phase) => count + phase.progressEvents.length + phase.resultEvents.length, 0)
     : Number(detailCount || 0);
   const expandable = processCount > 0;
@@ -10200,6 +11635,7 @@ function renderPersistedExecutionTimeline(message = {}) {
       root.__executionActivityDetails = [];
       bindExecutionActivityToggle(root);
       updateExecutionActivityToggle(root, 0);
+      globalThis.BaiqiuTokenUsage?.paint(root, globalThis.BaiqiuTokenUsage.fromMessage(message), false);
     }
     return root;
   }
@@ -10210,6 +11646,11 @@ function renderPersistedExecutionTimeline(message = {}) {
   root.dataset.activityExpanded = "0";
   root.dataset.activityFollowLatest = "1";
   root.dataset.segmentedDetailsOwner = answerSegmentsFromMessage(message).length ? "1" : "0";
+  root.__executionAnswerBoundaries = answerSegmentsFromMessage(message);
+  if (messageExecutionStatusValues(message).some((status) => ["cancelled", "aborted", "interrupted"].includes(status))) {
+    root.dataset.lifecycle = "interrupted";
+    root.dataset.activityExpanded = message.raw?.productResult?.executionViewState?.expanded === true ? "1" : "0";
+  }
   const durationLabel = formatTaskDuration(duration);
   root.innerHTML = `
     <div class="execution-activity-head execution-completion-head">
@@ -10240,6 +11681,7 @@ function renderPersistedExecutionTimeline(message = {}) {
   if (viewport) viewport.hidden = visible.length === 0;
   bindExecutionActivityToggle(root);
   updateExecutionActivityToggle(root, details.length);
+  globalThis.BaiqiuTokenUsage?.paint(root, globalThis.BaiqiuTokenUsage.fromMessage(message), false);
   return root;
 }
 
@@ -11445,13 +12887,6 @@ function createThinkingMessage(_label = "", options = {}) {
       </div>
     </div>
   `;
-  if (options.waiting === true) {
-    const waiting = document.createElement("div");
-    waiting.className = "execution-waiting-status";
-    waiting.textContent = String(_label || "等待黑球真实执行事件").trim();
-    row.querySelector(":scope > .bubble")?.prepend(waiting);
-    row.dataset.executionWaiting = "1";
-  }
   row.dataset.executionStage = executionStage;
   row.dataset.activityExpanded = "0";
   row.__executionCurrentThoughtText = initialThinkingText;
@@ -11766,6 +13201,45 @@ function resetLiveChatStreamReveal(entry) {
   entry.revealNeedsReset = true;
 }
 
+function supplementReplySurface(entry, owner = "") {
+  if (!owner || owner === entry.clientMessageId) return { row: entry.row, rendered: entry.rendered };
+  entry.supplementReplyRows ||= new Map();
+  const existing = entry.supplementReplyRows.get(owner);
+  if (existing?.row?.isConnected) {
+    if (entry.activity) {
+      entry.activity.__executionReplySurfaces ||= new Map([["", entry.rendered], [entry.clientMessageId, entry.rendered]]);
+      entry.activity.__executionReplySurfaces.set(owner, existing.rendered);
+    }
+    return existing;
+  }
+  const messageId = (entry.responseMessageId || "product-result:" + entry.clientMessageId) + ":reply:" + encodeURIComponent(owner);
+  const row = messageRowForId(messageId) || addMessage({ id: messageId, role: "assistant", text: "",
+    raw: { replyPart: true, replyToUserMessageId: owner } }, messageList, { animate: false });
+  const rendered = row?.querySelector(":scope > .bubble > .rendered");
+  const userRow = messageRowForId(owner);
+  if (row && userRow && userRow.parentElement === row.parentElement) userRow.after(row);
+  if (!rendered) return { row: entry.row, rendered: entry.rendered };
+  rendered.classList.add("segmented-stream-rendered");
+  const surface = { row, rendered };
+  entry.supplementReplyRows.set(owner, surface);
+  if (entry.activity) {
+    entry.activity.__executionReplySurfaces ||= new Map([["", entry.rendered], [entry.clientMessageId, entry.rendered]]);
+    entry.activity.__executionReplySurfaces.set(owner, rendered);
+  }
+  return surface;
+}
+
+function bindSegmentReplyOwner(entry, segmentId, owner = "") {
+  if (!segmentId) return;
+  entry.segmentReplyOwners ||= new Map();
+  const previous = entry.segmentReplyOwners.get(segmentId);
+  if (previous !== undefined && previous !== owner) {
+    reportLiveTurnProtocolError(entry, "conflicting_reply_owner", { turnId: entry.turnId, segmentId });
+    return;
+  }
+  entry.segmentReplyOwners.set(segmentId, owner);
+}
+
 function ensureLiveSegmentBlock(entry, segmentId = "") {
   if (!entry?.rendered) return null;
   const key = String(segmentId || "__default").trim() || "__default";
@@ -11789,9 +13263,11 @@ function ensureLiveSegmentBlock(entry, segmentId = "") {
   answer.className = "rendered stream-segment-answer";
   root.append(structured, reasoning, answer);
   entry.rendered.classList.add("segmented-stream-rendered");
-  entry.rendered.appendChild(root);
+  const owner = entry.segmentReplyOwners?.get(key) || "";
+  supplementReplySurface(entry, owner).rendered.appendChild(root);
   const block = {
     key,
+    replyOwner: owner,
     root,
     structured,
     structuredNodes: new Map(),
@@ -11816,14 +13292,15 @@ function orderLiveSegmentBlocks(entry, segmentId = "", sequence = 0) {
     .sort((a, b) => (Number(a.firstSequence || Number.MAX_SAFE_INTEGER) - Number(b.firstSequence || Number.MAX_SAFE_INTEGER))
       || String(a.key).localeCompare(String(b.key)));
   entry.segmentOrder = blocks.map((item) => item.key);
-  blocks.forEach((item) => entry.rendered.appendChild(item.root));
+  blocks.forEach((item) => supplementReplySurface(entry, item.replyOwner).rendered.appendChild(item.root));
 }
 
-function placeLiveActivityBeforeBlock(entry, _block = null) {
+function placeLiveActivityBeforeBlock(entry, block = null) {
   if (!entry?.rendered || !entry.activity?.isConnected) return;
-  const bubble = entry.rendered.parentElement;
+  const surface = supplementReplySurface(entry, String(block?.replyOwner || ""));
+  const anchor = surface.rendered;
+  const bubble = anchor?.parentElement;
   if (!bubble) return;
-  const anchor = entry.rendered;
   if (entry.activity.parentElement === bubble && entry.activity.nextElementSibling === anchor) return;
   bubble.insertBefore(entry.activity, anchor);
 }
@@ -11858,24 +13335,38 @@ function placeLiveStructuredResultPanel(entry, segmentId = "") {
   return ensureLiveStructuredResultPanel(entry, key);
 }
 
+function traceLiveStageDeliveryPaint(entry, node) {
+  const progress = node.__stageDeliveryEvent;
+  if (!progress) return;
+  reportStartupMetric("cross-reply:stage:painted", { sessionId: entry.sessionId, turnId: entry.turnId,
+    eventId: progress.eventId, segmentId: progress.segmentId, contentChars: node.__structuredTargetText.length,
+    displayedChars: node.textContent.length, rowConnected: node.isConnected,
+    status: node.closest("[hidden]") || !node.getClientRects().length ? "offscreen" : "visible" });
+  node.__stageDeliveryEvent = null;
+}
+
 function scheduleLiveStructuredEntryPaint(entry, node) {
   if (!entry || !node || node.__structuredPaintFrame) return;
   const paint = (now) => {
     node.__structuredPaintFrame = null;
     if (!node.isConnected || node.__structuredRecycling) return;
-    const targetChars = Array.from(String(node.__structuredTargetText || ""));
+    const targetChars = node.__structuredTargetChars || Array.from(String(node.__structuredTargetText || ""));
     const visibleLength = Math.max(0, Number(node.__structuredVisibleLength || 0));
     if (visibleLength >= targetChars.length) return;
-    const elapsed = Math.max(0, now - Number(node.__structuredLastPaintAt || now));
+    const elapsed = Math.min(48, Math.max(0, now - Number(node.__structuredLastPaintAt || now)));
     node.__structuredCarry = Number(node.__structuredCarry || 0)
       + elapsed * assistantTypingCharsPerSecond(targetChars.length) / 1000;
     const count = Math.min(targetChars.length - visibleLength, Math.floor(node.__structuredCarry));
     node.__structuredLastPaintAt = now;
     if (count > 0) {
       const nextLength = visibleLength + count;
-      node.textContent = targetChars.slice(0, nextLength).join("");
+      renderStructuredEntryText(node, targetChars.slice(0, nextLength).join(""), { final: nextLength >= targetChars.length });
       node.__structuredVisibleLength = nextLength;
       node.__structuredCarry -= count;
+      if (nextLength >= targetChars.length) {
+        traceLiveStageDeliveryPaint(entry, node);
+        if (entry.finalizing) scheduleLiveChatStreamPaint(entry, true);
+      }
       scheduleLiveStructuredResultScroll(entry, node.parentElement);
       scheduleStreamingScroll();
       if (nextLength >= targetChars.length && node.__structuredRetireWhenPainted) {
@@ -11898,7 +13389,7 @@ function structuredEventDisplayText(progress = {}, text = "", continuation = fal
   return value;
 }
 
-function appendLiveStructuredResult(entry, progress = {}) {
+function appendLiveStructuredResult(entry, progress = {}, options = {}) {
   if (!entry) return null;
   const accepted = progress.__turnEventAccepted === true
     ? progress
@@ -11918,6 +13409,10 @@ function appendLiveStructuredResult(entry, progress = {}) {
   const eventId = String(progress.eventId || "").trim();
   entry.structuredEvents ||= [];
   if (eventId && entry.structuredEvents.some((event) => String(event?.eventId || "") === eventId)) return null;
+  if (isStageResultStructuredEvent(progress)) {
+    reportStartupMetric("cross-reply:stage:received", { sessionId: entry.sessionId, turnId: entry.turnId,
+      eventId, segmentId: progress.segmentId, contentChars: text.length });
+  }
   entry.structuredEvents.push({
     ...progress,
     target: "structured",
@@ -11926,18 +13421,23 @@ function appendLiveStructuredResult(entry, progress = {}) {
   entry.structuredEvents.sort((a, b) => Number(a.turnSequence || a.sequence || 0) - Number(b.turnSequence || b.sequence || 0));
   ensureLiveStreamRow(entry);
   if (isPrimaryExecutionSummaryEvent(progress)) {
+    placeLiveActivityBeforeBlock(entry, { replyOwner: progress.replyToUserMessageId || "" });
     if (entry.activity) entry.activity.hidden = false;
     return null;
   }
   const segmentId = String(progress.segmentId || progress.segment_id || "").trim() || "__default";
+  bindSegmentReplyOwner(entry, segmentId, progress.replyToUserMessageId || "");
+  const block = ensureLiveSegmentBlock(entry, segmentId);
+  placeLiveActivityBeforeBlock(entry, block);
   const sequence = Number(progress.turnSequence || progress.sequence || 0);
   const kind = String(progress.kind || progress.type || "public_progress").trim().toLowerCase();
   const progressType = String(progress.type || progress.displayKind || "").trim().toLowerCase();
   const isDelta = ["reasoning_delta", "reasoning_note", "public_reasoning"].includes(kind);
-  const isThinking = isPublicStructuredThought(progress, kind, progressType);
-  const block = ensureLiveSegmentBlock(entry, segmentId);
+  const isDurable = isDurableStructuredEvent(progress);
+  const isThinking = !isDurable && isPublicStructuredThought(progress, kind, progressType);
   const panel = placeLiveStructuredResultPanel(entry, segmentId);
   if (!block || !panel) return null;
+  if (isDurable) panel.classList.add("persisted-structured-result");
   orderLiveSegmentBlocks(entry, segmentId, sequence);
   const blockIndex = Number(progress.blockIndex || 0) || 0;
   const key = isDelta
@@ -11951,7 +13451,8 @@ function appendLiveStructuredResult(entry, progress = {}) {
     node.dataset.segmentId = segmentId;
     node.dataset.kind = kind;
     node.dataset.sequence = String(sequence);
-    node.dataset.transient = progress.transient === true ? "1" : "0";
+    node.dataset.durable = isDurable ? "1" : "0";
+    node.dataset.transient = !isDurable && progress.transient === true ? "1" : "0";
     node.dataset.afterEventId = String(progress.afterEventId || "");
     node.dataset.evidenceEventIds = JSON.stringify(Array.isArray(progress.evidenceEventIds) ? progress.evidenceEventIds : []);
     node.dataset.evidenceToolCallIds = JSON.stringify(Array.isArray(progress.evidenceToolCallIds) ? progress.evidenceToolCallIds : []);
@@ -11965,26 +13466,33 @@ function appendLiveStructuredResult(entry, progress = {}) {
     entry.structuredNodes.set(key, node);
   }
   if (eventId) node.__structuredEventIds.add(eventId);
+  if (isStageResultStructuredEvent(progress)) node.__stageDeliveryEvent = progress;
   node.classList.toggle("structured-result-entry-thinking", isThinking);
   node.dataset.thinking = isThinking ? "1" : "0";
   node.dataset.lifecycle = "";
   node.__structuredShownAt = Date.now();
   node.__structuredTargetText = `${node.__structuredTargetText || ""}${text}`;
-  if (node.__structuredPaintFrame) cancelAnimationFrame(node.__structuredPaintFrame);
-  node.__structuredPaintFrame = null;
-  node.textContent = node.__structuredTargetText;
-  node.__structuredVisibleLength = Array.from(node.__structuredTargetText).length;
+  node.__structuredTargetChars = Array.from(node.__structuredTargetText);
+  if (options.animate === false) {
+    if (node.__structuredPaintFrame) cancelAnimationFrame(node.__structuredPaintFrame);
+    node.__structuredPaintFrame = null;
+    renderStructuredEntryText(node, node.__structuredTargetText, { final: true });
+    node.__structuredVisibleLength = node.__structuredTargetChars.length;
+    traceLiveStageDeliveryPaint(entry, node);
+  } else {
+    scheduleLiveStructuredEntryPaint(entry, node);
+  }
   [...panel.children]
     .sort((a, b) => Number(a.__structuredTurnSequence || a.dataset.sequence || 0)
       - Number(b.__structuredTurnSequence || b.dataset.sequence || 0))
     .forEach((child) => panel.appendChild(child));
   panel.hidden = false;
-  // Keep one concise, authoritative public-progress summary in the activity
-  // header so the user can see the cross-reply before answer text arrives.
+  // Keep the execution header for transient public progress only. Durable
+  // stage results and cross replies belong to the main structured lane.
   const liveSummary = entry.activity?.querySelector?.(
     ".execution-activity-narrative.streaming-structured-result"
   );
-  if (liveSummary) {
+  if (liveSummary && !isCrossStructuredEvent(progress) && !isStageResultStructuredEvent(progress)) {
     liveSummary.textContent = text;
     liveSummary.hidden = false;
   }
@@ -12009,7 +13517,7 @@ function isPublicStructuredThought(progress = {}, kind = "", progressType = "") 
 }
 
 function removeLiveStructuredNode(entry, node, { respectMinimum = true } = {}) {
-  if (!entry || !node || node.__structuredRecycling) return;
+  if (!entry || !node || node.dataset.durable === "1" || node.__structuredRecycling) return;
   if (respectMinimum
     && Number(node.__structuredVisibleLength || 0) < Array.from(String(node.__structuredTargetText || "")).length) {
     node.__structuredRetireWhenPainted = true;
@@ -12067,7 +13575,7 @@ function scheduleLiveStructuredEntryFade(entry, node) {
 
 function trimLiveStructuredResultWindow(entry) {
   const nodes = [...(entry?.structuredNodes?.values?.() || [])]
-    .filter((node) => node?.isConnected && !node.__structuredRecycling)
+    .filter((node) => node?.isConnected && node.dataset.durable !== "1" && !node.__structuredRecycling)
     .sort((a, b) => Number(a.__structuredTurnSequence || a.dataset.sequence || 0)
       - Number(b.__structuredTurnSequence || b.dataset.sequence || 0));
   const overflow = nodes.length - STRUCTURED_RESULT_VISIBLE_LIMIT;
@@ -12099,15 +13607,18 @@ function scheduleLiveStructuredResultScroll(entry, explicitPanel = null) {
   });
 }
 
-function ensureLiveProcessBlock(entry, explicitSegmentId = "") {
+function ensureLiveProcessBlock(entry, explicitSegmentId = "", replyOwner = "") {
   if (!entry?.rendered) return null;
   let segmentId = String(explicitSegmentId || "").trim().slice(0, 160);
-  if (!segmentId) segmentId = String(entry.pendingReasoningBlockId || "").trim();
+  if (!segmentId && (entry.segmentReplyOwners?.get(entry.pendingReasoningBlockId) || "") === replyOwner) {
+    segmentId = String(entry.pendingReasoningBlockId || "").trim();
+  }
   if (!segmentId) {
     entry.reasoningBlockCounter = Number(entry.reasoningBlockCounter || 0) + 1;
     segmentId = `__process_pending_${entry.reasoningBlockCounter}`;
     entry.pendingReasoningBlockId = segmentId;
   }
+  bindSegmentReplyOwner(entry, segmentId, replyOwner);
   if (!entry.segmentOrder.includes(segmentId)) entry.segmentOrder.push(segmentId);
   return ensureLiveSegmentBlock(entry, segmentId);
 }
@@ -12118,7 +13629,7 @@ function showLiveExecutionPhase(entry, block = null) {
   if (root?.__executionPhaseRetireTimer) clearTimeout(root.__executionPhaseRetireTimer);
   if (root) {
     root.__executionPhaseRetireTimer = null;
-    root.removeAttribute("data-lifecycle");
+    root.dataset.lifecycle = "running";
     root.hidden = false;
   }
   if (entry.row) entry.row.hidden = false;
@@ -12150,6 +13661,7 @@ function adoptPendingReasoningBlock(entry, segmentId = "") {
   const pending = entry.segmentBlocks?.get(pendingId);
   const target = ensureLiveSegmentBlock(entry, targetId);
   entry.pendingReasoningBlockId = "";
+  if (pending?.replyOwner !== target?.replyOwner) return target;
   const pendingIndex = entry.segmentOrder?.indexOf?.(pendingId) ?? -1;
   const targetIndex = entry.segmentOrder?.indexOf?.(targetId) ?? -1;
   if (pendingIndex >= 0) {
@@ -12157,7 +13669,7 @@ function adoptPendingReasoningBlock(entry, segmentId = "") {
     else entry.segmentOrder[pendingIndex] = targetId;
   }
   if (!pending?.root?.isConnected || !target?.root?.isConnected) return target;
-  entry.rendered.insertBefore(target.root, pending.root);
+  pending.root.parentElement.insertBefore(target.root, pending.root);
   while (pending.reasoningTrack?.firstChild) target.reasoningTrack.appendChild(pending.reasoningTrack.firstChild);
   for (const segment of entry.reasoningSegments || []) {
     if (segment?.segmentId === pendingId) segment.segmentId = targetId;
@@ -12243,6 +13755,7 @@ function renderSegmentedLiveAnswer(entry) {
       block.renderedVisibleCount = visibleChars.length;
     }
     if (block) entry.__reportFirstAnswerPaint?.(block.answer);
+    syncExecutionReplyTimeline(entry.activity, entry.rendered);
     return;
   }
   let sourceOffset = 0;
@@ -12268,6 +13781,7 @@ function renderSegmentedLiveAnswer(entry) {
     if (block) entry.__reportFirstAnswerPaint?.(block.answer);
     sourceOffset += targetChars.length;
   }
+  syncExecutionReplyTimeline(entry.activity, entry.rendered);
 }
 
 function revealLiveChatStreamText(entry) {
@@ -12322,7 +13836,7 @@ function revealLiveChatStreamText(entry) {
 
   const activeSegmentId = String(entry.activeSegmentId || "").trim();
   const segmentEnd = activeSegmentId ? entry.segmentEndLengths?.get(activeSegmentId) : null;
-  const revealLimit = Number.isFinite(Number(segmentEnd))
+  const revealLimit = !entry.backendCompleted && segmentEnd != null && Number.isFinite(Number(segmentEnd))
     ? Math.min(entry.targetChars.length, Number(segmentEnd))
     : entry.targetChars.length;
   entry.revealLimit = revealLimit;
@@ -12594,57 +14108,77 @@ function finishLiveExecutionSurface(entry) {
 
 function collapseCompletedExecutionActivity(root, elapsedMs = 0, details = []) {
   if (!root) return null;
-  if (root.__executionPhaseRetireTimer) clearTimeout(root.__executionPhaseRetireTimer);
-  root.__executionPhaseRetireTimer = null;
-  stopExecutionActivityFlow(root);
-  const history = uniqueExecutionActivityEntries([...(root.__executionStageDetails || []), ...details]);
-  const durationLabel = formatTaskDuration(elapsedMs);
-  root.className = "streaming-activity execution-activity-completed";
-  root.dataset.lifecycle = "completed";
-  root.dataset.activityExpanded = "0";
-  root.dataset.activityFollowLatest = "1";
-  root.setAttribute("role", "status");
-  root.setAttribute("aria-label", `执行过程，共 ${history.length} 条，总用时 ${durationLabel}`);
-  root.removeAttribute("aria-hidden");
-  root.style.height = "";
-  root.style.minHeight = "";
-  root.style.marginBottom = "";
-  root.style.overflow = "";
-  const completedTemplate = document.createElement("template");
-  completedTemplate.innerHTML = `
-      <div class="execution-activity-head execution-completion-head">
-        ${executionActivityToggleHtml(history.length, false, { alwaysVisible: true })}
-        <span class="execution-activity-title"></span>
-        <span class="streaming-elapsed">${escapeHtml(durationLabel)}</span>
-      </div>
-      <div class="execution-activity-shell">
-      <div class="execution-process-region">
-        <div class="execution-process-head">
-          <span class="execution-process-label">执行过程</span>
+  mutatePreservingMessageViewport(() => {
+    const completing = root.dataset.lifecycle !== "completed";
+    if (root.__executionPhaseRetireTimer) clearTimeout(root.__executionPhaseRetireTimer);
+    root.__executionPhaseRetireTimer = null;
+    stopExecutionActivityFlow(root);
+    const history = uniqueExecutionActivityEntries([...(root.__executionStageDetails || []), ...details]);
+    const durationLabel = formatTaskDuration(elapsedMs);
+    root.className = "streaming-activity execution-activity-completed";
+    root.dataset.lifecycle = "completed";
+    if (completing) {
+      root.dataset.activityExpanded = "0";
+      root.dataset.activityFollowLatest = "1";
+    }
+    root.setAttribute("role", "status");
+    root.setAttribute("aria-label", `执行过程，共 ${history.length} 条，总用时 ${durationLabel}`);
+    root.removeAttribute("aria-hidden");
+    root.style.height = "";
+    root.style.minHeight = "";
+    root.style.marginBottom = "";
+    root.style.overflow = "";
+    const completedTemplate = document.createElement("template");
+    completedTemplate.innerHTML = `
+        <div class="execution-activity-head execution-completion-head">
+          ${executionActivityToggleHtml(history.length, false, { alwaysVisible: true })}
+          <span class="execution-activity-title"></span>
+          <span class="streaming-elapsed">${escapeHtml(durationLabel)}</span>
         </div>
-        <div class="execution-stage-summary" aria-live="polite" hidden></div>
-        <div class="execution-completed-narrative" hidden></div>
-        <div class="execution-activity-details"><span class="execution-activity-flow"></span></div>
+        <div class="execution-activity-shell">
+        <div class="execution-process-region">
+          <div class="execution-process-head">
+            <span class="execution-process-label">执行过程</span>
+          </div>
+          <div class="execution-stage-summary" aria-live="polite" hidden></div>
+          <div class="execution-completed-narrative" hidden></div>
+          <div class="execution-activity-details"><span class="execution-activity-flow"></span></div>
+        </div>
       </div>
-    </div>
-  `;
-  const currentHead = root.querySelector(":scope > .execution-activity-head");
-  if (currentHead && root.querySelector(".execution-stage-summary")) {
-    currentHead.replaceWith(completedTemplate.content.firstElementChild);
-  } else {
-    root.replaceChildren(...completedTemplate.content.children);
-  }
-  root.querySelectorAll(".execution-phase-group").forEach((phase) => { phase.dataset.expanded = "0"; });
-  const { viewport, rendered } = executionActivityNodes(root);
-  const visible = executionActivityRenderedDetails(root, history);
-  replaceExecutionActivityLines(rendered, visible, { detailCount: history.length });
-  paintExecutionStageView(root, history);
-  root.__executionActivityDetails = history;
-  root.__executionActivityRenderedDetails = visible;
-  paintCompletedExecutionNarrative(root, history);
-  if (viewport) viewport.hidden = visible.length === 0;
-  bindExecutionActivityToggle(root);
-  updateExecutionActivityToggle(root, history.length);
+    `;
+    const currentHead = root.querySelector(":scope > .execution-activity-head");
+    if (currentHead) {
+      currentHead.classList.add("execution-completion-head");
+      currentHead.querySelector(".execution-activity-inline-theater")?.remove();
+      let title = currentHead.querySelector(".execution-activity-title");
+      const elapsed = currentHead.querySelector(".streaming-elapsed");
+      if (!title) {
+        title = document.createElement("span");
+        title.className = "execution-activity-title";
+        currentHead.insertBefore(title, elapsed);
+      }
+      if (elapsed && elapsed.textContent !== durationLabel) elapsed.textContent = durationLabel;
+    } else {
+      root.prepend(completedTemplate.content.firstElementChild);
+    }
+    if (!root.querySelector(".execution-stage-summary")) {
+      const shell = root.querySelector(":scope > .execution-activity-shell");
+      if (shell) shell.appendChild(completedTemplate.content.querySelector(".execution-process-region"));
+      else root.appendChild(completedTemplate.content.querySelector(".execution-activity-shell"));
+    }
+    if (completing) root.querySelectorAll(".execution-phase-group").forEach((phase) => { phase.dataset.expanded = "0"; });
+    const { viewport, rendered } = executionActivityNodes(root);
+    const visible = executionActivityRenderedDetails(root, history);
+    replaceExecutionActivityLines(rendered, visible, { detailCount: history.length });
+    paintExecutionStageView(root, history);
+    root.__executionActivityDetails = history;
+    root.__executionActivityRenderedDetails = visible;
+    paintCompletedExecutionNarrative(root, history);
+    if (viewport) viewport.hidden = visible.length === 0;
+    bindExecutionActivityToggle(root);
+    updateExecutionActivityToggle(root, history.length);
+    globalThis.BaiqiuTokenUsage?.paint(root, root.__tokenUsage, false);
+  });
   return root;
 }
 
@@ -12687,6 +14221,11 @@ function updateLiveStreamElapsed(entry) {
     entry.row?.querySelector?.(".streaming-elapsed")
   ].filter(Boolean);
   labels.forEach((node) => { node.textContent = elapsed; });
+  for (const root of [entry.activity, entry.row, entry.thinkingRow].filter(Boolean)) {
+    globalThis.BaiqiuTokenUsage?.paint(root, entry.tokenUsage, !entry.backendCompleted);
+    paintExecutionReceivedBytes(root, entry.receivedBytes);
+    updateExecutionOperationClocks(root, clockNow);
+  }
   const thoughtElapsed = formatLiveElapsed(Number(entry.executionStartedAt) > 0
     ? Math.max(0, clockNow - entry.executionStartedAt)
     : 0);
@@ -12759,8 +14298,17 @@ function markLiveStreamTransportActivity(entry, frame) {
   if (!entry || entry.timedOut || entry.backendCompleted || entry.terminalType
     || entry.finalized || entry.finalizing
     || !["response_data", "model_data", "tool_event"].includes(frame.kind)) return;
+  if (Number.isSafeInteger(frame.bytesReceived) && frame.bytesReceived >= 0
+    && ["response_data", "model_data"].includes(frame.kind)) {
+    entry.receivedBytes = Math.max(entry.receivedBytes || 0, frame.bytesReceived);
+    paintExecutionReceivedBytes(entry.activity || entry.thinkingRow, entry.receivedBytes);
+  }
   entry.firstTransportAt ||= Date.now();
   entry.lastTransportAt = Date.now();
+  if (entry.activity && ["response_data", "model_data"].includes(frame.kind)) {
+    entry.activity.__transportActivityAt = entry.lastTransportAt;
+    updateExecutionOperationClocks(entry.activity);
+  }
   if (entry.firstEventTimer) clearTimeout(entry.firstEventTimer);
   entry.firstEventTimer = null;
 }
@@ -12771,7 +14319,15 @@ function armLiveStreamFirstEventTimeout(entry, dispatchedAt = Date.now()) {
   entry.modelRequestDispatchedAt = Number(dispatchedAt || 0) > 0 ? Number(dispatchedAt) : Date.now();
   entry.lastMeaningfulEventAt = Date.now();
   entry.firstEventTimer = setTimeout(() => {
-    if (!entry.firstTransportAt && !entry.firstEventReceived) handleLiveStreamTimeout(entry, "请求发出后 30 秒内未收到模型响应数据。", "connection");
+    entry.firstEventTimer = null;
+    if (entry.finalized || entry.finalizing || entry.backendCompleted || entry.timedOut) return;
+    if (!entry.firstTransportAt && !entry.firstEventReceived) {
+      appendLiveStreamNotice(entry, "模型请求已发出，已等待 30 秒，尚未收到响应数据；继续等待，可手动停止。");
+      reportStartupMetric("cross-reply:renderer:response-wait", {
+        sessionId: entry.sessionId, turnId: entry.turnId, streamId: entry.streamId,
+        waitedMs: Date.now() - entry.modelRequestDispatchedAt
+      });
+    }
   }, LIVE_STREAM_FIRST_EVENT_TIMEOUT_MS);
   entry.firstEventTimer?.unref?.();
 }
@@ -12792,12 +14348,12 @@ function appendLiveStreamNotice(entry, message = "") {
 
 function checkLiveStreamProgress(entry) {
   if (!entry || entry.finalized || entry.finalizing || entry.backendCompleted || entry.timedOut) return;
-  if (!Number(entry.modelRequestDispatchedAt) && !entry.firstEventReceived) return;
   const now = Date.now();
   if (now - Number(entry.startedAt || now) >= LIVE_STREAM_TOTAL_TIMEOUT_MS) {
     handleLiveStreamTimeout(entry, "本次任务已达到 30 分钟执行时限。", "total");
     return;
   }
+  if (!Number(entry.modelRequestDispatchedAt) && !entry.firstEventReceived) return;
   if (!entry.firstEventReceived && entry.firstTransportAt
     && now - entry.modelRequestDispatchedAt >= LIVE_STREAM_FIRST_PUBLIC_TIMEOUT_MS) {
     handleLiveStreamTimeout(entry, "模型已响应，但 2 分钟内仍未产生正文或公开执行事件。", "first_public");
@@ -12807,17 +14363,31 @@ function checkLiveStreamProgress(entry) {
   handleLiveStreamTimeout(entry, "连续 2 分钟没有收到模型、工具或正文事件。");
 }
 
-function handleLiveStreamTimeout(entry, message = "", timeoutKind = "") {
+async function handleLiveStreamTimeout(entry, message = "", timeoutKind = "") {
   if (!entry || entry.finalized || entry.finalizing || entry.backendCompleted || entry.timedOut) return;
-  entry.timedOut = true;
-  entry.timeoutMessage = String(message || "模型响应超时。").trim();
-  appendLiveStreamNotice(entry, entry.timeoutMessage);
-  api.signalAbortChat?.({
-    sessionId: entry.sessionId,
-    runId: entry.streamId,
-    reason: "timeout",
-    timeoutKind: timeoutKind || (entry.firstEventReceived || entry.firstTransportAt ? "no_progress" : "connection")
-  });
+  if (entry.statusQueryPending || Date.now() - Number(entry.lastStatusQueryAt || 0) < 15000) return;
+  entry.statusQueryPending = true;
+  entry.lastStatusQueryAt = Date.now();
+  try {
+    const status = await api.queryRunStatus?.({ sessionId: entry.sessionId, runId: entry.streamId });
+    if (entry.finalized || entry.finalizing || entry.backendCompleted) return;
+    const notice = status?.status === "running"
+      ? "黑球确认本轮仍在执行，已保留当前结果；可手动停止。"
+      : ["completed", "failed", "cancelled", "incomplete"].includes(status?.status)
+        ? "黑球已结束本轮，正在同步结果。"
+        : "暂时无法确认黑球执行状态，正在重新核对；已保留当前结果。";
+    if (entry.lastStatusNotice !== notice) {
+      entry.lastStatusNotice = notice;
+      appendLiveStreamNotice(entry, notice);
+    }
+  } catch {
+    if (!entry.finalized && !entry.finalizing && !entry.backendCompleted && entry.lastStatusNotice !== "unknown") {
+      entry.lastStatusNotice = "unknown";
+      appendLiveStreamNotice(entry, "暂时无法确认黑球执行状态，正在重新核对；已保留当前结果。");
+    }
+  } finally {
+    entry.statusQueryPending = false;
+  }
 }
 
 function reasoningSegmentKey(progress = {}) {
@@ -12853,7 +14423,7 @@ function appendLiveReasoningDelta(entry, progress = {}) {
   const explicitSegmentId = String(progress.segmentId || progress.segment_id || "").trim().slice(0, 160);
   if (queueReasoningUntilAnswerVisible(entry, progress, explicitSegmentId)) return null;
   if (explicitSegmentId && entry.answerStartedSegments?.has(explicitSegmentId)) return null;
-  const block = ensureLiveProcessBlock(entry, explicitSegmentId);
+  const block = ensureLiveProcessBlock(entry, explicitSegmentId, progress.replyToUserMessageId || "");
   if (!block) return null;
   const segmentId = block.key;
   const key = reasoningSegmentKey({ ...progress, segmentId });
@@ -13043,8 +14613,8 @@ function setLiveStreamActivity(entry, activity = "正在生成回复") {
     // not allocate an empty process block for it; the first public thought or
     // answer segment owns the first block.
     const block = kind === "lifecycle"
-      ? null
-      : ensureLiveProcessBlock(entry, progress.segmentId || progress.segment_id || "");
+      ? { replyOwner: String(progress.replyToUserMessageId || "") }
+      : ensureLiveProcessBlock(entry, progress.segmentId || progress.segment_id || "", progress.replyToUserMessageId || "");
     showLiveExecutionPhase(entry, block);
     // Lifecycle, plan, and tool events belong to the factual execution line.
     // They must never be copied into the transient thought line, otherwise a
@@ -13107,6 +14677,8 @@ function ensureLiveStreamRow(entry) {
   mutatePreservingMessageViewport(() => {
     row.className = "message assistant streaming-response";
     row.dataset.streamId = entry.streamId;
+    row.dataset.codeSessionId = String(entry.sessionId || "");
+    row.dataset.codeTurnId = String(entry.turnId || entry.streamId || "");
     row.dataset.contentReady = "0";
     const bubble = thinkingRow?.querySelector(":scope > .bubble") || document.createElement("div");
     bubble.className = "bubble";
@@ -13138,6 +14710,7 @@ function ensureLiveStreamRow(entry) {
   entry.thinkingRow = null;
   entry.rendered = rendered;
   entry.activity = activityRoot;
+  entry.activity.__executionTimelineRendered = rendered;
   entry.structuredPanel = null;
   entry.structuredNodes ||= new Map();
   entry.activity.dataset.activityExpanded = "0";
@@ -13200,6 +14773,13 @@ function handleChatStreamFrame(frame = {}) {
   // Once a terminal event has been latched, late transport frames cannot
   // mutate the turn ledger, sequence cursor, or visible answer.
   if (entry.terminalType) return;
+  if (frame.type === "usage") {
+    if (frame.tokenUsage?.source === "provider") {
+      entry.tokenUsage = frame.tokenUsage;
+      updateLiveStreamElapsed(entry);
+    }
+    return;
+  }
   if (frame.type === "transport_activity") {
     markLiveStreamTransportActivity(entry, frame);
     return;
@@ -13218,6 +14798,17 @@ function handleChatStreamFrame(frame = {}) {
     segmentId: frameProgress?.segmentId || frame.segmentId
   });
   if (!acceptedEvent) return;
+  bindSegmentReplyOwner(entry, frameProgress?.segmentId || frame.segmentId,
+    frame.replyToUserMessageId || frameProgress?.replyToUserMessageId || "");
+  if (frame.type === "supplement_boundary") {
+    const message = frame.userMessage;
+    if (message?.role === "user" && message.id === frame.supplementId
+      && message.raw?.supplement?.turnId === entry.turnId) {
+      rememberPendingUserMessage(entry.sessionId, message);
+      if (entry.sessionId === state.selectedSessionId && !messageRowForId(message.id)) addMessage(message);
+    }
+    return;
+  }
   const frameSequence = Number(frame.turnSequence || frame.seq || 0);
   const turnCompleted = acceptedEvent.type === "turn_complete";
   const terminalFrame = turnCompleted || ["done", "error", "cancelled"].includes(frame.type);
@@ -13231,11 +14822,6 @@ function handleChatStreamFrame(frame = {}) {
   if (!["error", "cancelled"].includes(frame.type)
     && (acceptedEvent.semanticType === "final" || acceptedEvent.type === "final" || turnCompleted || frame.type === "done")) {
     freezeLiveStreamElapsed(entry);
-    if (entry.activity) {
-      collapseCompletedExecutionActivity(entry.activity, entry.completedDurationMs, [
-        ...(entry.activityDetails || []), ...(entry.structuredEvents || [])
-      ]);
-    }
   }
   if (frame.type === "start") {
     if (!Number(entry.executionStartedAt) && Number(frame.startedAt) > 0) {
@@ -13313,6 +14899,10 @@ function handleChatStreamFrame(frame = {}) {
       : "turn_complete";
     entry.backendCompleted = true;
     freezeLiveStreamElapsed(entry);
+    if (entry.terminalType === "cancelled") {
+      preserveCancelledLiveChatStream(entry);
+      return;
+    }
     recycleLiveStructuredProcess(entry, "", { transientOnly: true, respectMinimum: false });
     transitionLiveTurn(entry, LIVE_TURN_STATES.TERMINAL_RECEIVED);
     syncSessionRuntimeControls(entry.sessionId);
@@ -13348,6 +14938,16 @@ function handleChatStreamFrame(frame = {}) {
   const firstAnswerDelta = !entry.answerStartedSegments.has(segmentId);
   entry.answerStartedSegments.add(segmentId);
   const block = adoptPendingReasoningBlock(entry, segmentId);
+  if (firstAnswerDelta && block) {
+    block.answer.dataset.sequence = String(acceptedEvent.turnSequence || frame.turnSequence || frame.seq || 0);
+    entry.activity.__executionAnswerBoundaries ||= [];
+    entry.activity.__executionAnswerBoundaries.push({
+      ...acceptedEvent,
+      target: "answer",
+      type: "answer_segment"
+    });
+    paintExecutionStageView(entry.activity, [...entry.activityDetails, ...entry.structuredEvents], entry.turnId);
+  }
   if (String(entry.pendingReasoningBlockId || "") === segmentId) entry.pendingReasoningBlockId = "";
   placeLiveActivityBeforeBlock(entry, block);
   placeLiveStructuredResultPanel(entry, segmentId);
@@ -13433,9 +15033,13 @@ function restoreLiveChatStream(entry) {
 
 function restoreLiveStreamSegments(entry) {
   if (!entry?.rendered) return;
-  const visibleStructuredEvents = (Array.isArray(entry.structuredEvents) ? entry.structuredEvents : [])
-    .filter((event) => event?.__retired !== true)
-    .slice(-STRUCTURED_RESULT_VISIBLE_LIMIT);
+  const structuredEvents = (Array.isArray(entry.structuredEvents) ? entry.structuredEvents : [])
+    .map((event) => isDurableStructuredEvent(event) ? { ...event, __retired: false } : event);
+  const recentProcessEvents = new Set(structuredEvents
+    .filter((event) => event?.__retired !== true && !isDurableStructuredEvent(event))
+    .slice(-STRUCTURED_RESULT_VISIBLE_LIMIT));
+  const visibleStructuredEvents = structuredEvents
+    .filter((event) => isDurableStructuredEvent(event) || recentProcessEvents.has(event));
   placeLiveActivityBeforeBlock(entry);
   entry.segmentBlocks?.clear?.();
   entry.structuredNodes?.clear?.();
@@ -13454,7 +15058,16 @@ function restoreLiveStreamSegments(entry) {
   visibleStructuredEvents.forEach((event) => appendLiveStructuredResult(entry, {
     ...event,
     __turnEventAccepted: true
-  }));
+  }, { animate: false }));
+  entry.structuredEvents = structuredEvents;
+  if (entry.activity) {
+    entry.activity.__executionTimelineRendered = entry.rendered;
+    for (const event of entry.activity.__executionAnswerBoundaries || []) {
+      const block = entry.segmentBlocks?.get(event.segmentId);
+      if (block) block.answer.dataset.sequence = String(event.turnSequence || event.sequence || 0);
+    }
+    paintExecutionStageView(entry.activity, [...(entry.activityDetails || []), ...structuredEvents], entry.turnId);
+  }
   renderSegmentedLiveAnswer(entry);
   for (const segment of Array.isArray(entry.reasoningSegments) ? entry.reasoningSegments : []) {
     if (!segment?.text) continue;
@@ -13617,6 +15230,7 @@ function bindFinalOnlyLiveAnswer(entry, message, finalText = "") {
   let cumulativeLength = 0;
   for (const segment of segments) {
     const segmentId = String(segment.segmentId || `${entry.turnId}:answer:final`).trim();
+    bindSegmentReplyOwner(entry, segmentId, segment.replyToUserMessageId || "");
     const chars = Array.from(rawBlackBallAnswerText(segment.text));
     cumulativeLength += chars.length;
     entry.segmentCharsById.set(segmentId, chars);
@@ -13631,6 +15245,27 @@ function bindFinalOnlyLiveAnswer(entry, message, finalText = "") {
   placeLiveStructuredResultPanel(entry, entry.activeSegmentId);
 }
 
+function drainLiveStructuredResults(entry, force = false) {
+  let drained = true;
+  for (const node of entry.structuredNodes?.values?.() || []) {
+    if (node.dataset.durable !== "1" || !node.isConnected) continue;
+    const text = String(node.__structuredTargetText || "");
+    const length = Array.from(text).length;
+    if (Number(node.__structuredVisibleLength || 0) >= length) continue;
+    if (!force) {
+      drained = false;
+      scheduleLiveStructuredEntryPaint(entry, node);
+      continue;
+    }
+    if (node.__structuredPaintFrame) cancelAnimationFrame(node.__structuredPaintFrame);
+    node.__structuredPaintFrame = null;
+    renderStructuredEntryText(node, text, { final: true });
+    node.__structuredVisibleLength = length;
+    traceLiveStageDeliveryPaint(entry, node);
+  }
+  return drained;
+}
+
 function finalizeLiveChatStream(streamId, message, options = {}) {
   const entry = liveChatStreams.get(streamId);
   if (!entry) return null;
@@ -13638,6 +15273,11 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
   const responseMessageId = String(message?.id || message?.raw?.productResult?.responseMessageId || entry.responseMessageId || "");
   if (responseMessageId && !message?.id) message = { ...message, id: responseMessageId };
   entry.responseMessageId = responseMessageId;
+  entry.tokenUsage = globalThis.BaiqiuTokenUsage?.fromMessage(message) || entry.tokenUsage;
+  if (messageExecutionStatusValues(message).some(status => ["cancelled", "aborted", "interrupted"].includes(status))) {
+    preserveCancelledLiveChatStream(entry);
+    return entry.row || null;
+  }
   reportStartupMetric("cross-reply:renderer:finalize-received", {
     sessionId: entry.sessionId,
     turnId: entry.turnId,
@@ -13662,7 +15302,7 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
   let finalText = filterAssistantExecutionOutput(
     blackBallBrandText(message?.text || authoredAnswerText || entry.text || "")
   );
-  if (!finalText) {
+  if (!finalText && !structuredEventsFromMessage(message).length) {
     discardLiveChatStream(streamId, { reason: "empty_durable_answer" });
     return null;
   }
@@ -13696,7 +15336,10 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
   // and keep the live process rail until those visible characters are drained.
   // The durable payload may contain structured events that arrived after the
   // last live frame. Render only those real events before committing the answer.
-  const durableStructuredEvents = structuredEventsFromMessage(message);
+  const durableStructuredEvents = persistedReplay.mergeStructuredEventLists(
+    entry.structuredEvents, structuredEventsFromMessage(message)
+  );
+  message = { ...message, structuredEvents: durableStructuredEvents };
   durableStructuredEvents.forEach((event) => appendLiveStructuredResult(entry, event));
   answerSegmentsFromMessage(message).forEach((event) => acceptLiveTurnEvent(entry, event, {
     target: "answer",
@@ -13706,6 +15349,7 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
   if (!hasStreamedAnswer) bindFinalOnlyLiveAnswer(entry, message, finalDisplayText);
   const applyCompletedRow = () => {
     if (!liveChatStreams.has(streamId) || entry.finalized) return;
+    if (!drainLiveStructuredResults(entry, Date.now() >= entry.finalPaintDeadline)) return;
     // Latch the commit before touching the DOM. Refreshes can synchronously
     // invoke the same callback; a stream must have exactly one visual owner.
     entry.finalized = true;
@@ -13716,7 +15360,6 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
     if (entry.completionTimer) clearTimeout(entry.completionTimer);
     entry.elapsedTimer = null;
     entry.completionTimer = null;
-    hideLiveThinkingLayer(entry, { allStructured: true, respectMinimum: false });
     const currentRow = entry.row?.isConnected ? entry.row : ensureLiveStreamRow(entry);
     if (!currentRow) {
       reportStartupMetric("cross-reply:renderer:finalize-no-row", {
@@ -13743,6 +15386,7 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
       );
     entry.completedDurationMs = completedDurationMs;
     mutatePreservingMessageViewport(() => {
+      hideLiveThinkingLayer(entry, { allStructured: true, respectMinimum: false });
       flushLiveActivityPaint(entry);
       const answerPaintIncomplete = Number(entry.revealedLength || 0) < Number(entry.targetChars?.length || 0)
         || (Boolean(finalDisplayText.trim()) && ![...rendered?.querySelectorAll?.(".stream-segment-answer") || []]
@@ -13760,6 +15404,11 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
         entry.segmentBlocks?.forEach?.((block) => { block.renderedVisibleCount = -1; });
         renderSegmentedLiveAnswer(entry);
       } else if (rendered && (finalExtendsStream || answerPaintIncomplete)) {
+        entry.targetText = String(entry.text || "");
+        entry.targetChars = Array.from(entry.targetText);
+        entry.visibleChars = entry.targetChars.slice();
+        entry.visibleText = entry.targetText;
+        entry.revealedLength = entry.targetChars.length;
         renderSegmentedLiveAnswer(entry);
         bindRenderedLinks(rendered);
         classifyRenderedDataLayout(rendered, { preserveWide: true, source: finalDisplayText });
@@ -13767,9 +15416,6 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
         // Matching streamed and durable content can keep the existing nodes.
         bindRenderedLinks(rendered);
         classifyRenderedDataLayout(rendered, { preserveWide: true, source: entry.visibleText || entry.text });
-      }
-      if (rendered && durableStructuredEvents.length) {
-        renderPersistedSegmentPairs(message, rendered);
       }
       currentRow.classList.remove("streaming-response");
       currentRow.dataset.contentReady = "1";
@@ -13783,6 +15429,7 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
         ...entry.activityDetails,
         ...entry.structuredEvents
       ]);
+      syncExecutionReplyTimeline(entry.activity, rendered);
       const knowledgeReferences = bubble?.querySelector?.(":scope > .message-knowledge-references")
         || createMessageKnowledgeReferences(message);
       if (knowledgeReferences && !placeKnowledgeReferencesInExecutionHeader(entry.activity, knowledgeReferences)) {
@@ -13794,8 +15441,9 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
         ).forEach((detail) => { detail.hidden = true; });
         // Keep the elapsed-time anchor and its expandable history before the
         // committed answer, so the result remains the terminal visual block.
-        if (bubble && rendered) bubble.insertBefore(entry.activity, rendered);
-        else bubble?.appendChild(entry.activity);
+        const activeBlock = entry.segmentBlocks?.get(entry.activeSegmentId)
+          || entry.segmentBlocks?.get(entry.segmentOrder?.at?.(-1));
+        placeLiveActivityBeforeBlock(entry, activeBlock);
       }
       const committedText = hasStreamedAnswer && !finalExtendsStream
         ? streamedDisplayText
@@ -13803,12 +15451,29 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
       setAnswerResultDocument(rendered, committedText, message);
       entry.segmentBlocks?.forEach?.((block) => {
         if (!block?.answer?.isConnected) return;
-        const source = String(block.answer._resultAst?.source || "");
+        const chars = entry.segmentCharsById?.get(block.key);
+        const source = chars ? chars.join("") : String(block.answer._resultAst?.source || "");
+        const painted = block.answer._progressiveMarkdownSource ?? block.answer._resultAst?.source ?? "";
+        if (chars && painted !== source) {
+          renderProgressiveMarkdown(block.answer, source);
+          block.renderedVisibleCount = chars.length;
+        }
         if (source) decorateAnswerResult(block.answer, source, message);
       });
       ensureAssistantCopyAction(bubble, () => answerResultCopyText(rendered, committedText || rendered?.textContent || ""));
+      ensureProtocolContinueAction(bubble, message, entry.sessionId);
       evaluateLongReply(currentRow, rendered, committedText, { keepExpanded: true });
     });
+    const replyParts = persistedReplay.supplementReplyMessages(message);
+    for (const part of replyParts.length > 1 ? replyParts : []) {
+      const owner = part.raw?.replyToUserMessageId || "";
+      const surface = supplementReplySurface(entry, owner);
+      if (!surface?.row || !surface.rendered) continue;
+      surface.row.dataset.messageId = part.id || responseMessageId;
+      surface.row.dataset.contentReady = "1";
+      setAnswerResultDocument(surface.rendered, part.text || "", part);
+      ensureAssistantCopyAction(surface.row.querySelector(":scope > .bubble"), () => answerResultCopyText(surface.rendered, part.text || ""));
+    }
     reportStartupMetric("cross-reply:renderer:finalize-dom", {
       sessionId: entry.sessionId,
       turnId: entry.turnId,
@@ -13817,6 +15482,10 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
       rowConnected: Boolean(currentRow.isConnected),
       renderedConnected: Boolean(rendered?.isConnected),
       hasAnswerText: Boolean(String(rendered?.textContent || "").trim()),
+      receivedAnswerChars: Array.from(entry.text || "").length,
+      revealedAnswerChars: Number(entry.revealedLength || 0),
+      paintedAnswerChars: Array.from([...entry.segmentBlocks?.values?.() || []]
+        .map((block) => block.answer?._progressiveMarkdownSource || block.answer?._resultAst?.source || "").join("")).length,
       persistedRowAdopted: entry.persistedRowAdopted
     });
     showFreshComposerSuggestions(message, { sessionId: entry.sessionId });
@@ -13847,10 +15516,15 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
   entry.finalizeWhenDrained = applyCompletedRow;
   const drainCharacters = Math.max(
     Number(entry.targetChars?.length || 0),
-    Array.from(finalDisplayText || "").length
+    Array.from(finalDisplayText || "").length,
+    ...[...entry.structuredNodes?.values?.() || []]
+      .filter(node => node.dataset.durable === "1")
+      .map(node => Array.from(String(node.__structuredTargetText || "")).length
+        - Number(node.__structuredVisibleLength || 0))
   );
   const drainSeconds = drainCharacters / Math.max(1, ASSISTANT_TYPING_MIN_CHARS_PER_SECOND);
   const drainDeadline = Date.now() + Math.max(5000, Math.ceil((drainSeconds + 2) * 1000));
+  entry.finalPaintDeadline = drainDeadline;
   const watchVisibleDrain = () => {
     if (!liveChatStreams.has(streamId) || entry.finalized) return;
     if (entry.completionTimer) clearTimeout(entry.completionTimer);
@@ -13858,7 +15532,8 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
       if (!liveChatStreams.has(streamId) || entry.finalized) return;
       const revealedLength = Number(entry.revealedLength || 0);
       const targetLength = Number(entry.targetChars?.length || 0);
-      if (targetLength > revealedLength && entry.row?.isConnected && Date.now() < drainDeadline) {
+      if ((targetLength > revealedLength || !drainLiveStructuredResults(entry))
+        && entry.row?.isConnected && Date.now() < drainDeadline) {
         scheduleLiveChatStreamPaint(entry, true);
         watchVisibleDrain();
         return;
@@ -13869,7 +15544,10 @@ function finalizeLiveChatStream(streamId, message, options = {}) {
   if (row?.isConnected) {
     updateLiveStreamElapsed(entry);
   }
-  if (entry.persistedRowAdopted) applyCompletedRow();
+  if (entry.persistedRowAdopted) {
+    applyCompletedRow();
+    if (!entry.finalized) watchVisibleDrain();
+  }
   else {
     flushLiveChatStream(entry);
     watchVisibleDrain();
@@ -13894,7 +15572,8 @@ function discardLiveChatStreamsForSession(sessionId, options = {}) {
 function releaseLiveChatStreamRow(entry) {
   if (!entry) return;
   const answerText = filterAssistantExecutionOutput(entry.streamedAnswerText || entry.text || "").trim();
-  if (!entry.persistedRowAdopted && !answerText) {
+  const hasStructuredOutput = (entry.structuredEvents || []).some(event => String(event.message || "").trim());
+  if (!entry.preserveInterruptedOutput && !entry.persistedRowAdopted && !answerText && !hasStructuredOutput) {
     entry.row?.remove();
     return;
   }
@@ -13903,7 +15582,7 @@ function releaseLiveChatStreamRow(entry) {
     : null;
   if (completedActivity) {
     completedActivity.hidden = false;
-  } else {
+  } else if (!entry.preserveInterruptedOutput) {
     entry.activity?.remove?.();
     entry.activity = null;
   }
@@ -13914,7 +15593,31 @@ function releaseLiveChatStreamRow(entry) {
   delete entry.row.dataset.streamId;
   if (entry.responseMessageId) entry.row.dataset.messageId = entry.responseMessageId;
   const bubble = entry.row.querySelector?.(":scope > .bubble");
-  if (answerText) ensureAssistantCopyAction(bubble, () => answerText);
+  if (answerText && !entry.finalized) ensureAssistantCopyAction(bubble, () => answerText);
+}
+
+function preserveCancelledLiveChatStream(entry) {
+  if (!entry || entry.preserveInterruptedOutput) return;
+  entry.preserveInterruptedOutput = true;
+  entry.terminalType = "cancelled";
+  entry.backendCompleted = true;
+  freezeLiveStreamElapsed(entry);
+  const row = ensureLiveStreamRow(entry);
+  if (row) {
+    row.dataset.preserveInterrupted = "1";
+    row.dataset.interruptedSessionId = entry.sessionId;
+    row.dataset.messageStatus = "cancelled";
+  }
+  if (entry.activity) {
+    entry.activity.dataset.lifecycle = "interrupted";
+    if (entry.activity.__executionPhaseRetireTimer) clearTimeout(entry.activity.__executionPhaseRetireTimer);
+  }
+  for (const node of row?.querySelectorAll("*") || []) {
+    if (node.__structuredFadeTimer) clearTimeout(node.__structuredFadeTimer);
+    if (node.__structuredPaintFrame) cancelAnimationFrame(node.__structuredPaintFrame);
+    if (node.__executionResultFrame) cancelAnimationFrame(node.__executionResultFrame);
+  }
+  closeLiveChatStream(entry.streamId, { force: true, reason: "user_cancelled" });
 }
 
 function closeLiveChatStream(streamId, options = {}) {
@@ -13938,11 +15641,11 @@ function closeLiveChatStream(streamId, options = {}) {
     for (const node of entry.structuredNodes?.values?.() || []) {
       if (node.__structuredFadeTimer) clearTimeout(node.__structuredFadeTimer);
       if (node.__structuredPaintFrame) cancelAnimationFrame(node.__structuredPaintFrame);
-      node.remove?.();
+      if (!entry.preserveInterruptedOutput) node.remove?.();
     }
   }
   stopExecutionActivityFlow(entry.activity);
-  removeThinkingMessage(entry.thinkingRow);
+  if (!entry.preserveInterruptedOutput) removeThinkingMessage(entry.thinkingRow);
   releaseLiveChatStreamRow(entry);
   reportStartupMetric("cross-reply:renderer:stream-close", {
     sessionId: entry.sessionId,
@@ -13959,13 +15662,13 @@ function closeLiveChatStream(streamId, options = {}) {
   });
   liveChatStreams.delete(streamId);
   removeSessionExecutionIndicator(entry.sessionId);
-  releaseActiveSendOwner(entry.sessionId, streamId);
-  sessionTaskQueue.setActive(entry.sessionId, false);
-  state.abortRequestedSessions.delete(entry.sessionId);
-  state.abortedStreamIds.delete(streamId);
-  if (!force && entry.sendFinallyCompleted === true) {
-    queueMicrotask(() => processQueue(entry.sessionId));
+  if (!sessionTaskQueue.isPending(entry.sessionId)) releaseActiveSendOwner(entry.sessionId, streamId);
+  if (!activeSendOwners.has(entry.sessionId)) {
+    sessionTaskQueue.setActive(entry.sessionId, false);
+    state.abortRequestedSessions.delete(entry.sessionId);
   }
+  state.abortedStreamIds.delete(streamId);
+  queueMicrotask(() => processQueue(entry.sessionId));
   return true;
 }
 
@@ -14191,6 +15894,35 @@ function productResultText(result = {}) {
   return text?.trim() || "";
 }
 
+function isBusyProductResult(result = {}) {
+  return String(result?.status || "").toLowerCase() === "busy"
+    || result?.error === "RUN_ALREADY_ACTIVE";
+}
+
+async function discardUnstartedProductMessage(session, userMessage, { text = "", attachments = [], quote = null } = {}) {
+  const sessionId = session?.id || "";
+  const messageId = userMessage?.id || "";
+  await api.removeMessage?.(sessionId, messageId).catch?.(() => null);
+  const pending = state.pendingUserMessages.get(sessionId);
+  pending?.delete(messageId);
+  if (pending && !pending.size) state.pendingUserMessages.delete(sessionId);
+  state.authoritativeMessagesBySession.get(sessionId)?.delete(messageId);
+  state.currentMessages = (state.currentMessages || []).filter((message) => String(message?.id || "") !== String(messageId));
+  messageRowForId(messageId)?.remove();
+  state.lastMessageSignature = "";
+  if (state.selectedSessionId === sessionId && !chatInput.value.trim()) {
+    chatInput.value = text;
+    state.attachments = [...attachments];
+    state.composerQuote = quote;
+    saveSessionDraft(sessionId, text);
+    adjustComposerHeight();
+    renderAttachments();
+    renderComposerQuote();
+  }
+  state.db = ensureClientDb(await api.init());
+  showCopyToast("当前任务仍在执行，本次请求未启动；输入内容已保留。", 2600);
+}
+
 function isTaskBrainConfirmation(result = {}) {
   return ["pending_confirmation", "awaiting_input"].includes(String(result?.status || "").toLowerCase())
     || result?.confirmationRequired === true
@@ -14376,10 +16108,10 @@ function restoreSessionMessageDom(sessionId) {
 
 async function renderMessages({ prefetchedMessages = null } = {}) {
   const session = selectedSession();
-  if (!session) return;
+  if (!session) return false;
   const renderEpoch = ++messageRenderEpoch;
   cancelAssistantTypingsExcept(session.id);
-  const savedSessionPosition = readSessionScrollPositions()[session.id];
+  const savedSessionPosition = sessionScrollPosition(session.id);
   if (!state.messageWindowOffsets.has(session.id) && Number.isFinite(Number(savedSessionPosition?.windowOffset))) {
     state.messageWindowOffsets.set(session.id, Math.max(0, Number(savedSessionPosition.windowOffset)));
   }
@@ -14417,7 +16149,16 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
   const currentSession = selectedSession();
   // A refresh can overlap another refresh while append/stream events arrive.
   // An older response must never replace the newer message window.
-  if (renderEpoch !== messageRenderEpoch || !currentSession || currentSession.id !== session.id) return;
+  if (renderEpoch !== messageRenderEpoch || !currentSession || currentSession.id !== session.id) {
+    reportStartupMetric("cross-reply:renderer:render-skipped", {
+      sessionId: session.id,
+      renderEpoch,
+      currentRenderEpoch: messageRenderEpoch,
+      currentSessionId: currentSession?.id || "",
+      reason: renderEpoch !== messageRenderEpoch ? "stale-render" : "session-changed"
+    });
+    return false;
+  }
   cacheSessionMessageHistory(session.id, requestedOffset, history);
   const historyIsWindow = history && !Array.isArray(history) && Array.isArray(history.messages);
   const allMessages = Array.isArray(history) ? history : historyIsWindow ? history.messages : [];
@@ -14453,8 +16194,9 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
   const messageCountIncreased = totalMessages > previousMessageCount;
   const renderPosition = sessionChanged ? null : captureMessageScrollPosition(session.id);
   let messagesReplaced = false;
-  const visibleMessages = mergePendingUserMessages(session.id, messages);
-  state.currentMessages = visibleMessages;
+  const authoritativeMessages = mergePendingUserMessages(session.id, messages);
+  const visibleMessages = persistedReplay.expandSupplementReplies(authoritativeMessages);
+  state.currentMessages = authoritativeMessages;
   const tail = visibleMessages.slice(-3).map((message) => `${message.id || ""}:${String(message.text || message.content || "").slice(-240)}`).join("|");
   const signature = `${session.id}:${windowStart}:${windowEnd}:${totalMessages}:${tail}`;
   const activeTyping = activeAssistantTypingForSession(session.id);
@@ -14466,7 +16208,7 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
     || ""
   );
   const durableActiveMessage = activeMessageId
-    ? visibleMessages.find((message) => String(message?.id || "") === activeMessageId)
+    ? authoritativeMessages.find((message) => String(message?.id || "") === activeMessageId)
     : null;
   const durableActiveAnswerCommitted = Boolean(
     durableActiveMessage && messageHasTerminalExecution(durableActiveMessage)
@@ -14474,12 +16216,15 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
   const activeTypingBlocksRender = Boolean(activeTyping && !durableActiveAnswerCommitted);
   const activeStreamBlocksRender = Boolean(
     activeStreamOwnsVisibleRow
-    && liveChatStreamRuntimePhase(activeStream) === "running"
-    && !durableActiveAnswerCommitted
+    && (activeStream.finalizing
+      || (activeStream.supplementReplyRows?.size > 0 && !activeStream.finalized)
+      || (liveChatStreamRuntimePhase(activeStream) === "running" && !durableActiveAnswerCommitted))
   );
+  const renderedContentMatches = renderedMessageWindowContentMatches(visibleMessages);
   if (signature !== state.lastMessageSignature
     || sessionChanged
-    || !renderedMessageWindowMatches(visibleMessages)) {
+    || !renderedMessageWindowMatches(visibleMessages)
+    || !renderedContentMatches) {
     if ((activeTypingBlocksRender || activeStreamBlocksRender) && !sessionChanged) {
       // Persisted results can arrive before the local 125 chars/sec reveal ends.
       // Keep the response row owned by its client/response message binding.
@@ -14489,7 +16234,9 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
         activeTyping.pendingSignature = signature;
       }
       requestAnimationFrame(updateReadingControls);
-    } else if (!sessionChanged && renderedMessageWindowMatches(visibleMessages)) {
+    } else if (!sessionChanged
+      && renderedMessageWindowMatches(visibleMessages)
+      && renderedContentMatches) {
       // The streamed response already owns the exact persisted message rows.
       // Adopt the storage snapshot without rebuilding the DOM and reflowing the
       // completed response a second time.
@@ -14499,14 +16246,40 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
       if (durableActiveAnswerCommitted && activeTyping) cancelAssistantTyping(session.id);
       const fragment = document.createDocumentFragment();
       clearComposerClarification();
+      const retainedInterruptedRows = new Map([...messageList.querySelectorAll('[data-preserve-interrupted="1"]')]
+        .filter((row) => row.dataset.interruptedSessionId === session.id)
+        .map((row) => [row.dataset.messageId, row]));
       if (windowStart > 0) fragment.appendChild(createMessageWindowControl({ action: "older", label: "查看更早消息", count: windowStart }));
       if (visibleMessages.length) {
-        visibleMessages.forEach((message) => addMessage(message, fragment, {
-          animate: false,
-          suggestionEligible: false
-        }));
+        for (let index = 0; index < visibleMessages.length; index += 1) {
+          const message = visibleMessages[index];
+          const retained = retainedInterruptedRows.get(message.id);
+          if (retained) {
+            retained.dataset.renderFingerprint = messageRenderFingerprint(message);
+            fragment.appendChild(retained);
+            retainedInterruptedRows.delete(message.id);
+          } else addMessage(message, fragment, {
+            animate: false,
+            suggestionEligible: false
+          });
+          if ((index + 1) % 8 === 0 && index + 1 < visibleMessages.length) {
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            const latestSession = selectedSession();
+            if (renderEpoch !== messageRenderEpoch || !latestSession || latestSession.id !== session.id) {
+              reportStartupMetric("cross-reply:renderer:render-skipped", {
+                sessionId: session.id,
+                renderEpoch,
+                currentRenderEpoch: messageRenderEpoch,
+                currentSessionId: latestSession?.id || "",
+                reason: "session-changed-during-build"
+              });
+              return false;
+            }
+          }
+        }
       }
       else fragment.appendChild(createEmptyConversation());
+      for (const retained of retainedInterruptedRows.values()) fragment.appendChild(retained);
       if (windowEnd < totalMessages) {
         const remaining = totalMessages - windowEnd;
         fragment.appendChild(createMessageWindowControl({
@@ -14544,20 +16317,19 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
   const hasInstructionAnchor = Boolean(instructionAnchorId(session.id));
   if (hasInstructionAnchor) messageList.dataset.instructionAnchored = "1";
   else delete messageList.dataset.instructionAnchored;
-  if (sessionChanged && !hasInstructionAnchor) {
+  if (sessionChanged) {
     restoreSessionScrollPosition(session.id);
   } else if (!sessionChanged && messagesReplaced && renderPosition && !hasInstructionAnchor) {
-    applyMessageScrollPosition(renderPosition);
+    if (pendingSessionScrollRestore?.sessionId === session.id) restoreSessionScrollPosition(session.id);
+    else applyMessageScrollPosition(renderPosition);
   }
-  if (hasInstructionAnchor) {
-    const anchoredPosition = renderPosition || (sessionChanged ? savedSessionPosition : null);
+  if (hasInstructionAnchor && !sessionChanged) {
+    const anchoredPosition = renderPosition;
     const anchorLocked = instructionAnchorPositionLocked(session.id);
-    const anchorLayoutChanged = sessionChanged || messagesReplaced;
+    const anchorLayoutChanged = messagesReplaced;
     applyInstructionAnchor(session.id, { reposition: anchorLocked && anchorLayoutChanged });
     if (messagesReplaced && anchoredPosition && !anchorLocked) {
       applyMessageScrollPosition(anchoredPosition, { keepInstructionAnchor: true });
-    } else if (sessionChanged && !anchoredPosition) {
-      applyInstructionAnchor(session.id, { reposition: true });
     }
     scheduleInstructionAnchor(session.id);
   }
@@ -14590,9 +16362,11 @@ async function renderMessages({ prefetchedMessages = null } = {}) {
       }
     });
   }
+  return true;
 }
 
 function renderAttachments() {
+  syncComposerSendAction();
   attachmentPreview.hidden = state.attachments.length === 0;
   attachmentPreview.innerHTML = "";
   for (const [index, item] of state.attachments.entries()) {
@@ -14618,27 +16392,46 @@ function renderAttachments() {
   requestAnimationFrame(positionTaskBoard);
 }
 
-function restoreQueuedTaskToComposer(session, task) {
-  if (!session?.id || !task) return;
-  const draftText = chatInput.value.trim();
-  if (draftText || state.attachments.length || state.composerQuote) {
-    sessionTaskQueue.enqueue(session.id, {
-      text: draftText,
-      attachments: [...state.attachments],
-      quote: state.composerQuote ? { ...state.composerQuote } : null
-    });
+function editQueuedTaskInline(session, task) {
+  if (codeRevisionFromMessage({ ...task, role: "user" })) {
+    showCopyToast("修改内容已提交；如需调整，请返回原内容块重新编辑", 2200);
+    return;
   }
-  sessionTaskQueue.remove(session.id, task.id);
-  chatInput.value = task.text || "";
-  state.attachments = [...(task.attachments || [])];
-  state.composerQuote = task.quote ? { ...task.quote, sessionId: session.id } : null;
-  adjustComposerHeight();
-  renderAttachments();
-  renderComposerQuote();
+  if (!session?.id || !task) return;
+  if (task.deliveryInFlight || task.receiptUnknown || task.clientMessageId || task.dispatching) {
+    showCopyToast("此补充已提交，不能修改已发送内容；请另发一条补充", 2200);
+    return;
+  }
+  if (task.editing) return;
+  if (!sessionTaskQueue.list(session.id).includes(task)) return;
+  if (Date.now() < Number(state.queueSortSuppressUntil || 0)) return;
+  task.editing = true;
+  task.editText = task.text || "";
   renderQueue();
-  chatInput.focus();
-  chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+  queueList.querySelector(`[data-queue-task-id="${CSS.escape(task.id)}"] .queue-task-editor`)?.focus({ preventScroll: true });
 }
+
+function finishQueuedTaskEdit(session, task, { cancel = false, resume = true } = {}) {
+  if (!task.editing) return true;
+  if (task.editComposing) return false;
+  clearTimeout(task.editCommitTimer);
+  task.editCommitTimer = null;
+  if (!cancel) {
+    if (!String(task.editText || "").trim() && !task.attachments.length && !task.quote) {
+      showCopyToast("请输入补充内容，草稿尚未发送", 1800);
+      return false;
+    }
+    if (!sessionTaskQueue.update(session.id, task.id, { text: task.editText })) return false;
+  }
+  task.editing = false;
+  delete task.editText;
+  delete task.editComposing;
+  renderQueue();
+  if (resume) queueMicrotask(() => processQueue(session.id));
+  return true;
+}
+
+
 
 function finalizeVisibleStreamNow(streamId) {
   const key = String(streamId || "");
@@ -14680,42 +16473,36 @@ async function waitForVisibleOutputDrain(sessionId, streamId, timeoutMs = 450) {
 
 async function startQueuedTask(session, task) {
   if (!session?.id || !task) return;
-  const running = state.busy || sessionIsRunning(session) || sessionTaskQueue.isActive(session.id);
-  if (running) {
-    showCopyToast("正在中断当前任务以执行预置任务", 1800);
-    state.abortRequestedSessions.add(session.id);
-    state.closedClarificationSessions.add(session.id);
-    clearPendingClarificationCards(session.id);
-    clearComposerClarification();
-    setBusy(false);
-    taskState.textContent = "正在切换预置任务";
-    if (monitorMode) monitorMode.textContent = "正在切换预置任务";
-    const activeRunId = activeLiveChatStreamForSession(session.id)?.streamId
-      || activeSendOwners.get(session.id)
-      || "";
-    if (activeRunId) state.abortedStreamIds.add(activeRunId);
-    api.signalAbortChat?.({ sessionId: session.id, runId: activeRunId });
-    discardLiveChatStreamsForSession(session.id);
-    let abortResult = null;
-    try {
-      abortResult = await api.abortChat({ sessionId: session.id, runId: activeRunId });
-    } catch (error) {
-      console.error("[Abort] 中断当前任务失败", error);
-      showCopyToast("中断失败，预置任务已保留", 2200);
-      return;
-    }
-    if (abortResult?.ok === false && !abortResult?.ignored) {
-      showCopyToast(abortResult.reason || "中断失败，预置任务已保留", 2200);
-      return;
-    }
-    const nextTask = sessionTaskQueue.remove(session.id, task.id);
-    renderQueue();
-    if (nextTask) await sendCurrentTask(nextTask, session.id);
+  if (task.deliveryInFlight || task.editComposing || !finishQueuedTaskEdit(session, task, { resume: false })) return;
+  if (!sessionTaskQueue.update(session.id, task.id, { autoStart: true, deliveryMode: "steer" })) return;
+  sessionTaskQueue.reorder(session.id, [task.id]);
+  sessionTaskQueue.resume(session.id);
+  renderQueue();
+  if (sessionIsRunning(session) || sessionTaskQueue.isPending(session.id)) {
+    void processQueue(session.id);
     return;
   }
-  const nextTask = sessionTaskQueue.remove(session.id, task.id);
-  renderQueue();
-  if (nextTask) await sendCurrentTask(nextTask, session.id);
+  await processQueue(session.id);
+}
+
+function queuedTaskForComposerConfirmation(session) {
+  if (!session?.id) return null;
+  return sessionTaskQueue.list(session.id).find(task =>
+    task.autoStart
+    && task.deliveryMode === "queue"
+    && !task.editing
+    && !task.deliveryInFlight
+    && !task.receiptUnknown
+    && !task.clientMessageId
+    && !task.dispatching
+  ) || null;
+}
+
+async function confirmQueuedTaskFromComposer(session) {
+  const task = queuedTaskForComposerConfirmation(session);
+  if (!task) return false;
+  await startQueuedTask(session, task);
+  return true;
 }
 
 function clearQueueSortIndicators() {
@@ -14727,13 +16514,13 @@ function reorderQueuedTask(sessionId, taskId, targetId, before) {
   const nextIds = moveSidebarOrder(ids, taskId, targetId, before);
   if (!sessionTaskQueue.reorder(sessionId, nextIds)) return;
   renderQueue();
-  showCopyToast("预置任务顺序已调整", 1400);
+  showCopyToast("补充顺序已调整", 1400);
 }
 
 function bindQueueLongPressSort(item, session, task) {
   item.dataset.queueTaskId = task.id;
   item.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || event.target.closest("button")) return;
+    if (event.button !== 0 || event.target.closest("button, input, textarea")) return;
     const startX = event.clientX;
     const startY = event.clientY;
     const pointerId = event.pointerId;
@@ -14811,33 +16598,125 @@ function bindQueueLongPressSort(item, session, task) {
   }, true);
 }
 
+const QUEUE_ROW_STATE_TITLES = {
+  held: "待发送，点 → 立即发送",
+  queued: "排队中，当前任务完成后自动接续",
+  running: "正在执行",
+  paused: "接续已暂停；点 → 发送并恢复"
+};
+
 function renderQueue() {
   const selected = selectedSession();
   const queue = selected?.id ? sessionTaskQueue.list(selected.id) : [];
   queuePanel.hidden = queue.length === 0;
-  queueList.innerHTML = "";
+  const paused = sessionTaskQueue.isPaused(selected?.id);
+  const existingRows = new Map([...queueList.children].map(item => [item.dataset.queueTaskId, item]));
+  const retainedIds = new Set(queue.map(task => task.id));
   queue.forEach((task, index) => {
-    const item = document.createElement("div");
-    item.className = "queue-item queued-input";
-    const label = task.text || `附件任务 ${task.attachments.length}`;
-    item.innerHTML = `
-      <span class="queue-position">${index + 1}</span>
-      <span class="queue-task-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
-      <span class="queue-item-actions">
-        <button class="queue-edit" type="button" data-action="edit" title="编辑预置任务" aria-label="编辑预置任务">✎</button>
-        <button class="queue-start" type="button" data-action="start" title="${sessionIsRunning(selected) ? "设为下一项" : "开始任务"}" aria-label="${sessionIsRunning(selected) ? "设为下一项" : "开始任务"}">→</button>
-      </span>
-    `;
-    item.querySelector('[data-action="edit"]').addEventListener("click", () => restoreQueuedTaskToComposer(selected, task));
-    item.querySelector('[data-action="start"]').addEventListener("click", () => void startQueuedTask(selected, task));
-    item.addEventListener("contextmenu", (event) => showPresetTaskContextMenu(event, selected, task));
-    bindQueueLongPressSort(item, selected, task);
-    queueList.appendChild(item);
+    const rowState = task.dispatching ? "running" : (task.autoStart ? (paused ? "paused" : "queued") : "held");
+    const stateTitle = QUEUE_ROW_STATE_TITLES[rowState] || "";
+    let item = existingRows.get(task.id);
+    if (!item) {
+      item = document.createElement("div");
+      item.className = "queue-item queued-input";
+      item.dataset.queueTaskId = task.id;
+      item.innerHTML = `
+        <button class="queue-handle" type="button" aria-label="长按拖拽排序"><svg viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></g></svg></button>
+        <textarea class="queue-task-editor" rows="1" readonly aria-label="补充内容，点击编辑，Enter 发送，Shift+Enter 换行，Escape 取消编辑"></textarea>
+        <span class="queue-item-actions">
+          <button class="queue-remove" type="button" data-action="remove" title="删除预置任务" aria-label="删除预置任务"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <button class="queue-start" type="button" data-action="start" title="发送补充" aria-label="发送补充"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 15h3a3 3 0 0 0 3-3V6a3 3 0 0 0-3-3H6a3 3 0 0 0-3 3v6a3 3 0 0 0 3 3h2M12 7v9a5 5 0 0 1-5 5M8 11l4-4 4 4"/></svg></button>
+        </span>
+      `;
+      const input = item.querySelector(".queue-task-editor");
+      input.addEventListener("focus", () => {
+        clearTimeout(task.editCommitTimer);
+        if (!task.editing) editQueuedTaskInline(selected, task);
+      });
+      input.addEventListener("click", () => {
+        if (!task.editing) editQueuedTaskInline(selected, task);
+      });
+      input.addEventListener("input", () => { task.editText = input.value; });
+      input.addEventListener("blur", () => {
+        task.editText = input.value;
+        if (!task.editing || task.editComposing) return;
+        clearTimeout(task.editCommitTimer);
+        task.editCommitTimer = setTimeout(() => {
+          task.editCommitTimer = null;
+          if (task.editing && !task.editComposing) finishQueuedTaskEdit(selected, task);
+        }, 0);
+      });
+      input.addEventListener("compositionstart", () => { task.editComposing = true; });
+      input.addEventListener("compositionend", () => {
+        task.editComposing = false;
+        task.editText = input.value;
+        if (document.activeElement !== input && task.editing) finishQueuedTaskEdit(selected, task);
+      });
+      input.addEventListener("keydown", event => {
+        if (event.isComposing || task.editComposing || event.keyCode === 229) return;
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!event.repeat) void startQueuedTask(selected, task);
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finishQueuedTaskEdit(selected, task, { cancel: true });
+        }
+      });
+      item.querySelector(".queue-item-actions").addEventListener("pointerdown", event => {
+        if (event.button === 0 && task.editing && !task.editComposing) event.preventDefault();
+      });
+      item.querySelector('[data-action="start"]').addEventListener("click", () => void startQueuedTask(selected, task));
+      item.querySelector('[data-action="remove"]').addEventListener("click", () => {
+        clearTimeout(task.editCommitTimer);
+        sessionTaskQueue.remove(selected.id, task.id);
+        renderQueue();
+        void processQueue(selected.id);
+      });
+      item.addEventListener("contextmenu", event => {
+        if (!event.target.closest("textarea")) showPresetTaskContextMenu(event, selected, task);
+      });
+      bindQueueLongPressSort(item, selected, task);
+    }
+    const revision = codeRevisionFromMessage({ ...task, role: "user" });
+    const visibleText = revision ? codeRevisionDisplayText(revision) : task.text;
+    const label = visibleText || (task.quote ? "结合引用内容继续补充" : `附件补充 ${task.attachments.length}`);
+    const locked = Boolean(task.deliveryInFlight || task.receiptUnknown || task.clientMessageId || task.dispatching);
+    const input = item.querySelector(".queue-task-editor");
+    item.classList.toggle("is-editing", Boolean(task.editing));
+    input.readOnly = Boolean(revision) || !task.editing || locked;
+    input.setAttribute("aria-label", revision ? "已提交的内容修改" : "补充内容，点击编辑，Enter 发送，Shift+Enter 换行，Escape 取消编辑");
+    input.title = label;
+    input.placeholder = task.text ? "" : label;
+    if (task.editing) {
+      if (document.activeElement !== input && input.value !== (task.editText ?? task.text ?? "")) input.value = task.editText ?? task.text ?? "";
+    } else if (input.value !== visibleText) {
+      input.value = visibleText;
+    }
+    const handle = item.querySelector(".queue-handle");
+    handle.dataset.state = rowState;
+    handle.disabled = locked || task.editing;
+    handle.title = stateTitle || "长按拖拽排序";
+    const removeButton = item.querySelector('[data-action="remove"]');
+    const startButton = item.querySelector('[data-action="start"]');
+    removeButton.disabled = locked;
+    startButton.disabled = Boolean(task.deliveryInFlight || task.dispatching);
+    startButton.title = task.receiptUnknown ? "核对发送状态" : "发送补充";
+    startButton.setAttribute("aria-label", startButton.title);
+    const position = queueList.children[index] || null;
+    if (position !== item) queueList.insertBefore(item, position);
   });
+  for (const item of [...queueList.children]) if (!retainedIds.has(item.dataset.queueTaskId)) {
+    item.cancelQueueSort?.();
+    item.remove();
+  }
   requestAnimationFrame(positionTaskBoard);
 }
 
 function renderSettings({ heavy = true } = {}) {
+  state.db.settings = preserveConfirmedModelSettings(state.db.settings);
   providerSelect.innerHTML = "";
   const settings = state.db.settings;
   settings.appearance ||= {};
@@ -15168,25 +17047,27 @@ function modelProviderIcon(provider = {}, key = "") {
 async function useModelProvider(key) {
   const provider = state.db.settings.providers?.[key];
   if (!provider) return;
-  state.providerModelStatus[key] = "正在切换模型...";
-  renderModelCenterOverview();
+  if (!beginModelSettingsOperation(key, "正在切换模型…")) return;
   try {
-    const result = await api.activateModel(key);
+    const result = await api.activateModel(modelSettingsPayload(key));
     state.providerModels[key] = result?.verification?.models || [];
     state.providerLastChecked[key] = Date.now();
     state.providerModelErrors[key] = false;
     state.providerModelStatus[key] = result?.reusedVerification
       ? "已复用验证记录并切换"
       : `真实推理验证通过，响应 ${result?.verification?.latencyMs ?? "--"}ms`;
+    acceptModelSettingsResult(result);
     providerSelect.value = key;
-    state.db = await api.init();
-    renderSettings();
+    renderSettings({ heavy: false });
+    void refreshModelCatalog(key);
     showCopyToast(`已切换到 ${provider.name || key}`, 2200);
   } catch (error) {
     state.providerModelErrors[key] = true;
     state.providerModelStatus[key] = error?.message || String(error);
     renderModelCenterOverview();
     showCopyToast(`切换失败，仍使用原模型：${state.providerModelStatus[key]}`, 3200);
+  } finally {
+    await finishModelSettingsOperation();
   }
 }
 
@@ -15200,13 +17081,13 @@ async function toggleModelProvider(key, enabled) {
     showCopyToast("无法匹配：请先确认 API Key 和模型接口配置", 2600);
     return;
   }
+  if (!beginModelSettingsOperation(key, enabled ? "正在接入黑球…" : "正在停用…")) return;
   try {
-    state.providerModelStatus[key] = enabled ? "正在接入黑球..." : "正在停用...";
-    const result = await api.setModelEnabled({ providerId: key, enabled });
+    const result = await api.setModelEnabled({ ...modelSettingsPayload(key), enabled });
     state.providerModels[key] = result?.models || state.providerModels[key] || [];
     state.providerModelErrors[key] = false;
-    state.db = await api.init();
-    renderSettings();
+    acceptModelSettingsResult(result);
+    renderSettings({ heavy: false });
     if (enabled) {
       const becameCurrent = state.db.settings.defaultProvider === key;
       showCopyToast(becameCurrent ? "模型已验证并切换为当前模型" : "模型已验证并启用，可点击卡片切换使用", 2400);
@@ -15221,19 +17102,85 @@ async function toggleModelProvider(key, enabled) {
     state.providerModelStatus[key] = error?.message || String(error);
     renderModelCenterOverview();
     showCopyToast(`无法切换：${state.providerModelStatus[key]}`, 3200);
+  } finally {
+    await finishModelSettingsOperation();
   }
 }
 
 const API_KEY_MASK = "***************";
+const providerApiKeyDrafts = new Map();
+let modelSettingsOperation = null;
+let modelSettingsOperationSequence = 0;
+let latestConfirmedModelSettings = null;
+
+function preserveConfirmedModelSettings(settings) {
+  const fields = ["providers", "defaultProvider", "reasoning", "modelRuntime", "modelConfigRevision", "modelConfigGeneration"];
+  if (latestConfirmedModelSettings && Number(latestConfirmedModelSettings.modelConfigGeneration || 0) > Number(settings.modelConfigGeneration || 0)) {
+    return { ...settings, ...structuredClone(latestConfirmedModelSettings) };
+  }
+  if (Number(settings.modelConfigGeneration || 0) > 0) {
+    latestConfirmedModelSettings = Object.fromEntries(fields.map(field => [field, structuredClone(settings[field])]));
+  }
+  return settings;
+}
+
+function beginModelSettingsOperation(key, label) {
+  if (modelSettingsOperation) return false;
+  modelSettingsOperation = { key, label, requestId: `model-settings-${++modelSettingsOperationSequence}`,
+    expectedRevision: state.db.settings.modelConfigRevision || "" };
+  state.providerModelErrors[key] = false;
+  state.providerModelStatus[key] = label;
+  renderModelCenterOverview();
+  return true;
+}
+
+async function finishModelSettingsOperation() {
+  if (modelSettingsOperation && state.providerModelErrors[modelSettingsOperation.key] && typeof api.modelSettings === "function") {
+    try { state.db.settings = await api.modelSettings(); } catch {}
+  }
+  modelSettingsOperation = null;
+  renderModelCenterOverview();
+}
+
+function acceptModelSettingsResult(result) {
+  if (!result?.ok || !result.settings || !result.settings.modelConfigRevision) {
+    throw new Error("未收到配置保存确认，请重新读取设置后检查，勿重复提交。");
+  }
+  state.db.settings = preserveConfirmedModelSettings(result.settings);
+}
+
+function modelSettingsPayload(key) {
+  return { providerId: key, expectedRevision: modelSettingsOperation?.expectedRevision ?? state.db.settings.modelConfigRevision ?? "",
+    requestId: modelSettingsOperation?.requestId || "" };
+}
+
+api.onModelConfigurationFailure?.(failure => showCopyToast(failure.message, 4000));
+api.onModelConfigurationProgress?.((progress) => {
+  if (!modelSettingsOperation || progress.requestId !== modelSettingsOperation.requestId) return;
+  const labels = { verifying: "正在验证接口…", waiting_for_task: "等待当前任务结束后切换…", applying: "正在应用配置…", saving: "正在保存配置…" };
+  const label = labels[progress.stage];
+  if (!label) return;
+  modelSettingsOperation.label = label;
+  state.providerModelStatus[modelSettingsOperation.key] = label;
+  const card = [...(configuredModelList?.querySelectorAll("[data-provider-card]") || [])]
+    .find(item => item.dataset.providerCard === modelSettingsOperation.key);
+  const button = card?.querySelector("[data-confirm-api-key]");
+  const badge = card?.querySelector(".model-connection-badge");
+  if (button) button.textContent = label;
+  if (badge) badge.textContent = label;
+  if (state.modelConfigSaving) setModelConfigSaveState("checking", label);
+});
 
 function bindSavedApiKeyMask(input) {
   if (!input) return;
   const confirmButton = input.closest(".configured-model-api-key")?.querySelector("[data-confirm-api-key]");
   const renderConfirmationState = () => {
     if (!confirmButton) return;
+    input.readOnly = Boolean(modelSettingsOperation);
     const saved = input.dataset.savedApiKey === "1" && input.value === API_KEY_MASK;
-    confirmButton.disabled = saved;
-    confirmButton.textContent = saved ? "已保存" : "验证并保存";
+    confirmButton.disabled = saved || Boolean(modelSettingsOperation);
+    confirmButton.textContent = modelSettingsOperation?.key === input.dataset.providerApiKey
+      ? modelSettingsOperation.label : saved ? "已保存" : "验证并保存";
   };
   if (input.dataset.savedApiKey === "1") {
     input.addEventListener("focus", () => {
@@ -15242,6 +17189,9 @@ function bindSavedApiKeyMask(input) {
   }
   input.addEventListener("input", () => {
     if (input.value !== API_KEY_MASK) input.dataset.savedApiKey = "0";
+    if (input.dataset.providerApiKey && input.dataset.savedApiKey !== "1") {
+      providerApiKeyDrafts.set(input.dataset.providerApiKey, input.value);
+    }
     renderConfirmationState();
   });
   renderConfirmationState();
@@ -15260,12 +17210,12 @@ async function confirmProviderApiKey(key, input) {
     input?.focus();
     return;
   }
-  state.providerModelStatus[key] = "正在验证 API Key 和真实模型...";
-  renderModelCenterOverview();
+  providerApiKeyDrafts.set(key, value);
+  if (!beginModelSettingsOperation(key, "正在验证并保存…")) return;
   try {
     const result = await api.configureModel({
-      providerId: key,
       ...provider,
+      ...modelSettingsPayload(key),
       apiKey: value,
       activate: key === state.db.settings.defaultProvider,
       strictModel: false
@@ -15274,7 +17224,8 @@ async function confirmProviderApiKey(key, input) {
     state.providerLastChecked[key] = Date.now();
     state.providerModelErrors[key] = false;
     state.providerModelStatus[key] = `已验证 ${result?.provider?.model || "真实模型"}`;
-    state.db = await api.init();
+    acceptModelSettingsResult(result);
+    providerApiKeyDrafts.delete(key);
     renderSettings({ heavy: false });
     showCopyToast("接口正文验证通过，配置已保存", 2200);
   } catch (error) {
@@ -15282,10 +17233,13 @@ async function confirmProviderApiKey(key, input) {
     state.providerModelStatus[key] = error?.message || String(error);
     renderModelCenterOverview();
     showCopyToast(`API Key 未保存：${state.providerModelStatus[key]}`, 3600);
+  } finally {
+    await finishModelSettingsOperation();
   }
 }
 
 async function deleteProviderApiKey(key) {
+  if (modelSettingsOperation) return;
   const settings = JSON.parse(JSON.stringify(state.db.settings));
   const provider = settings.providers?.[key];
   if (!provider || !String(provider.apiKey || "").trim()) {
@@ -15299,17 +17253,23 @@ async function deleteProviderApiKey(key) {
     secondary: "取消"
   });
   if (!confirmed) return;
-  provider.apiKey = "";
-  provider.enabled = false;
-  settings.providers[key] = provider;
-  await api.saveSettings(settings);
-  state.providerModelErrors[key] = false;
-  state.db = await api.init();
-  renderSettings({ heavy: false });
-  showCopyToast("API Key 已删除", 1800);
+  if (!beginModelSettingsOperation(key, "正在删除 Key…")) return;
+  try {
+    acceptModelSettingsResult(await api.deleteModelConfiguration(modelSettingsPayload(key)));
+    providerApiKeyDrafts.delete(key);
+    renderSettings({ heavy: false });
+    showCopyToast("API Key 已删除", 1800);
+  } catch (error) {
+    state.providerModelErrors[key] = true;
+    state.providerModelStatus[key] = error?.message || String(error);
+    showCopyToast(state.providerModelStatus[key], 3600);
+  } finally {
+    await finishModelSettingsOperation();
+  }
 }
 
 async function deleteModelProvider(key) {
+  if (modelSettingsOperation) return;
   const settings = state.db.settings;
   if (key === settings.defaultProvider) {
     showCopyToast("当前使用模型不能删除，请先切换模型", 2200);
@@ -15328,11 +17288,17 @@ async function deleteModelProvider(key) {
     secondary: "取消"
   });
   if (!confirmed) return;
-  delete settings.providers[key];
-  saveModelProviderOrder(orderedModelProviders(settings.providers).map(([providerKey]) => providerKey));
-  await api.saveSettings(settings);
-  state.db = await api.init();
-  renderSettings();
+  if (!beginModelSettingsOperation(key, "正在删除模型…")) return;
+  try {
+    acceptModelSettingsResult(await api.deleteModelConfiguration({ ...modelSettingsPayload(key), removeProvider: true }));
+    providerApiKeyDrafts.delete(key);
+    saveModelProviderOrder(orderedModelProviders(state.db.settings.providers).map(([providerKey]) => providerKey));
+    renderSettings({ heavy: false });
+  } catch (error) {
+    showCopyToast(error?.message || String(error), 3600);
+  } finally {
+    await finishModelSettingsOperation();
+  }
 }
 
 function closeModelCardMenus(except = null) {
@@ -15342,7 +17308,8 @@ function closeModelCardMenus(except = null) {
 }
 
 function configuredProviderCardState(key, provider, selected = false) {
-  if (state.providerModelErrors[key]) return { state: "error", label: "无法匹配" };
+  if (modelSettingsOperation?.key === key) return { state: "pending", label: modelSettingsOperation.label };
+  if (state.providerModelErrors[key]) return { state: "error", label: "本次操作失败 · 原配置保留" };
   const missingKey = provider.requiresApiKey !== false && !String(provider.apiKey || "").trim();
   const missingEndpoint = !String(provider.baseURL || "").trim() || !String(provider.model || "").trim();
   if (missingKey || missingEndpoint) return { state: "offline", label: "待配置" };
@@ -15355,12 +17322,8 @@ function configuredProviderCardState(key, provider, selected = false) {
 
 function renderModelCenterOverview() {
   if (!configuredModelList) return;
+  state.db.settings = preserveConfirmedModelSettings(state.db.settings);
   const settings = state.db.settings;
-  // 重置残留的验证失败标记：配置已满足验证条件时，清掉上次失败（避免误报"配置异常"）
-  for (const key of Object.keys(state.providerModelErrors || {})) {
-    const p = settings.providers?.[key];
-    if (p && (p.apiKey || p.requiresApiKey === false) && p.baseURL && p.model) state.providerModelErrors[key] = false;
-  }
   const selectedKey = settings.defaultProvider || providerSelect.value || "deepseek";
   const selectedProvider = settings.providers[selectedKey] || {};
   const selectedConnection = providerConnectionState(selectedKey, selectedProvider);
@@ -15391,8 +17354,9 @@ function renderModelCenterOverview() {
     const selected = key === selectedKey;
     const cardState = configuredProviderCardState(key, provider, selected);
     const purchaseUrl = String(provider.apiKeyUrl || PROVIDER_API_KEY_URLS[key] || "").trim();
-    const hasSavedApiKey = Boolean(String(provider.apiKey || "").trim());
-    const keyValue = hasSavedApiKey ? API_KEY_MASK : "";
+    const hasDraft = providerApiKeyDrafts.has(key);
+    const hasSavedApiKey = !hasDraft && Boolean(String(provider.apiKey || "").trim());
+    const keyValue = hasDraft ? providerApiKeyDrafts.get(key) : hasSavedApiKey ? API_KEY_MASK : "";
     const keyPlaceholder = hasSavedApiKey ? API_KEY_MASK : "请输入 API Key";
     return `
       <article class="configured-model-card${selected ? " selected" : ""}" data-provider-card="${escapeHtml(key)}" data-state="${cardState.state}">
@@ -15407,10 +17371,10 @@ function renderModelCenterOverview() {
             <span class="sr-only">API Key</span>
             <input type="password" data-provider-api-key="${escapeHtml(key)}" data-saved-api-key="${hasSavedApiKey ? "1" : "0"}" value="${escapeHtml(keyValue)}" placeholder="${escapeHtml(keyPlaceholder)}" autocomplete="off" spellcheck="false" aria-label="${hasSavedApiKey ? "API Key 已保存，输入可替换" : "输入 API Key"}">
           </label>
-          <button type="button" data-confirm-api-key="${escapeHtml(key)}"${hasSavedApiKey ? " disabled" : ""}>${hasSavedApiKey ? "已保存" : "验证并保存"}</button>
+          <button type="button" data-confirm-api-key="${escapeHtml(key)}"${hasSavedApiKey || modelSettingsOperation ? " disabled" : ""}>${modelSettingsOperation?.key === key ? escapeHtml(modelSettingsOperation.label) : hasSavedApiKey ? "已保存" : "验证并保存"}</button>
         </div>
         <div class="configured-model-controls">
-          <button type="button" data-delete-api-key="${escapeHtml(key)}">删除 API Key</button>
+          <button type="button" data-delete-api-key="${escapeHtml(key)}"${modelSettingsOperation ? " disabled" : ""}>删除 API Key</button>
         </div>
       </article>
     `;
@@ -15431,7 +17395,7 @@ function renderModelCenterOverview() {
   });
   configuredModelList.querySelectorAll("[data-provider-card]").forEach((card) => {
     card.addEventListener("click", (event) => {
-      if (event.target.closest("button, input, label")) return;
+      if (modelSettingsOperation || event.target.closest("button, input, label")) return;
       const key = card.dataset.providerCard || "";
       if (!key || key === state.db.settings.defaultProvider) return;
       const provider = state.db.settings.providers?.[key] || {};
@@ -15588,27 +17552,82 @@ function openOtherModelConfigDrawer() {
   return openModelConfigDrawer(createCustomProviderKey(), "add");
 }
 
-function modelVersionSuggestions(key = "", currentModel = "") {
-  const discovered = Array.isArray(state.providerModels[key]) ? state.providerModels[key] : [];
+function providerCatalogIdentity(provider = {}) {
+  return JSON.stringify([provider.baseURL || "", provider.apiStyle || "openai", provider.apiKey || ""]);
+}
+
+async function refreshModelCatalog(key = state.db?.settings?.defaultProvider, provider = state.db?.settings?.providers?.[key], { force = false } = {}) {
+  if (!provider?.baseURL || (provider.requiresApiKey !== false && !provider.apiKey) || !api.listModels) return null;
+  const identity = providerCatalogIdentity(provider);
+  let catalog = state.providerCatalogs[key];
+  if (!catalog || catalog.identity !== identity) catalog = state.providerCatalogs[key] = { identity };
+  if (catalog.pending) return catalog.pending;
+  if (!force && Date.now() - (catalog.lastAttempt || 0) < (catalog.error ? 30000 : 60000)) return catalog.result || null;
+  catalog.lastAttempt = Date.now();
+  catalog.loading = true;
+  catalog.error = "";
+  renderReasoningMode();
+  catalog.pending = (async () => {
+    try {
+      const result = await api.listModels({ providerId: key, ...provider });
+      if (state.providerCatalogs[key] !== catalog) return null;
+      catalog.result = result;
+      state.providerModels[key] = result.models || [];
+      const saved = state.db?.settings?.providers?.[key];
+      if (saved && providerCatalogIdentity(saved) === identity) {
+        Object.assign(saved, { availableModels: result.models, availableModelsAt: result.fetchedAt,
+          modelMetadata: result.modelMetadata, modelCatalogSource: result.catalogSource, modelCatalogWarning: result.metadataWarning });
+      }
+      if (state.modelConfigKey === key && providerCatalogIdentity(state.modelConfigDraft || {}) === identity) {
+        const suggestions = $("modelVersionSuggestions");
+        if (suggestions) suggestions.innerHTML = (result.models || []).map(model => `<option value="${escapeHtml(model)}">${escapeHtml(result.modelMetadata?.[model]?.displayName || model)}</option>`).join("");
+        const status = $("modelDiscoveryStatus");
+        if (status) status.textContent = result.metadataWarning || `已同步供应商目录，共 ${result.models.length} 个型号`;
+      }
+      return result;
+    } catch (error) {
+      if (state.providerCatalogs[key] === catalog) catalog.error = error?.message || "模型目录更新失败";
+      return null;
+    } finally {
+      catalog.loading = false;
+      catalog.pending = null;
+      if (state.providerCatalogs[key] === catalog) {
+        renderReasoningMode();
+        requestAnimationFrame(positionReasoningMenu);
+      }
+    }
+  })();
+  return catalog.pending;
+}
+
+function modelCatalogLabel(key, model) {
   const provider = state.db?.settings?.providers?.[key] || {};
+  const catalog = state.providerCatalogs[key];
+  const metadata = catalog?.identity === providerCatalogIdentity(provider) && catalog.result
+    ? catalog.result.modelMetadata : provider.modelMetadata;
+  return metadata?.[model]?.displayName || String(model || provider.name || key);
+}
+
+function modelVersionSuggestions(key = "", currentModel = "") {
+  const provider = state.db?.settings?.providers?.[key] || {};
+  const catalog = state.providerCatalogs[key];
+  const discovered = catalog && catalog.identity !== providerCatalogIdentity(provider) ? [] : state.providerModels[key];
   const persisted = Array.isArray(provider.availableModels) ? provider.availableModels : [];
-  const available = [...new Set([...discovered, ...persisted].map((model) => String(model || "").trim()).filter(Boolean))];
-  if (available.length) return available;
+  const latest = catalog?.identity === providerCatalogIdentity(provider) && catalog.result
+    ? catalog.result.models : Array.isArray(discovered) && discovered.length ? discovered : persisted;
   const verifiedCurrent = provider.verifiedAt && provider.verifiedModel === currentModel;
-  return verifiedCurrent && currentModel ? [currentModel] : [];
+  return [...new Set([...latest, ...(verifiedCurrent && currentModel ? [currentModel] : [])]
+    .map(model => String(model || "").trim()).filter(Boolean))];
 }
 
 function modelVersionsForProvider(key = "", provider = {}) {
-  const discovered = Array.isArray(state.providerModels[key]) ? state.providerModels[key] : [];
-  return [...new Set([
-    ...discovered,
-    ...modelVersionSuggestions(key, provider.model)
-  ].map((model) => String(model || "").trim()).filter(Boolean))];
+  return modelVersionSuggestions(key, provider.model);
 }
 
 let modelVersionSwitchRevision = 0;
 
 async function selectModelVersion(key, model) {
+  if (modelSettingsOperation) return;
   if (reasoningWaterControl?.getAttribute("aria-busy") === "true") return;
   const provider = state.db.settings.providers?.[key];
   const version = String(model || "").trim();
@@ -15616,15 +17635,14 @@ async function selectModelVersion(key, model) {
   if (provider.model === version) return;
   const previousModel = provider.model;
   const revision = ++modelVersionSwitchRevision;
-  provider.model = version;
-  if (reasoningModelLabel) reasoningModelLabel.textContent = compactModelLabel(version, provider.name || key);
+  if (!beginModelSettingsOperation(key, "正在验证型号…")) return;
   reasoningWaterControl?.setAttribute("aria-busy", "true");
   reasoningWaterControl?.classList.add("switching-model");
   try {
     state.providerModelStatus[key] = `正在验证 ${version}...`;
     const result = await api.configureModel({
-      providerId: key,
       ...provider,
+      ...modelSettingsPayload(key),
       model: version,
       activate: true,
       strictModel: true
@@ -15632,14 +17650,7 @@ async function selectModelVersion(key, model) {
     if (revision !== modelVersionSwitchRevision) return;
     state.providerModels[key] = result?.models || state.providerModels[key] || [];
     state.providerModelErrors[key] = false;
-    state.db.settings.providers[key] = {
-      ...provider,
-      ...(result?.provider || {}),
-      apiKey: provider.apiKey,
-      model: version
-    };
-    if (result?.defaultProvider) state.db.settings.defaultProvider = result.defaultProvider;
-    if (result?.runtimeReceipt) state.db.settings.modelRuntime = result.runtimeReceipt;
+    acceptModelSettingsResult(result);
     state.providerModelStatus[key] = "";
     renderReasoningMode();
   } catch (error) {
@@ -15647,11 +17658,12 @@ async function selectModelVersion(key, model) {
     provider.model = previousModel;
     state.providerModelErrors[key] = true;
     state.providerModelStatus[key] = error?.message || String(error);
-    if (reasoningModelLabel) reasoningModelLabel.textContent = compactModelLabel(previousModel, provider.name || key);
+    if (reasoningModelLabel) reasoningModelLabel.textContent = modelCatalogLabel(key, previousModel);
     reasoningWaterControl.title = `型号未切换：${state.providerModelStatus[key]}`;
     console.warn("[模型切换] 验证失败", state.providerModelStatus[key]);
   } finally {
     if (revision === modelVersionSwitchRevision) {
+      await finishModelSettingsOperation();
       reasoningWaterControl?.removeAttribute("aria-busy");
       reasoningWaterControl?.classList.remove("switching-model");
       if (reasoningWaterControl?.dataset.open === "1") {
@@ -15728,6 +17740,7 @@ function showModelUnsavedConfirm() {
 }
 
 async function requestCloseModelConfigDrawer() {
+  if (state.modelConfigSaving) return false;
   if (!modelConfigIsDirty()) {
     closeModelConfigDrawer();
     return true;
@@ -15755,7 +17768,7 @@ function readModelConfigDraft() {
     apiKeyUrl: $("apiKeyUrlInput")?.value?.trim() || "",
     baseURL: $("baseUrlInput")?.value?.trim() || "",
     model: $("modelVersionInput")?.value?.trim() || "",
-    apiStyle: providerApiStyle(state.modelConfigKey),
+    apiStyle: $("modelApiStyleInput")?.value || state.modelConfigDraft.apiStyle || providerApiStyle(state.modelConfigKey),
     interfaceType: state.modelConfigInterface
   };
   state.modelConfigSetDefault = Boolean($("modelConfigDefaultInput")?.checked);
@@ -15763,6 +17776,7 @@ function readModelConfigDraft() {
 }
 
 function openModelConfigDrawer(key = "deepseek", mode = "edit") {
+  if (modelSettingsOperation) return false;
   const provider = state.db.settings.providers?.[key] || (isCustomProviderKey(key) ? defaultCustomProvider() : null);
   if (!provider || !modelConfigLayer) {
     console.error("[ModelCenter] 无法打开模型配置", { key, hasProvider: Boolean(provider), hasLayer: Boolean(modelConfigLayer) });
@@ -15779,10 +17793,12 @@ function openModelConfigDrawer(key = "deepseek", mode = "edit") {
   state.modelConfigOriginalSnapshot = modelConfigSnapshot(key, readModelConfigDraft());
   setModelConfigSaveState(mode === "add" ? "dirty" : "saved", mode === "add" ? "等待保存" : "✓ 已保存");
   requestAnimationFrame(() => $("modelConfigNameInput")?.focus());
+  void refreshModelCatalog(key, state.modelConfigDraft);
   return true;
 }
 
 function renderModelConfigDrawer() {
+  if (state.modelConfigSaving) return;
   if (!modelConfigBody || !state.modelConfigDraft) return;
   const key = state.modelConfigKey;
   const provider = state.modelConfigDraft;
@@ -15791,13 +17807,11 @@ function renderModelConfigDrawer() {
   const apiKeyUrl = String(provider.apiKeyUrl || "").trim();
   const suggestions = [...new Set([...discovered, ...modelVersionSuggestions(key)])];
   const modelCapabilities = provider.modelCapabilities || {};
-  const modelControl = suggestions.length
-    ? `<select id="modelVersionInput" aria-label="选择扫描到的真实模型">${suggestions.map((model) => {
+  const modelControl = `<input id="modelVersionInput" list="modelVersionSuggestions" value="${escapeHtml(provider.model || "")}" aria-label="模型 ID 或接入点 ID" placeholder="选择目录建议，或输入模型 / 接入点 ID"><datalist id="modelVersionSuggestions">${suggestions.map((model) => {
         const capability = modelCapabilities[model] || {};
         const marker = capability.reasoningMode === "native" ? " · 原生推理已验证" : capability.reasoningMode === "native-candidate" ? " · 原生推理候选" : capability.reasoningMode === "native-fixed" ? " · 固定原生推理" : "";
-        return `<option value="${escapeHtml(model)}"${model === provider.model ? " selected" : ""}>${escapeHtml(model + marker)}</option>`;
-      }).join("")}</select>`
-    : `<input id="modelVersionInput" value="${escapeHtml(provider.model || "")}" placeholder="先自动获取，或输入真实模型 ID">`;
+        return `<option value="${escapeHtml(model)}">${escapeHtml(model + marker)}</option>`;
+      }).join("")}</datalist>`;
   const providerPicker = state.modelConfigMode === "add" && !isCustomProviderKey(key)
     ? `<label class="model-config-field"><span>模型供应商</span><select id="modelProviderTypeInput">${modelProviderOptions().map((item) => `<option value="${escapeHtml(item.key)}"${item.key === key ? " selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}</select></label>`
     : "";
@@ -15816,6 +17830,7 @@ function renderModelConfigDrawer() {
       <label class="model-config-field"><span>API Key</span><input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false" data-saved-api-key="${hasSavedApiKey ? "1" : "0"}" value="${hasSavedApiKey ? API_KEY_MASK : ""}" placeholder="${hasSavedApiKey ? API_KEY_MASK : "sk-xxxxxxxx"}" aria-label="${hasSavedApiKey ? "API Key 已保存，输入可替换" : "输入 API Key"}"></label>
       <label class="model-config-field"><span>API Key 获取地址</span><div class="model-picker-row"><input id="apiKeyUrlInput" value="${escapeHtml(apiKeyUrl)}" placeholder="https://..."><button id="openApiKeyUrlBtn" type="button">${provider.requiresApiKey === false ? "查看说明" : "打开获取页"}</button></div></label>
       <label class="model-config-field"><span>Base URL</span><input id="baseUrlInput" value="${escapeHtml(provider.baseURL || "")}" placeholder="https://api.deepseek.com"></label>
+      <label class="model-config-field"><span>请求协议</span><select id="modelApiStyleInput"><option value="openai"${(provider.apiStyle || providerApiStyle(key)) === "openai" ? " selected" : ""}>OpenAI Chat Completions</option><option value="anthropic"${(provider.apiStyle || providerApiStyle(key)) === "anthropic" ? " selected" : ""}>Anthropic Messages</option></select></label>
     </section>
     <section class="model-config-group">
       <div class="model-config-group-title"><strong>模型选择</strong><span>选择版本或从接口自动获取</span></div>
@@ -15859,7 +17874,7 @@ function renderModelConfigDrawer() {
 }
 
 async function saveModelConfig({ closeAfter = false } = {}) {
-  if (state.modelConfigSaving) return false;
+  if (state.modelConfigSaving || modelSettingsOperation) return false;
   const key = state.modelConfigKey;
   const draft = readModelConfigDraft();
   if (!key || !draft) return false;
@@ -15871,15 +17886,17 @@ async function saveModelConfig({ closeAfter = false } = {}) {
     setModelConfigSaveState("error", `请完整填写${draft.requiresApiKey === false ? "" : " API Key、"}Base URL 和模型版本`);
     return false;
   }
+  if (!beginModelSettingsOperation(key, "正在验证配置…")) return false;
   state.modelConfigSaving = true;
+  modelConfigBody?.querySelectorAll("input, select, button").forEach(control => { control.disabled = true; });
   [modelConfigCancelBtn, saveModelConfigBtn].forEach((button) => { if (button) button.disabled = true; });
   setModelConfigSaveState("checking", "正在验证模型接口...");
   try {
     const existing = state.db.settings.providers?.[key] || {};
     const result = await api.configureModel({
-      providerId: key,
       ...existing,
       ...draft,
+      ...modelSettingsPayload(key),
       interfaceType: state.modelConfigInterface,
       enable: existing.enabled === true,
       activate: state.modelConfigSetDefault,
@@ -15892,29 +17909,36 @@ async function saveModelConfig({ closeAfter = false } = {}) {
     state.providerModelStatus[key] = models.length
       ? `接口验证通过，发现 ${models.length} 个模型；完整任务能力待验证`
       : "接口正文验证通过；完整任务能力待验证";
-    state.db = await api.init();
+    acceptModelSettingsResult(result);
+    providerApiKeyDrafts.delete(key);
     state.modelConfigDraft = JSON.parse(JSON.stringify(state.db.settings.providers[key]));
     state.modelConfigSetDefault = state.db.settings.defaultProvider === key;
     state.modelConfigOriginalSnapshot = modelConfigSnapshot(key, state.modelConfigDraft);
+    state.modelConfigSaving = false;
     renderSettings({ heavy: false });
     setModelConfigSaveState("saved", "✓ 接口已验证，配置已保存");
     showCopyToast("接口验证通过，完整任务能力仍需验证", 2400);
     if (closeAfter) closeModelConfigDrawer();
     return true;
   } catch (error) {
+    state.providerModelErrors[key] = true;
+    state.providerModelStatus[key] = error?.message || String(error);
     setModelConfigSaveState("error", error?.message || String(error));
     return false;
   } finally {
     state.modelConfigSaving = false;
+    modelConfigBody?.querySelectorAll("input, select, button").forEach(control => { control.disabled = false; });
+    await finishModelSettingsOperation();
     [modelConfigCancelBtn, saveModelConfigBtn].forEach((button) => { if (button) button.disabled = false; });
   }
 }
 
 async function refreshProviderModels(key, button, statusNode = null, mode = "refresh") {
+  if (modelSettingsOperation) return;
   const defaultButtonText = button?.textContent || (mode === "test" ? "测试" : "自动获取");
   if (button) button.disabled = true;
   if (statusNode) statusNode.textContent = mode === "test" ? "正在测试连接..." : "正在获取模型列表...";
-  else {
+  else if (button) {
     button.textContent = "正在检测...";
     button.closest(".configured-model-card")?.classList.add("checking");
   }
@@ -15922,7 +17946,8 @@ async function refreshProviderModels(key, button, statusNode = null, mode = "ref
   try {
     const result = mode === "test"
       ? await api.verifyModel({ providerId: key, ...draft })
-      : await api.listModels({ providerId: key, ...draft });
+      : await refreshModelCatalog(key, draft, { force: true });
+    if (!result) throw new Error(state.providerCatalogs[key]?.error || "模型目录尚未更新，请稍后重试。");
     state.providerModels[key] = result.models || [];
     if (state.modelConfigDraft && key === state.modelConfigKey && result.modelCapabilities) {
       state.modelConfigDraft.modelCapabilities = result.modelCapabilities;
@@ -15932,19 +17957,8 @@ async function refreshProviderModels(key, button, statusNode = null, mode = "ref
     const nativeCandidates = Object.values(result.modelCapabilities || {}).filter((item) => ["native", "native-candidate", "native-fixed"].includes(item?.reasoningMode)).length;
     state.providerModelStatus[key] = mode === "test"
       ? `真实推理验证通过，响应 ${result.latencyMs ?? "--"}ms${state.providerModels[key].length ? `，发现 ${state.providerModels[key].length} 个模型` : ""}`
-      : `已真实扫描 ${state.providerModels[key].length} 个对话模型${nativeCandidates ? `，映射 ${nativeCandidates} 个原生推理型号` : ""}`;
-    if (mode === "test" && result.verifiedAt && (modelConfigLayer?.hidden || key !== state.modelConfigKey)) {
-      state.db.settings.providers[key] = {
-        ...state.db.settings.providers[key],
-        verifiedAt: result.verifiedAt,
-        verifiedModel: result.model,
-        verifiedBaseURL: result.baseURL,
-        verificationLatencyMs: result.latencyMs
-      };
-      await api.saveSettings(state.db.settings);
-      state.db = await api.init();
-    }
-    if (state.modelConfigDraft && key === state.modelConfigKey && !state.providerModels[key].includes(state.modelConfigDraft.model)) {
+      : `已获取 ${state.providerModels[key].length} 个目录建议；能否调用以保存时的真实请求为准${nativeCandidates ? `，含 ${nativeCandidates} 个原生推理候选` : ""}`;
+    if (state.modelConfigDraft && key === state.modelConfigKey && !state.modelConfigDraft.model) {
       state.modelConfigDraft.model = state.providerModels[key][0] || state.modelConfigDraft.model;
     }
     if (key === state.modelConfigKey) renderModelConfigDrawer();
@@ -15969,6 +17983,24 @@ let renderAllQueued = false;
 let secondaryRenderTimer = null;
 let sessionChangedRenderTimer = null;
 let messageRenderEpoch = 0;
+let composerDeferredRenderTimer = null;
+
+function scheduleComposerSafeSessionRender() {
+  if (composerDeferredRenderTimer) return;
+  const idleFor = Date.now() - Number(composerLastInputAt || 0);
+  const delay = Math.max(120, idleFor >= 650 ? 120 : 650 - idleFor);
+  composerDeferredRenderTimer = setTimeout(() => {
+    composerDeferredRenderTimer = null;
+    const focused = document.activeElement === chatInput || composerIsComposing;
+    const currentIdleFor = Date.now() - Number(composerLastInputAt || 0);
+    if (focused && currentIdleFor < 650) {
+      scheduleComposerSafeSessionRender();
+      return;
+    }
+    renderAll({ refreshSettings: false, refreshSecondary: false })
+      .catch((error) => console.error("[SessionRender]", error));
+  }, delay);
+}
 
 function scheduleSecondaryRender() {
   clearTimeout(secondaryRenderTimer);
@@ -16046,9 +18078,6 @@ async function renderAll(options = {}) {
 function readSettingsFromDialog() {
   const settings = JSON.parse(JSON.stringify(state.db.settings));
   settings.webSearch = { ...(settings.webSearch || {}), enabled: true };
-  settings.defaultProvider = providerSelect.value || "deepseek";
-  settings.reasoning = state.db?.settings?.reasoning || "maximum";
-  for (const [key, provider] of Object.entries(settings.providers)) provider.enabled = key === settings.defaultProvider;
   const selectedSkin = SKIN_PRESETS[skinSelect?.value] ? skinSelect.value : "custom";
   const selectedPreset = SKIN_PRESETS[selectedSkin] || SKIN_PRESETS.custom;
   settings.appearance = {
@@ -16257,15 +18286,18 @@ function stopWechatQrPolling() {
 
 function scheduleWechatQrPolling() {
   stopWechatQrPolling();
+  const revision = wechatQrRevision;
   wechatQrPollTimer = setTimeout(async () => {
     wechatQrPollTimer = 0;
     const status = await api.wechatQrStatus?.().catch((error) => ({ connected: false, available: true, reason: error?.message || String(error) }));
+    if (revision !== wechatQrRevision || wechatUnbinding) return;
     applyWechatStatus(status || {});
     if (!status?.connected && status?.qrStatus !== "expired" && state.wechat?.qrDataUrl) scheduleWechatQrPolling();
   }, 1800);
 }
 
 function applyWechatStatus(status = {}) {
+  if (wechatUnbinding || status.stale) return;
   const wasConnected = Boolean(state.wechat?.connected);
   const qrExpired = status.qrStatus === "expired";
   state.wechat = {
@@ -16273,7 +18305,7 @@ function applyWechatStatus(status = {}) {
     ...status,
     connected: Boolean(status.connected),
     available: status.available !== false && Boolean(status.available),
-    qrDataUrl: qrExpired ? "" : String(status.qrDataUrl || status.qr || state.wechat?.qrDataUrl || ""),
+    qrDataUrl: qrExpired ? "" : String(status.qrDataUrl ?? status.qr ?? state.wechat?.qrDataUrl ?? ""),
     reason: String(status.reason || status.message || state.wechat?.reason || "")
   };
   if (state.wechat.connected) {
@@ -16312,20 +18344,49 @@ function applyWechatStatus(status = {}) {
 }
 
 async function renderWechatLink({ refreshQr = false } = {}) {
+  if (wechatUnbinding) return;
+  const revision = ++wechatQrRevision;
+  stopWechatQrPolling();
   if (refreshWechatQrBtn) refreshWechatQrBtn.disabled = true;
   try {
     let status = refreshQr
       ? await api.wechatQr?.().catch((error) => ({ connected: false, available: false, reason: error?.message || String(error) }))
       : await api.wechatStatus?.().catch((error) => ({ connected: false, available: false, reason: error?.message || String(error) }));
+    if (revision !== wechatQrRevision || status?.stale) return;
     applyWechatStatus(status || {});
     if (!refreshQr && !status?.connected && status?.available !== false && !state.wechat?.qrDataUrl) {
       status = await api.wechatQr?.().catch((error) => ({ connected: false, available: false, reason: error?.message || String(error) }));
+      if (revision !== wechatQrRevision || status?.stale) return;
       applyWechatStatus(status || {});
     }
     if (status?.qrDataUrl && !status?.connected) scheduleWechatQrPolling();
   } finally {
-    if (refreshWechatQrBtn) refreshWechatQrBtn.disabled = false;
+    if (revision === wechatQrRevision && refreshWechatQrBtn) refreshWechatQrBtn.disabled = false;
   }
+}
+
+async function unbindWechatAndRefresh() {
+  if (wechatUnbinding) return;
+  wechatUnbinding = true;
+  ++wechatQrRevision;
+  stopWechatQrPolling();
+  let result;
+  try {
+    result = await api.wechatUnbind?.();
+  } catch (error) {
+    showCopyToast(error?.message || "微信解绑失败，请重试");
+    return;
+  } finally {
+    wechatUnbinding = false;
+  }
+  if (!result?.ok) {
+    showCopyToast(result?.reason || "微信解绑失败，请重试");
+    return;
+  }
+  applyWechatStatus({ ...result, qrDataUrl: result.qrDataUrl || "" });
+  if (!wechatDialog?.open) wechatDialog?.showModal?.();
+  if (result.qrDataUrl) scheduleWechatQrPolling();
+  if (refreshWechatQrBtn) refreshWechatQrBtn.disabled = false;
 }
 
 async function updateSettingsTabSummaries() {
@@ -17035,7 +19096,10 @@ async function openSettingsTab(tab, mode = "external", options = {}) {
   if (tab === "wechat") {
     if (!wechatDialog) return false;
     if (options.userInitiated !== true) return false;
+    if (wechatUnbinding) return false;
+    const revision = wechatQrRevision;
     const status = await api.wechatStatus?.().catch(() => null);
+    if (revision !== wechatQrRevision || wechatUnbinding || status?.stale) return false;
     if (status) applyWechatStatus(status);
     if (state.wechat?.connected) {
       await enterWechatConversation();
@@ -18314,6 +20378,7 @@ async function renderUpdateInfo() {
     renderUpdateStatus({ phase: "error", title: "检查更新失败", detail: info.error || "版本服务器未返回有效数据。", info });
     return;
   }
+  syncUpdateBadge(info);
   updatePrepared = Boolean(info.prepared && info.preparedVersion && info.preparedVersion === info.latestVersion);
   availableUpdateInfo = info.hasUpdate ? info : null;
   const heldRollback = info.updateState === "rollback"
@@ -18362,6 +20427,8 @@ function formatUpdateSize(value) {
 }
 
 function renderUpdateStatus({ phase, title, detail, progress = 0, info = availableUpdateInfo } = {}) {
+  if (["current", "completed"].includes(phase)) clearUpdateBadge();
+  else if (info?.hasUpdate) showUpdateBadge(info);
   if (!updateContent) return;
   const percent = Math.max(0, Math.min(100, Number(progress || 0)));
   renderUpdateTabProgress(phase, percent);
@@ -18422,16 +20489,39 @@ function renderUpdateTabProgress(phase = "idle", progress = 0) {
 }
 
 function showUpdateBadge(info) {
-  if (!updateQuickBtn) return;
-  updateQuickBtn.dataset.updateBadge = "1";
+  if (!info?.hasUpdate || !info.latestVersion) return;
+  for (const button of [$("settingsBtn"), updateTabBtn, updateQuickBtn].filter(Boolean)) {
+    button.dataset.updateBadge = "1";
+    const label = button.id === "settingsBtn" ? "设置" : "系统更新";
+    button.title = `${label}：新版本 ${info.latestVersion} 可用`;
+    button.setAttribute("aria-label", button.title);
+  }
   if (updateQuickBadge) updateQuickBadge.hidden = false;
-  updateQuickBtn.title = `新版本 ${info.latestVersion} 可用`;
 }
 
 function clearUpdateBadge() {
-  if (!updateQuickBtn) return;
-  updateQuickBtn.dataset.updateBadge = "0";
+  for (const button of [$("settingsBtn"), updateTabBtn, updateQuickBtn].filter(Boolean)) {
+    button.dataset.updateBadge = "0";
+    button.title = button.id === "settingsBtn" ? "设置" : "系统更新";
+    button.setAttribute("aria-label", button.title);
+  }
   if (updateQuickBadge) updateQuickBadge.hidden = true;
+}
+
+function syncUpdateBadge(info) {
+  if (!info?.configured) return;
+  if (info.hasUpdate) showUpdateBadge(info);
+  else if (info.hasUpdate === false) clearUpdateBadge();
+}
+
+async function refreshUpdateBadge() {
+  if (updateBadgeCheckPromise) return updateBadgeCheckPromise;
+  if (updateOperationActive || Date.now() - updateBadgeCheckedAt < 15 * 60 * 1000) return;
+  updateBadgeCheckedAt = Date.now();
+  updateBadgeCheckPromise = api.updateInfo().then(syncUpdateBadge).catch(() => {}).finally(() => {
+    updateBadgeCheckPromise = null;
+  });
+  return updateBadgeCheckPromise;
 }
 
 function resetQuickUpdateVisual(delay = 0) {
@@ -18450,7 +20540,6 @@ async function runQuickUpdate() {
   }
   updateOperationActive = true;
   updateQuickBtn.disabled = true;
-  clearUpdateBadge();
   renderUpdateTabProgress("checking", 0);
   showCopyToast("正在检查白球更新", 1400);
   try {
@@ -18997,9 +21086,11 @@ async function executeSlashCommand(rawValue = "") {
     case "skills": openSettingsTab("skills"); break;
     case "queue":
       if (!session) break;
+      if (!arg.trim()) { showCopyToast("请在 /queue 后输入补充内容", 1800); break; }
       sessionTaskQueue.enqueue(session.id, { text: arg, attachments: [] });
       renderQueue();
-      showCopyToast("已加入任务队列", 1500);
+      showCopyToast("已加入待补充", 1500);
+      void processQueue(session.id);
       break;
     case "retry": {
       if (!session || state.busy || sessionIsRunning(session)) {
@@ -19065,14 +21156,15 @@ async function executeSlashCommand(rawValue = "") {
   return true;
 }
 
-async function enqueueCurrentTask() {
+async function enqueueCurrentTask({ deliveryMode = "queue", submit = false } = {}) {
   const session = selectedSession();
   if (!session) return false;
   const text = chatInput.value.trim();
-  const quote = state.composerQuote?.sessionId === session.id ? { ...state.composerQuote } : null;
+  const quote = (state.composerQuote?.composerSessionId || state.composerQuote?.sessionId) === session.id ? { ...state.composerQuote } : null;
   if (!text && !state.attachments.length && !quote) return false;
   const queuedBefore = sessionTaskQueue.list(session.id).length;
-  const queued = sessionTaskQueue.enqueue(session.id, { text, attachments: [...state.attachments], quote, autoStart: false });
+  const autoStart = Boolean(state.busy || sessionIsRunning(session) || sessionTaskQueue.isActive(session.id));
+  const queued = sessionTaskQueue.enqueue(session.id, { id: globalThis.crypto?.randomUUID?.(), text, attachments: [...state.attachments], quote, autoStart, deliveryMode });
   if (!queued) {
     showCopyToast("当前会话队列已满，请先处理或删除已有任务", 2200);
     return false;
@@ -19088,13 +21180,20 @@ async function enqueueCurrentTask() {
   renderAttachments();
   renderComposerQuote();
   renderQueue();
-  showCopyToast(duplicate ? "相同任务已在队列中" : "已加入队列，需手动启动", 1800);
+  if (submit) await startQueuedTask(session, queued);
+  else showCopyToast(duplicate
+    ? "相同补充已在队列中"
+    : autoStart
+      ? "已加入预置任务；当前回复完成后自动发送，再次回车或点发送可立即确认"
+      : "已保存为待补充草稿，点击箭头才发送", 2200);
   return true;
 }
 
 async function abortCurrentTask() {
   const session = selectedSession();
   if (!session) return;
+  sessionTaskQueue.pause(session.id);
+  renderQueue();
   const hasActiveTask = Boolean(state.busy || sessionIsRunning(session));
   if (hasActiveTask) state.abortRequestedSessions.add(session.id);
   state.closedClarificationSessions.add(session.id);
@@ -19104,15 +21203,17 @@ async function abortCurrentTask() {
   const activeRunId = activeLiveChatStreamForSession(session.id)?.streamId
     || activeSendOwners.get(session.id)
     || "";
+  const interruptedEntry = liveChatStreams.get(activeRunId);
+  const executionViewState = { expanded: interruptedEntry?.activity?.dataset.activityExpanded === "1" };
   if (activeRunId) state.abortedStreamIds.add(activeRunId);
   releaseActiveSendOwner(session.id, activeRunId);
   sessionTaskQueue.setActive(session.id, false);
-  api.signalAbortChat?.({ sessionId: session.id, runId: activeRunId });
+  api.signalAbortChat?.({ sessionId: session.id, runId: activeRunId, executionViewState });
+  preserveCancelledLiveChatStream(interruptedEntry);
   taskState.textContent = "正在终止";
   if (monitorMode) monitorMode.textContent = "正在终止";
   try {
-    await api.abortChat({ sessionId: session.id, runId: activeRunId });
-    sessionTaskQueue.clear(session.id);
+    await api.abortChat({ sessionId: session.id, runId: activeRunId, executionViewState });
     discardLiveChatStreamsForSession(session.id, { force: true });
     state.db = await api.init();
     await renderAll();
@@ -19144,8 +21245,17 @@ function taskFailureText(error) {
   if (/MODEL_FIRST_EVENT_TIMEOUT|MODEL_REQUEST_TIMEOUT|timeout|timed?\s*out|超时/i.test(raw)) {
     return "模型在规定时间内没有返回结果，请检查网络、API Key 或模型供应商状态后重试。";
   }
-  if (/(?:HTTP\s*402|billing|credit|credits|account\s+balance|insufficient\s+(?:account\s+)?balance|payment\s+required|quota\s+exhausted)/i.test(raw)) {
+  if (/(?:HTTP\s*402|billing|credit|credits|account\s+balance|insufficient[_ -]?(?:account[_ -]?)?(?:balance|credits?|quota)|quota[_ -]?(?:exhausted|exceeded|depleted)|(?:exceed(?:ed|s)?|exhaust(?:ed|s)?|deplet(?:ed|s)?).{0,30}quota|payment\s+required|余额不足|余额已用完|账户余额|额度不足|配额已用完|欠费|充值)/i.test(raw)) {
     return "当前模型供应商的账户余额或额度不足，本次请求未执行。请充值或更新 API Key，也可以切换到其他可用模型后重试。";
+  }
+  if (/(?:missing|no|without|empty|undefined).{0,40}(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?[_ -]?token|\btoken\b)|(?:invalid|expired|revoked|not found|not provided).{0,40}(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?[_ -]?token|\btoken\b)|(?:api[_ -]?key|access[_ -]?token|auth(?:entication)?[_ -]?token|\btoken\b).{0,40}(?:required|missing|invalid|not provided|not found)|PROVIDER_HTTP_401|未配置有效的 API Key|API Key.*(?:缺失|无效|为空)/i.test(raw)) {
+    return "当前没有配置有效的 API Key 或访问令牌，本次请求未执行。请在模型设置中填写正确的密钥后重试。";
+  }
+  if (/(?:context[_ -]?length|maximum context|prompt.{0,20}(?:too long|too large)|token.{0,20}(?:limit|长度).{0,20}(?:exceed|过长|超出)|输入内容过长|超过模型 Token 上限)/i.test(raw)) {
+    return "本次请求内容过长，超过了当前模型的 Token 上限。请缩短指令或减少上下文后重试。";
+  }
+  if (/(?:PROVIDER_HTTP_429|rate[_ -]?limit|too many requests|限流|请求过于频繁|访问频率过高)/i.test(raw)) {
+    return "当前模型供应商请求过于频繁或已触发限流，请稍后重试，或切换到其他可用模型。";
   }
   if (/(?:fetch failed|network|econn|dns|socket|连接失败|网络)/i.test(raw)) {
     return "模型连接失败，请检查网络、Base URL 或模型供应商状态后重试。";
@@ -19205,11 +21315,13 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
   const text = task ? task.text : chatInput.value.trim();
   const attachments = task ? task.attachments : [...state.attachments];
   const quote = task?.quote && typeof task.quote === "object"
-    ? { ...task.quote, sessionId: session.id }
-    : state.composerQuote?.sessionId === session.id ? { ...state.composerQuote } : null;
-  const visibleText = text || (!quote && attachments.length ? "请分析附件内容。" : "");
-  const requestText = quote
-    ? `引用${quote.source || "消息"}的内容：\n${quote.text}\n\n当前请求：\n${text || "请结合引用内容继续处理"}`
+    ? { ...task.quote, sessionId: task.quote.sessionId || session.id }
+    : !task && (state.composerQuote?.composerSessionId || state.composerQuote?.sessionId) === session.id ? { ...state.composerQuote } : null;
+  const visibleText = text || (quote
+    ? "请结合引用内容继续处理"
+    : attachments.length ? "请分析附件内容。" : "");
+  const requestText = task?.supplement
+    ? `以下是用户对本会话当前任务的补充。请结合已完成的结果和原始目标继续处理；除非用户明确改变目标，否则不要丢弃原目标。\n\n${visibleText}`
     : visibleText;
   const structuredContext = task?.context && typeof task.context === "object" ? task.context : null;
   const clarificationCardKey = String(task?.ui?.clarificationCardKey || "");
@@ -19221,16 +21333,17 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
   if (session.id === state.selectedSessionId) clearComposerSuggestions();
   const existingStreamId = activeSendOwners.get(session.id);
   if (existingStreamId) {
+    if (!task && session.id === state.selectedSessionId) return enqueueCurrentTask();
     const queued = sessionTaskQueue.enqueue(session.id, {
       text,
       attachments: [...attachments],
       quote,
       ...(structuredContext ? { context: structuredContext } : {}),
       ...(clarificationCardKey ? { ui: { clarificationCardKey } } : {}),
-      autoStart: false
+      autoStart: true
     });
     if (session.id === state.selectedSessionId) renderQueue();
-    showCopyToast(queued ? "当前任务执行中，新任务已进入手动队列" : "当前会话队列已满", 1800);
+    showCopyToast(queued ? "已加入补充，当前回复完成后自动发送" : "当前会话队列已满", 1800);
     return;
   }
   state.abortRequestedSessions.delete(session.id);
@@ -19247,13 +21360,27 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
   miniTheatre.start({ taskId: streamId, sessionId: session.id, startedAt: taskStartedAt });
   miniTheatre.select(state.selectedSessionId);
   const userMessage = {
-    id: globalThis.crypto?.randomUUID?.() || `message-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    id: task?.clientMessageId || globalThis.crypto?.randomUUID?.() || `message-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     role: "user",
     text: visibleText,
     createdAt: Date.now(),
     ...((structuredContext || quote) ? { raw: {
       ...(structuredContext ? { cardAction: true, cardType: Object.keys(structuredContext)[0] || "" } : {}),
-      ...(quote ? { quote: { messageId: quote.messageId || "", role: quote.role || "assistant", source: quote.source || "消息", text: quote.text } } : {})
+      ...(quote ? {
+        quote: {
+          sessionId: quote.sessionId || session.id,
+          messageId: quote.messageId || "",
+          role: quote.role || "assistant",
+          source: quote.source || "消息",
+          text: quote.text || "",
+          selectionText: quote.selectionText || "",
+          attachments: (quote.attachments || []).map((item) => {
+            const metadata = { ...item };
+            delete metadata.dataUrl;
+            return metadata;
+          })
+        }
+      } : {})
     } } : {}),
     attachments: persistedAttachments,
     images: persistedAttachments.filter((item) => String(item.mimeType || "").startsWith("image/")).map((item) => item.dataUrl)
@@ -19262,13 +21389,6 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
   let thinkingRow = null;
   let streamFinalizedInView = false;
   const isVisible = () => state.selectedSessionId === session.id;
-  if (isVisible() && Number(state.messageWindowOffsets.get(session.id) || 0) > 0) {
-    state.messageWindowOffsets.set(session.id, 0);
-    state.lastMessageSignature = "";
-    state.followOutput = false;
-    state.manualOutputPause = true;
-    await renderMessages();
-  }
   const addVisibleMessage = (message) => {
     if (message.role === "assistant") {
       const responseMessageId = String(message.raw?.responseMessageId || message.raw?.productResult?.responseMessageId || "");
@@ -19364,20 +21484,31 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
       : completedMessage;
     return api.appendMessage(session.id, boundMessage);
   };
+  let queueMayContinue = false;
+  sessionTaskQueue.beginRun(session.id, streamId);
   try {
+  if (isVisible() && Number(state.messageWindowOffsets.get(session.id) || 0) > 0) {
+    state.messageWindowOffsets.set(session.id, 0);
+    state.lastMessageSignature = "";
+    state.followOutput = false;
+    state.manualOutputPause = true;
+    await renderMessages();
+  }
   const userRow = addVisibleMessage(userMessage);
   if (isVisible()) {
     state.forceScrollBottom = false;
-    chatInput.value = "";
-    clearTimeout(draftSaveTimer);
-    draftSaveTimer = null;
-    saveSessionDraft(session.id, "");
-    chatInput.placeholder = "给 Gantz 发送消息";
-    adjustComposerHeight();
-    state.attachments = [];
-    state.composerQuote = null;
-    renderAttachments();
-    renderComposerQuote();
+    if (!task) {
+      chatInput.value = "";
+      clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+      saveSessionDraft(session.id, "");
+      chatInput.placeholder = "给 Gantz 发送消息";
+      adjustComposerHeight();
+      state.attachments = [];
+      state.composerQuote = null;
+      renderAttachments();
+      renderComposerQuote();
+    }
     // Composer shrink changes the available message viewport. Complete that
     // layout first, then pin the instruction exactly once without animation.
     anchorNewInstruction(userRow);
@@ -19400,7 +21531,8 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
   }
   // Save before model/HMS work begins. This preserves a running conversation
   // when the user switches sessions or the renderer refreshes.
-  await api.appendMessage(session.id, userMessage);
+  await api.appendMessage(session.id, userMessage, { receiptOnly: true });
+  options.onAccepted?.();
   if (sendCurrentTaskWasInterrupted(session.id, streamId)) return;
   sessionTaskQueue.setActive(session.id, true);
   scheduleExecutionPresenceCheck();
@@ -19418,17 +21550,24 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
         clientMessageCreatedAt: userMessage.createdAt,
         text: requestText,
         message: requestText,
+        ...(quote ? { quote } : {}),
+        attachments,
         context: structuredContext
       });
       if (sendCurrentTaskWasInterrupted(session.id, streamId)) return;
+      if (isBusyProductResult(productResult)) {
+        await discardUnstartedProductMessage(session, userMessage, { text, attachments, quote });
+        return;
+      }
       const assistantText = productResultText(productResult) || productResult?.text || "";
-      if (!String(assistantText).trim()) throw new Error("黑球没有返回可持久化答案。");
+      if (!String(assistantText).trim() && !productResult.completedDelivery) throw new Error("黑球没有返回可持久化答案。");
       addVisibleMessage({ role: "assistant", text: assistantText, raw: { productResult } });
       scrollVisible();
       const awaitingConfirmation = isTaskBrainConfirmation(productResult);
       const awaitingModel = productResult?.requiresModelConfiguration === true;
       updateVisibleProgress(awaitingModel ? "等待配置" : awaitingConfirmation ? "等待确认" : productResult?.success ? "已完成" : "执行失败", awaitingModel ? 0 : awaitingConfirmation ? 32 : productResult?.success ? 100 : 0);
       await persistAssistantResult({ role: "assistant", text: assistantText, raw: { productLayer: true, cardAction: true, productResult } });
+      queueMayContinue = supplementCanFollowResult(productResult);
       state.db = await api.init();
       return;
     }
@@ -19436,14 +21575,19 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
       updateVisibleProgress(attachments.length ? "正在读取附件" : "正在理解", attachments.length ? 24 : 18);
       const productResult = await submitProductInput(session, requestText, {
         attachments,
+        quote,
         streamId,
         clientMessageId: userMessage.id,
         clientMessageCreatedAt: userMessage.createdAt
       });
       if (sendCurrentTaskWasInterrupted(session.id, streamId)) return;
+      if (isBusyProductResult(productResult)) {
+        await discardUnstartedProductMessage(session, userMessage, { text, attachments, quote });
+        return;
+      }
       updateVisibleProgress("正在验证", 86);
       const assistantText = productResultText(productResult) || productResult?.text || "";
-      if (!String(assistantText).trim()) throw new Error("黑球没有返回可持久化答案。");
+      if (!String(assistantText).trim() && !productResult.completedDelivery) throw new Error("黑球没有返回可持久化答案。");
       const awaitingConfirmation = isTaskBrainConfirmation(productResult);
       const awaitingModel = productResult?.requiresModelConfiguration === true;
       const agentReport = session.type === "Agent" && !awaitingConfirmation;
@@ -19455,6 +21599,7 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
       scrollVisible();
       updateVisibleProgress(awaitingModel ? "等待配置" : awaitingConfirmation ? "等待确认" : productResult?.success ? "已完成" : "执行失败", awaitingModel ? 0 : awaitingConfirmation ? 32 : productResult?.success ? 100 : 0);
       await persistAssistantResult({ role: "assistant", text: assistantText, raw: { productLayer: true, productResult, agentReport, reportTitle: agentReport ? `${session.name || session.title || "Agent"}任务报告` : "" } });
+      queueMayContinue = supplementCanFollowResult(productResult);
       state.db = await api.init();
       const owner = await api.ownerStatus?.().catch(() => ({ devMode: false }));
       const productTask = await api.productQueryTask?.(productResult.taskId).catch(() => null);
@@ -19464,6 +21609,7 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
     throw new Error("客户端未连接到黑球任务接口。");
   } catch (error) {
     if (sendCurrentTaskWasInterrupted(session.id, streamId)) return;
+    queueMayContinue = false;
     console.error(error);
     const message = taskFailureText(error);
     miniTheatre.finish(streamId, "failure");
@@ -19473,6 +21619,7 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
     scrollVisible();
     updateVisibleProgress("执行失败", 0);
   } finally {
+    try {
     const preserveStreamedView = streamFinalizedInView && isVisible();
     miniTheatre.finish(streamId, "cancelled");
     // A durable result keeps ownership until its visible typewriter drains.
@@ -19482,11 +21629,10 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
     if (clarificationCardKey) state.pendingClarificationCards.delete(clarificationCardKey);
     if (!activeSendOwnerMatches(session.id, streamId)) {
       state.abortedStreamIds.delete(streamId);
-      sessionTaskQueue.setActive(session.id, false);
-      processQueue(session.id);
+      if (!activeSendOwners.has(session.id)) sessionTaskQueue.setActive(session.id, false);
       return;
     }
-    if (!preserveStreamedView) {
+    if (!preserveStreamedView || !liveChatStreams.has(streamId)) {
       discardLiveChatStream(streamId);
       releaseActiveSendOwner(session.id, streamId);
       sessionTaskQueue.setActive(session.id, false);
@@ -19524,20 +21670,127 @@ async function sendCurrentTask(task = null, sessionId = state.selectedSessionId,
     if (preserveStreamedView) scheduleStreamingScroll();
     else scrollVisible();
     if (isVisible()) state.forceScrollBottom = false;
-    const drainingEntry = liveChatStreams.get(streamId);
-    if (drainingEntry) drainingEntry.sendFinallyCompleted = true;
-    processQueue(session.id);
+    } finally {
+      const finishedRun = sessionTaskQueue.finishRun(session.id, streamId, queueMayContinue);
+      if (finishedRun && queueMayContinue && !sessionTaskQueue.isPaused(session.id)) {
+        locallyCompletedSessions.add(session.id);
+      }
+      if (finishedRun) {
+        if (!liveChatStreams.has(streamId)) {
+          releaseActiveSendOwner(session.id, streamId);
+          if (!activeSendOwners.has(session.id)) sessionTaskQueue.setActive(session.id, false);
+        }
+        syncSessionRuntimeControls(session.id);
+      }
+      if (isVisible()) renderQueue();
+      void processQueue(session.id);
+    }
   }
 }
 
+function supplementCanFollowResult(result) {
+  return result?.success === true
+    && !result.deliveryPending
+    && !isTaskBrainConfirmation(result)
+    && messageRuntimeOutcome({ raw: { productResult: result } }) === "completed"
+    && !["running", "queued", "pending", "delegated", "executing"].includes(String(result.status || "").toLowerCase());
+}
+
+async function sendLiveSupplement(session, task) {
+  const liveRunId = activeSendOwners.get(session.id) || activeLiveChatStreamForSession(session.id)?.streamId;
+  if (!task.boundTurnId && !liveRunId) return false;
+  if (typeof api.supplementChat !== "function" || task.attachments?.length || task.quote) {
+    task.deliveryMode = "queue";
+    showCopyToast("此补充将在当前回复后携带完整内容自动发送", 2200);
+    return false;
+  }
+  task.boundTurnId ||= liveRunId;
+  task.clientMessageId ||= task.id;
+  let receipt;
+  task.deliveryInFlight = true;
+  try {
+    receipt = await api.supplementChat({ sessionId: session.id, runId: task.boundTurnId,
+      supplementId: task.clientMessageId, text: task.text, createdAt: task.createdAt });
+  } catch { receipt = { accepted: null, status: "unknown" }; }
+  finally { task.deliveryInFlight = false; }
+  if (task.retryTimer) { clearTimeout(task.retryTimer); task.retryTimer = null; }
+  if (receipt?.accepted === true && ["accepted", "applied", "addressed", "needs_clarification", "failed"].includes(receipt.status)) {
+    sessionTaskQueue.remove(session.id, task.id);
+    if (session.id === state.selectedSessionId) {
+      const userMessage = { id: task.clientMessageId, role: "user", text: task.text, createdAt: task.createdAt,
+        raw: { supplement: { turnId: task.boundTurnId, status: receipt.status } } };
+      rememberAuthoritativeMessage(session.id, userMessage);
+      if (!messageRowForId(userMessage.id)) addMessage(userMessage);
+      const labels = { accepted: "黑球已接收补充，正在接续", applied: "补充已加入模型请求，等待回应",
+        addressed: "黑球已回应补充", needs_clarification: "黑球需要进一步说明，请查看回复", failed: "补充尚未完成，内容已保留" };
+      showCopyToast(labels[receipt.status], 1800);
+    }
+    return true;
+  }
+  if (receipt?.accepted === false && ["queue_required", "unsupported"].includes(receipt?.status)) {
+    task.deliveryMode = "queue";
+    task.receiptUnknown = false;
+    showCopyToast("当前运行时不支持即时补充，已保留并排队发送", 2400);
+    return false;
+  }
+  task.receiptUnknown = receipt?.accepted == null;
+  task.receiptAttempts = task.receiptUnknown ? (task.receiptAttempts || 0) + 1 : 0;
+  if (["cancelled", "pending", "invalid"].includes(receipt?.status) || task.receiptAttempts >= 3) {
+    sessionTaskQueue.pause(session.id);
+    showCopyToast("补充接收状态尚未确认，内容已保留；请核对后重试", 2800);
+    return false;
+  }
+  if (receipt?.accepted === false && ["not_running", "not_ready"].includes(receipt.status)
+    && !activeSendOwners.has(session.id)) {
+    task.deliveryMode = "queue";
+    return false;
+  }
+  if (!task.retryTimer) task.retryTimer = setTimeout(() => {
+    task.retryTimer = null;
+    if (sessionTaskQueue.list(session.id).includes(task)) void processQueue(session.id);
+  }, task.receiptUnknown ? 2500 : 1000);
+  return false;
+}
+
 async function processQueue(sessionId = state.selectedSessionId) {
-  if (!sessionId || sessionTaskQueue.isActive(sessionId)) return;
-  const nextTask = sessionTaskQueue.list(sessionId)[0];
-  if (!nextTask?.autoStart) return;
-  const task = sessionTaskQueue.shift(sessionId);
-  if (!task) return;
-  if (sessionId === state.selectedSessionId) renderQueue();
-  await sendCurrentTask(task, sessionId);
+  const session = state.db?.sessions.find(item => item.id === sessionId);
+  if (!session || queueDispatches.has(sessionId) || sessionTaskQueue.isPaused(sessionId)
+    || state.abortRequestedSessions.has(sessionId)) return;
+  const candidate = sessionTaskQueue.list(sessionId).find(task => task.autoStart && !task.editing);
+  if (candidate?.autoStart && !candidate.editing && candidate.deliveryMode === "steer"
+    && (candidate.receiptUnknown || activeSendOwners.has(sessionId) || activeLiveChatStreamForSession(sessionId))) {
+    queueDispatches.add(sessionId);
+    let consumed = false;
+    try { consumed = await sendLiveSupplement(session, candidate); }
+    finally { queueDispatches.delete(sessionId); if (sessionId === state.selectedSessionId) renderQueue(); }
+    if (consumed || candidate.deliveryMode === "queue") queueMicrotask(() => processQueue(sessionId));
+    return;
+  }
+  if (sessionTaskQueue.isActive(sessionId)
+    || sessionTaskQueue.isPending(sessionId) || sessionTaskQueue.isPaused(sessionId)
+    || state.abortRequestedSessions.has(sessionId) || activeSendOwners.has(sessionId)
+    || activeLiveChatStreamForSession(sessionId) || activeAssistantTypingForSession(sessionId)
+    || sessionIsRunning(session)) return;
+  const nextTask = sessionTaskQueue.list(sessionId).find(task => task.autoStart && !task.editing);
+  if (!nextTask?.autoStart || nextTask.editing) return;
+  queueDispatches.add(sessionId);
+  const task = sessionTaskQueue.remove(sessionId, nextTask.id);
+  let accepted = false;
+  try {
+    if (sessionId === state.selectedSessionId) renderQueue();
+    await sendCurrentTask(task, sessionId, { onAccepted: () => { accepted = true; } });
+  } catch (error) {
+    sessionTaskQueue.pause(sessionId);
+    console.error("[SupplementQueue]", error);
+  } finally {
+    if (!accepted) {
+      sessionTaskQueue.restore(sessionId, task);
+      sessionTaskQueue.pause(sessionId);
+    }
+    queueDispatches.delete(sessionId);
+    if (sessionId === state.selectedSessionId) renderQueue();
+    if (accepted && !sessionTaskQueue.isPaused(sessionId)) queueMicrotask(() => processQueue(sessionId));
+  }
 }
 
 attachBtn.addEventListener("click", () => {
@@ -19576,6 +21829,7 @@ document.addEventListener("paste", async (event) => {
 
 function handleComposerInput() {
   composerLastInputAt = Date.now();
+  syncComposerSendAction();
   scheduleComposerHeightAdjust();
   renderSlashCommandMenu();
   if (state.pendingSuggestionActions.length) {
@@ -19595,6 +21849,10 @@ function handleComposerInput() {
   clearTimeout(state._recommendTimer);
   state._recommendTimer = setTimeout(() => {
     if (composerIsComposing || Date.now() - composerLastInputAt < 1000) return;
+    if (state.busy || sessionIsRunning(selectedSession())) {
+      hideRecommendBadge();
+      return;
+    }
     const text = chatInput.value.trim();
     if (text.length < 4) {
       hideRecommendBadge();
@@ -19724,6 +21982,11 @@ chatInput.addEventListener("keydown", (event) => {
       return;
     }
   }
+  if (event.key === "Enter" && event.altKey && !event.shiftKey) {
+    event.preventDefault();
+    void enqueueCurrentTask({ deliveryMode: "queue" });
+    return;
+  }
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     chatForm.requestSubmit();
@@ -19732,10 +21995,17 @@ chatInput.addEventListener("keydown", (event) => {
 
 sendBtn.addEventListener("click", async (event) => {
   const session = selectedSession();
-  if (!state.busy && !sessionIsRunning(session)) return;
+  if (!state.busy && !sessionIsRunning(session)) {
+    if (await confirmQueuedTaskFromComposer(session)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    return;
+  }
   event.preventDefault();
   event.stopPropagation();
-  await abortCurrentTask();
+  if (chatInput.value.trim() || state.attachments.length || state.composerQuote) await enqueueCurrentTask({ deliveryMode: "queue" });
+  else if (!(await confirmQueuedTaskFromComposer(session))) await abortCurrentTask();
 });
 chatForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -19750,13 +22020,18 @@ chatForm.addEventListener("submit", async (event) => {
   if (await executeSlashCommand(chatInput.value)) return;
   const session = selectedSession();
   if (state.busy || sessionIsRunning(session)) {
-    if (chatInput.value.trim() || state.attachments.length || state.composerQuote) await enqueueCurrentTask();
-    else await abortCurrentTask();
+    if (chatInput.value.trim() || state.attachments.length || state.composerQuote) await enqueueCurrentTask({ deliveryMode: "queue" });
+    else if (!(await confirmQueuedTaskFromComposer(session))) await abortCurrentTask();
     return;
   }
-  await sendCurrentTask();
+  if (chatInput.value.trim() || state.attachments.length || state.composerQuote
+    || !(await confirmQueuedTaskFromComposer(session))) await sendCurrentTask();
 });
 window.addEventListener("beforeunload", () => {
+  if (sessionScrollSaveTimer) {
+    clearTimeout(sessionScrollSaveTimer);
+    sessionScrollSaveTimer = 0;
+  }
   saveSessionScrollPosition(state.selectedSessionId);
   voiceConversationActive = false;
   window.speechSynthesis?.cancel?.();
@@ -19810,6 +22085,7 @@ reasoningWaterControl?.addEventListener("click", async (event) => {
   if (openModelVersions) {
     reasoningModeMenu.dataset.view = "models";
     renderReasoningMode();
+    void refreshModelCatalog();
     requestAnimationFrame(positionReasoningMenu);
     return;
   }
@@ -19834,6 +22110,7 @@ reasoningWaterControl?.addEventListener("click", async (event) => {
   if (willOpen) {
     reasoningModeMenu.dataset.view = "overview";
     renderReasoningMode();
+    void refreshModelCatalog();
     requestAnimationFrame(positionReasoningMenu);
   }
 });
@@ -19943,21 +22220,9 @@ modelConfigCloseBtn?.addEventListener("click", requestCloseModelConfigDrawer);
 modelConfigLayer?.querySelector("[data-model-config-close]")?.addEventListener("click", requestCloseModelConfigDrawer);
 modelConfigCancelBtn?.addEventListener("click", requestCloseModelConfigDrawer);
 refreshWechatQrBtn?.addEventListener("click", () => { void renderWechatLink({ refreshQr: true }); });
-unbindWechatBtn?.addEventListener("click", async () => {
-  const result = await api.wechatUnbind?.().catch((error) => ({ connected: false, available: false, reason: error?.message || String(error) }));
-  applyWechatStatus(result || {});
-});
-wechatConversationUnbindBtn?.addEventListener("click", async () => {
-  const result = await api.wechatUnbind?.().catch((error) => ({ connected: false, available: false, reason: error?.message || String(error) }));
-  applyWechatStatus(result || {});
-  wechatDialog?.showModal?.();
-  await renderWechatLink({ refreshQr: true });
-});
-disconnectWechatTopBtn?.addEventListener("click", async () => {
-  const result = await api.wechatUnbind?.().catch((error) => ({ connected: false, available: false, reason: error?.message || String(error) }));
-  applyWechatStatus(result || {});
-  await renderWechatLink({ refreshQr: true });
-});
+unbindWechatBtn?.addEventListener("click", unbindWechatAndRefresh);
+wechatConversationUnbindBtn?.addEventListener("click", unbindWechatAndRefresh);
+disconnectWechatTopBtn?.addEventListener("click", unbindWechatAndRefresh);
 wechatDialogCloseBtn?.addEventListener("click", () => wechatDialog?.close("close"));
 openWechatSessionBtn?.addEventListener("click", async () => {
   const result = await api.wechatEnsureSession?.().catch((error) => ({ ok: false, error: error?.message || String(error) }));
@@ -21124,7 +23389,7 @@ presetTaskEditBtn?.addEventListener("click", (event) => {
   if (!target) return;
   const session = state.db?.sessions?.find((item) => item.id === target.sessionId);
   const task = sessionTaskQueue.list(target.sessionId).find((item) => item.id === target.taskId);
-  if (session && task) restoreQueuedTaskToComposer(session, task);
+  if (session && task) editQueuedTaskInline(session, task);
 });
 composerQuoteClose?.addEventListener("click", clearComposerQuote);
 composerQuoteJump?.addEventListener("click", () => {
@@ -22068,11 +24333,14 @@ function taskBoardSheetEditorHtml(file = {}, rows = []) {
 }
 
 function taskBoardInternalPreviewHtml(file = {}) {
-  const cachedRows = state.taskBoardPreviewRows[file.id || file.name || ""];
+  const cachedRows = state.taskBoardPreviewRows[taskBoardFileKey(file)];
   if (Array.isArray(cachedRows) && cachedRows.length) {
     return taskBoardSheetEditorHtml(file, cachedRows);
   }
-  const generic = state.taskBoardPreviewContent[file.id || file.name || ""];
+  const generic = state.taskBoardPreviewContent[taskBoardFileKey(file)];
+  if (isTaskBoardEditableDocument(file) && generic?.kind === "text" && !generic.truncated) {
+    return taskBoardDocumentEditorHtml(file, generic?.previewText || file.textContent || "");
+  }
   if (generic?.kind === "image" && generic.dataUrl) return `<div class="task-board-inline-media"><img src="${escapeHtml(generic.dataUrl)}" alt="${escapeHtml(file.name || "图片预览")}"></div>`;
   if (generic?.kind === "frame" && generic.fileUrl) return `<div class="task-board-inline-frame"><iframe src="${escapeHtml(generic.fileUrl)}" title="${escapeHtml(file.name || "文件预览")}"></iframe></div>`;
   if (generic?.kind === "slides" && Array.isArray(generic.slides)) return `<div class="task-board-slide-deck">${generic.slides.map((slide) => `<section class="task-board-slide"><span>${String(slide.number).padStart(2, "0")}</span><div><strong>${escapeHtml(slide.title || `幻灯片 ${slide.number}`)}</strong>${(slide.lines || []).map((line) => `<p>${escapeHtml(line)}</p>`).join("")}</div></section>`).join("")}</div>`;
@@ -22338,6 +24606,42 @@ function taskBoardFileType(file = {}) {
   return "文件";
 }
 
+function isTaskBoardEditableDocument(file = {}) {
+  return /\.(md|markdown|txt|json|jsonc|log|html?|[cm]?js|jsx|css|scss|less|py|ts|tsx|xml|ya?ml|toml|ini|cfg|conf|sh|ps1|bat|cmd|sql|rs|go|java|c|h|cpp|hpp|cs|vue|svelte|rb|php)$/i.test(
+    String(file.name || file.sourcePath || file.path || "")
+  );
+}
+
+function taskBoardDocumentDraft(file = {}, content = "") {
+  const key = taskBoardFileKey(file);
+  const existing = state.taskBoardDocumentDrafts[key];
+  if (existing) return existing;
+  const draft = {
+    content: String(content || ""),
+    dirty: false,
+    modifiedAt: Number(state.taskBoardPreviewContent[key]?.modifiedAt || 0),
+    lastDraftAt: ""
+  };
+  state.taskBoardDocumentDrafts[key] = draft;
+  return draft;
+}
+
+function taskBoardDocumentPreviewHtml(file = {}, content = "") {
+  const source = String(content || "");
+  if (/\.(md|markdown)$/i.test(String(file.name || ""))) {
+    return `<article class="task-board-document-markdown">${renderMarkdown(source, { taskBoardFile: true }) || "<p>文档为空</p>"}</article>`;
+  }
+  return `<pre class="task-board-document-plain">${escapeHtml(source || "文档为空")}</pre>`;
+}
+
+function taskBoardDocumentEditorHtml(file = {}, content = "") {
+  return workspaceDocumentHtml(file, content);
+}
+
+function bindTaskBoardDocumentControls(body, file = null) {
+  if (file) workspaceBindDocument(body, file);
+}
+
 function taskBoardFileStatus(file = {}) {
   const key = taskBoardFileKey(file);
   const content = state.taskBoardPreviewContent[key];
@@ -22379,36 +24683,19 @@ function ensureTaskBoardDrawer() {
   if (!chat) return null;
   drawer = document.createElement("section");
   drawer.id = "taskBoardDrawer";
-  drawer.className = "task-board-drawer";
+  drawer.className = "task-board-drawer workspace-drawer";
   drawer.hidden = true;
   drawer.innerHTML = `
-    <div class="task-board-head">
-      <div>
-        <strong>任务看板</strong>
-        <small>AI 执行中心 · 资料、过程与交付</small>
-      </div>
-      <button id="taskBoardCloseBtn" type="button" aria-label="关闭">&times;</button>
+    <div class="workspace-resize" data-workspace-resize role="separator" aria-label="调整成果工作区宽度" aria-orientation="vertical" tabindex="0"></div>
+    <div class="task-board-head"><div><strong>成果工作台</strong><small>查看文件 · 直接编辑 · 交给黑球</small></div>
+      <nav><button type="button" data-workspace-files>文件</button><button type="button" data-workspace-browser>浏览器</button><button type="button" data-workspace-log>日志</button><button type="button" data-workspace-maximize>放大</button><button id="taskBoardCloseBtn" type="button" aria-label="收起成果工作台">×</button></nav>
     </div>
-    <div class="task-board-tabs">
-      <button type="button" data-board-tab="overview" class="active">概览</button>
-      <button type="button" data-board-tab="tables">表格</button>
-      <button type="button" data-board-tab="images">图片</button>
-      <button type="button" data-board-tab="files">文件</button>
-      <button type="button" data-board-tab="links">黑球浏览器</button>
-      <button type="button" data-board-tab="timeline">执行日志</button>
-    </div>
+    <div id="taskBoardTabs" class="workspace-tabs"></div>
     <div id="taskBoardBody" class="task-board-body"></div>
   `;
   chat.appendChild(drawer);
-  drawer.querySelectorAll("[data-board-tab]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.taskBoardTab = button.dataset.boardTab || "overview";
-      state.taskBoardFocusId = "";
-      drawer.dataset.tab = state.taskBoardTab;
-      renderTaskBoard();
-    });
-  });
-  drawer.querySelector("#taskBoardCloseBtn")?.addEventListener("click", closeTaskBoard);
+  drawer.querySelector("#taskBoardCloseBtn").addEventListener("click", closeTaskBoard);
+  workspaceBindShell(drawer);
   return drawer;
 }
 
@@ -22416,14 +24703,7 @@ function positionTaskBoard() {
   const drawer = document.getElementById("taskBoardDrawer");
   const chat = document.querySelector(".chat");
   if (!drawer || !chat || drawer.hidden) return;
-  const chatRect = chat.getBoundingClientRect();
-  const blockers = [productTaskStrip, attachmentPreview, queuePanel, chatForm]
-    .filter((element) => element && !element.hidden && element.getClientRects().length)
-    .map((element) => element.getBoundingClientRect().top)
-    .filter((top) => Number.isFinite(top));
-  const boundary = blockers.length ? Math.min(...blockers) : chatRect.bottom;
-  drawer.style.bottom = `${Math.max(0, Math.ceil(chatRect.bottom - boundary + 8))}px`;
-  requestEmbeddedBrowserLayout();
+  workspacePosition(drawer, chat);
 }
 
 function openTaskBoard(tab = "overview", focusId = "") {
@@ -22455,6 +24735,8 @@ function openTaskBoard(tab = "overview", focusId = "") {
 }
 
 function closeTaskBoard() {
+  workspaceCapture();
+  document.querySelector(".chat")?.classList.remove("workspace-open", "workspace-overlay");
   const drawer = document.getElementById("taskBoardDrawer");
   if (!drawer) return;
   drawer.classList.remove("open");
@@ -22478,9 +24760,14 @@ function closeTaskBoardBrowser() {
 }
 
 async function loadTaskBoardFilePreview(file) {
+  workspaceRegister(file);
   const key = taskBoardFileKey(file);
   if (!key) return;
   state.taskBoardFocusId = key;
+  if (state.taskBoardPreviewContent[key]?.kind === "loading") {
+    renderTaskBoard();
+    return;
+  }
   state.taskBoardPreviewPage = 1;
   state.taskBoardPreviewQuery = "";
   if (state.taskBoardPreviewRows[key]?.length || state.taskBoardPreviewContent[key]?.ok) {
@@ -22499,7 +24786,16 @@ async function loadTaskBoardFilePreview(file) {
       state.taskBoardPreviewContent[key] = { ok: false, kind: "error", previewText: "无法读取该表格，请确认文件仍在原位置。" };
     }
   } else if (typeof api.previewAttachment === "function") {
-    state.taskBoardPreviewContent[key] = await api.previewAttachment(file).catch((error) => ({ ok: false, kind: "error", previewText: error?.message || "当前文件暂不支持内部预览。" }));
+    const preview = await api.previewAttachment({ ...file, strictPath: Boolean(file.sourcePath || file.path || file.strictPath) }).catch((error) => ({ ok: false, kind: "error", previewText: error?.message || "当前文件暂不支持内部预览。" }));
+    state.taskBoardPreviewContent[key] = preview;
+    if (preview?.kind === "text") {
+      state.taskBoardDocumentDrafts[key] = {
+        content: String(preview.previewText || ""),
+        dirty: false,
+        modifiedAt: Number(preview.modifiedAt || 0),
+        lastDraftAt: ""
+      };
+    }
   }
   renderTaskBoard();
 }
@@ -22517,10 +24813,15 @@ function taskBoardImageVisualHtml(image = {}, alt = "图片") {
 }
 
 async function loadTaskBoardImagePreview(image) {
+  workspaceRegister(image);
   const key = taskBoardFileKey(image);
   if (!key) return;
   state.taskBoardFocusId = key;
   if (taskBoardImageSource(image)) {
+    renderTaskBoard();
+    return;
+  }
+  if (state.taskBoardPreviewContent[key]?.kind === "loading") {
     renderTaskBoard();
     return;
   }
@@ -22928,7 +25229,7 @@ function applyTaskBoardSheetAiPlan(editor, draft) {
     draft.lastDraftAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     draft.profile = plan.resultingProfile || draft.profile;
     plan.status = "applied";
-    renderTaskBoard();
+    renderTaskBoard({ workspaceRefresh: true });
     showCopyToast("AI 修改已写入草稿，尚未保存到原文件");
   };
   applyNext();
@@ -22949,7 +25250,7 @@ function undoTaskBoardSheetAiPlan(draft) {
   draft.aiUndoLastDraftAt = "";
   draft.aiUndoProfile = null;
   if (draft.aiPlan) draft.aiPlan.status = "ready";
-  renderTaskBoard();
+  renderTaskBoard({ workspaceRefresh: true });
   showCopyToast("已撤销 AI 修改");
 }
 
@@ -22960,19 +25261,19 @@ function bindTaskBoardSheetControls(body, file = null, collections = null) {
   body.querySelector("[data-board-sheet-search]")?.addEventListener("change", (event) => {
     state.taskBoardPreviewQuery = event.currentTarget.value || "";
     state.taskBoardPreviewPage = 1;
-    renderTaskBoard();
+    renderTaskBoard({ workspaceRefresh: true });
   });
   body.querySelectorAll("[data-board-sheet-zoom]").forEach((button) => {
     button.addEventListener("click", () => {
       const delta = button.dataset.boardSheetZoom === "in" ? .1 : -.1;
       state.taskBoardPreviewZoom = Math.min(1.5, Math.max(.75, Number(state.taskBoardPreviewZoom || 1) + delta));
-      renderTaskBoard();
+      renderTaskBoard({ workspaceRefresh: true });
     });
   });
   body.querySelectorAll("[data-board-sheet-page]").forEach((button) => {
     button.addEventListener("click", () => {
       state.taskBoardPreviewPage = Math.max(1, Number(state.taskBoardPreviewPage || 1) + (button.dataset.boardSheetPage === "next" ? 1 : -1));
-      renderTaskBoard();
+      renderTaskBoard({ workspaceRefresh: true });
     });
   });
   if (!editor || !draft || !file) return;
@@ -22991,7 +25292,7 @@ function bindTaskBoardSheetControls(body, file = null, collections = null) {
       if (!result?.ok || !result?.plan) throw new Error(result?.message || "AI 未返回可应用的表格方案");
       draft.aiPlan = { ...result.plan, status: "ready" };
       draft.profile = result.plan.profile || draft.profile;
-      renderTaskBoard();
+      renderTaskBoard({ workspaceRefresh: true });
     } catch (error) {
       showCopyToast(error?.message || "AI 表格调整方案生成失败");
       button.disabled = false;
@@ -23042,7 +25343,7 @@ function bindTaskBoardSheetControls(body, file = null, collections = null) {
         line.split("\t").slice(0, 100 - startColumn).forEach((value, columnOffset) => { draft.rows[rowIndex][startColumn + columnOffset] = value; });
       });
       markTaskBoardSheetDirty(editor, draft);
-      renderTaskBoard();
+      renderTaskBoard({ workspaceRefresh: true });
     });
   });
   editor.querySelector("[data-sheet-add-row]")?.addEventListener("click", () => {
@@ -23051,7 +25352,7 @@ function bindTaskBoardSheetControls(body, file = null, collections = null) {
     draft.selectedRow = draft.rows.length - 1;
     markTaskBoardSheetDirty(editor, draft);
     state.taskBoardPreviewPage = Math.ceil(draft.rows.length / 80);
-    renderTaskBoard();
+    renderTaskBoard({ workspaceRefresh: true });
   });
   editor.querySelector("[data-sheet-add-column]")?.addEventListener("click", () => {
     const columns = Math.max(1, ...draft.rows.map((row) => row.length));
@@ -23059,27 +25360,27 @@ function bindTaskBoardSheetControls(body, file = null, collections = null) {
     draft.rows.forEach((row) => row.push(""));
     draft.selectedColumn = columns;
     markTaskBoardSheetDirty(editor, draft);
-    renderTaskBoard();
+    renderTaskBoard({ workspaceRefresh: true });
   });
   editor.querySelector("[data-sheet-clear]")?.addEventListener("click", () => {
     draft.rows[draft.selectedRow] ||= [];
     draft.rows[draft.selectedRow][draft.selectedColumn] = "";
     markTaskBoardSheetDirty(editor, draft);
-    renderTaskBoard();
+    renderTaskBoard({ workspaceRefresh: true });
   });
   editor.querySelectorAll("[data-sheet-column-width]").forEach((button) => button.addEventListener("click", () => {
     const column = draft.selectedColumn;
     const delta = button.dataset.sheetColumnWidth === "increase" ? 16 : -16;
     draft.columnWidths[column] = Math.max(56, Math.min(360, Number(draft.columnWidths[column] || 112) + delta));
     markTaskBoardSheetDirty(editor, draft);
-    renderTaskBoard();
+    renderTaskBoard({ workspaceRefresh: true });
   }));
   editor.querySelectorAll("[data-sheet-row-height]").forEach((button) => button.addEventListener("click", () => {
     const row = draft.selectedRow;
     const delta = button.dataset.sheetRowHeight === "increase" ? 4 : -4;
     draft.rowHeights[row] = Math.max(22, Math.min(120, Number(draft.rowHeights[row] || 30) + delta));
     markTaskBoardSheetDirty(editor, draft);
-    renderTaskBoard();
+    renderTaskBoard({ workspaceRefresh: true });
   }));
   editor.querySelectorAll("[data-sheet-sort]").forEach((button) => button.addEventListener("click", () => {
     if (draft.rows.length <= 1) return;
@@ -23089,11 +25390,11 @@ function bindTaskBoardSheetControls(body, file = null, collections = null) {
     const sorted = draft.rows.slice(1).sort((left, right) => String(left[column] ?? "").localeCompare(String(right[column] ?? ""), "zh-CN", { numeric: true }) * direction);
     draft.rows = [header, ...sorted];
     markTaskBoardSheetDirty(editor, draft);
-    renderTaskBoard();
+    renderTaskBoard({ workspaceRefresh: true });
   }));
   editor.querySelector("[data-sheet-list-toggle]")?.addEventListener("click", () => {
-    state.taskBoardFileListHidden = !state.taskBoardFileListHidden;
-    renderTaskBoard();
+    workspaceState().list = !workspaceState().list;
+    renderTaskBoard({ workspaceRefresh: true });
   });
   editor.querySelectorAll("[data-sheet-save]").forEach((button) => button.addEventListener("click", async () => {
     button.disabled = true;
@@ -23144,7 +25445,7 @@ function bindTaskBoardSheetControls(body, file = null, collections = null) {
         document.removeEventListener("pointermove", move);
         document.removeEventListener("pointerup", up);
         markTaskBoardSheetDirty(editor, draft);
-        renderTaskBoard();
+        renderTaskBoard({ workspaceRefresh: true });
       };
       document.addEventListener("pointermove", move);
       document.addEventListener("pointerup", up);
@@ -23154,171 +25455,34 @@ function bindTaskBoardSheetControls(body, file = null, collections = null) {
   bindResize("[data-sheet-row-resize]", "row");
 }
 
-function renderTaskBoard() {
+function renderTaskBoard(options = {}) {
   const drawer = ensureTaskBoardDrawer();
   const body = document.getElementById("taskBoardBody");
   if (!drawer || !body || drawer.hidden) return;
   positionTaskBoard();
-  const tab = state.taskBoardTab || drawer.dataset.tab || "overview";
-  drawer.dataset.tab = tab;
-  drawer.classList.toggle("preview-expanded", ["tables", "files", "images", "links"].includes(tab) && Boolean(state.taskBoardFocusId));
-  drawer.querySelectorAll("[data-board-tab]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.boardTab === tab);
-  });
-
+  if (!["links", "timeline"].includes(state.taskBoardTab)) {
+    state.taskBoardTab = "files";
+    drawer.dataset.tab = "files";
+    if (options.workspaceRefresh) delete body.dataset.workspaceSignature;
+    workspaceRender(body);
+    return;
+  }
+  workspaceCapture();
+  delete body.dataset.workspaceSignature;
+  delete body.dataset.workspaceKey;
+  body.classList.remove("workspace-body");
+  drawer.dataset.tab = state.taskBoardTab;
+  if (state.taskBoardTab === "links") {
+    if (!body.querySelector(".task-board-embedded-browser")) {
+      body.innerHTML = taskBoardEmbeddedBrowserHtml();
+      bindTaskBoardEmbeddedBrowser(body);
+    }
+    return;
+  }
   const session = selectedSession();
-  const messages = state.currentMessages || [];
-  const boardMessages = state.taskBoardMessageSessionId === state.selectedSessionId && Array.isArray(state.taskBoardMessages) && state.taskBoardMessages.length
-    ? state.taskBoardMessages
-    : messages;
-  const assets = cachedTaskBoardAssets(boardMessages);
-  const allFiles = assets.files.slice(-40);
-  const tables = allFiles.filter(isSpreadsheetFile).slice(-24);
-  const images = assets.images.slice(-16);
-  const files = allFiles.filter((file) => !isSpreadsheetFile(file) && !isTaskBoardImage(file)).slice(-24);
-  const links = assets.links.slice(-30);
-  const currentModel = modelState?.textContent || "DeepSeek / Minimal";
-  const currentTask = taskState?.textContent || statusText(session?.status);
-  const progressStages = collectTaskProgressStages(session);
-  const executionEvents = cachedTaskBoardExecutionEvents(session, boardMessages);
-  const collections = { files: allFiles, tables, documents: files, images, links };
-
-  if (tab === "overview") {
-    const lastUser = [...messages].reverse().find((message) => message.role === "user");
-    const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
-    const taskTitle = compactMonitorText(lastUser?.text || currentTask || "等待新任务", 64);
-    const running = sessionIsRunning(session);
-    const taskStatus = running ? "执行中" : session?.status === "done" ? "已完成" : session?.status === "failed" ? "需检查" : "等待";
-    const durationMs = messageDurationMs(lastAssistant);
-    const duration = durationMs > 0 ? formatTaskDuration(durationMs) : "—";
-    const tokenUsage = conversationUsage(messages, session);
-    const resultText = compactMonitorText(lastAssistant?.text || "任务完成后，白球 AI 的交付结果会显示在这里。", 260);
-    const outputs = generatedFilesFromMessage(lastAssistant || {}).slice(0, 5);
-    body.innerHTML = `
-      <section class="task-board-task-hero" data-status="${running ? "running" : "idle"}" aria-label="当前任务状态">
-        <div><span>当前任务</span><strong>${escapeHtml(taskTitle)}</strong><small><i></i>${taskStatus}</small></div>
-        <dl><div><dt>使用模型</dt><dd>${escapeHtml(currentModel)}</dd></div><div><dt>执行时间</dt><dd>${duration}</dd></div><div><dt>Token 消耗</dt><dd>${compactNumber(tokenUsage.used)}${tokenUsage.exact ? "" : " 估算"}</dd></div></dl>
-      </section>
-      <div class="task-board-overview-grid">
-        <section class="task-board-result-band">
-          <header><div><span>真实交付</span><strong>${lastAssistant ? "最近一次 AI 回复" : "等待任务交付"}</strong></div><b>${taskStatus}</b></header>
-          <p>${escapeHtml(resultText)}</p>
-          ${outputs.length ? `<ul>${outputs.map((item) => `<li>${escapeHtml(item.name || "交付文件")}</li>`).join("")}</ul>` : ""}
-        </section>
-        <section class="task-board-evidence-summary">
-          <header><div><span>真实执行证据</span><strong>${executionEvents.length ? `已记录 ${executionEvents.length} 项` : "暂无记录"}</strong></div><button type="button" data-board-jump="timeline">查看日志</button></header>
-          ${taskBoardExecutionEventsHtml(executionEvents, 3)}
-        </section>
-      </div>
-     <div class="task-board-resource-stats"><button type="button" data-board-jump="tables"><b>${tables.length}</b><span>表格</span></button><button type="button" data-board-jump="images"><b>${images.length}</b><span>图片</span></button><button type="button" data-board-jump="files"><b>${files.length}</b><span>文件</span></button><button type="button" data-board-jump="links"><b>${links.length}</b><span>黑球浏览器</span></button></div>
-      ${taskBoardPriorityHtml({ running, progressStages, executionEvents, outputs })}
-      ${taskBoardAgentSummaryHtml(session)}
-      <details class="task-board-collapsible"><summary><span>状态推断（非执行日志）</span><b>${progressStages.filter((stage) => stage.status === "done").length}/${progressStages.length}</b></summary><div>${taskProgressTimelineHtml(progressStages)}</div></details>
-    `;
-    body.querySelectorAll("[data-board-jump]").forEach((button) => button.addEventListener("click", () => openTaskBoard(button.dataset.boardJump)));
-    body.querySelector("[data-agent-log-open]")?.addEventListener("click", () => showAgentExecutionLog(session));
-    return;
-  }
-
-  if (tab === "tables") {
-    if (!tables.length) {
-      body.innerHTML = taskBoardEmptyHtml("暂无表格", "会话中的 XLSX、XLS 和 CSV 会在这里集中显示并可直接编辑。");
-      return;
-    }
-    const activeFile = tables.find((file) => taskBoardFileKey(file) === state.taskBoardFocusId);
-    const activeEditor = Boolean(activeFile && state.taskBoardPreviewRows[taskBoardFileKey(activeFile)]?.length);
-    body.innerHTML = activeFile ? `
-      <div class="task-board-file-workspace spreadsheet-workspace" data-list-hidden="${state.taskBoardFileListHidden ? "true" : "false"}">
-        <aside class="task-board-resource-list"><header><strong>会话表格</strong><span>${tables.length}</span></header>${tables.map((file, index) => taskBoardFileCardHtml(file, index, file === activeFile, true)).join("")}</aside>
-        <main class="task-board-reader">${activeEditor ? taskBoardInternalPreviewHtml(activeFile) : `<header><div><span>表格 · ${formatTaskBoardBytes(activeFile.sizeBytes)}</span><strong>${escapeHtml(activeFile.name || "表格预览")}</strong></div><div><button type="button" data-board-file-open="${escapeHtml(taskBoardFileKey(activeFile))}">打开原文件</button><button type="button" data-board-file-location="${escapeHtml(taskBoardFileKey(activeFile))}">所在位置</button><button type="button" data-board-preview-close>关闭预览</button></div></header>${taskBoardInternalPreviewHtml(activeFile)}`}</main>
-      </div>` : `<div class="task-board-resource-heading"><div><strong>表格工作区</strong><span>选择表格后直接进入白球 AI 内置编辑器</span></div><b>${tables.length} 个表格</b></div><div class="task-board-resource-grid">${tables.map((file, index) => taskBoardFileCardHtml(file, index)).join("")}</div>`;
-    body.querySelectorAll("[data-board-file-internal]").forEach((button) => button.addEventListener("click", () => {
-      const current = tables.find((item) => taskBoardFileKey(item) === (button.dataset.boardFileInternal || ""));
-      if (current) loadTaskBoardFilePreview(current);
-    }));
-    body.querySelectorAll("[data-board-file-open]").forEach((button) => button.addEventListener("click", async () => {
-      const current = tables.find((item) => taskBoardFileKey(item) === (button.dataset.boardFileOpen || ""));
-      if (!current) return;
-      const result = await api.openOriginalAttachment?.(current).catch(() => null);
-      if (!result?.ok) showCopyToast(result?.message || "当前表格暂无可打开的原始路径");
-    }));
-    body.querySelectorAll("[data-board-preview-close]").forEach((button) => button.addEventListener("click", () => { state.taskBoardFocusId = ""; renderTaskBoard(); }));
-    bindTaskBoardLocationButtons(body, tables);
-    bindTaskBoardSheetControls(body, activeEditor ? activeFile : null, collections);
-    return;
-  }
-
-  if (tab === "files") {
-    if (!files.length) {
-      body.innerHTML = taskBoardEmptyHtml("暂无文件", "上传文件后，白球 AI 将自动读取并准备分析。 ");
-      return;
-    }
-    const activeFile = files.find((file) => taskBoardFileKey(file) === state.taskBoardFocusId);
-    const activeSpreadsheet = Boolean(activeFile && isSpreadsheetFile(activeFile));
-    const activeSpreadsheetEditor = Boolean(activeSpreadsheet && state.taskBoardPreviewRows[taskBoardFileKey(activeFile)]?.length);
-    body.innerHTML = activeFile ? `
-      <div class="task-board-file-workspace${activeSpreadsheet ? " spreadsheet-workspace" : ""}" data-list-hidden="${state.taskBoardFileListHidden ? "true" : "false"}">
-        <aside class="task-board-resource-list"><header><strong>项目文件</strong><span>${files.length}</span></header>${files.map((file, index) => taskBoardFileCardHtml(file, index, file === activeFile, true)).join("")}</aside>
-        <main class="task-board-reader">${activeSpreadsheetEditor ? taskBoardInternalPreviewHtml(activeFile) : `<header><div><span>${taskBoardFileType(activeFile)} · ${formatTaskBoardBytes(activeFile.sizeBytes)}</span><strong>${escapeHtml(activeFile.name || "文件预览")}</strong></div><div><button type="button" data-board-file-open="${escapeHtml(taskBoardFileKey(activeFile))}">打开原文件</button><button type="button" data-board-file-location="${escapeHtml(taskBoardFileKey(activeFile))}">所在位置</button><button type="button" data-board-preview-close>关闭预览</button></div></header>${taskBoardInternalPreviewHtml(activeFile)}`}</main>
-      </div>` : `<div class="task-board-resource-heading"><div><strong>AI 文件工作区</strong><span>选择文件即可在白球 AI 内部阅读</span></div><b>${files.length} 个文件</b></div><div class="task-board-resource-grid">${files.map((file, index) => taskBoardFileCardHtml(file, index)).join("")}</div>`;
-    body.querySelectorAll("[data-board-file-internal]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const current = files.find((item) => taskBoardFileKey(item) === (button.dataset.boardFileInternal || ""));
-        if (current) loadTaskBoardFilePreview(current);
-      });
-    });
-    body.querySelectorAll("[data-board-file-open]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const current = files.find((item) => taskBoardFileKey(item) === (button.dataset.boardFileOpen || ""));
-        if (!current) return;
-        const result = await api.openOriginalAttachment?.(current).catch(() => null);
-        if (!result?.ok) showCopyToast(result?.message || "当前文件暂无可打开的原始路径");
-      });
-    });
-    body.querySelectorAll("[data-board-preview-close]").forEach((button) => {
-      button.addEventListener("click", () => {
-        state.taskBoardFocusId = "";
-        renderTaskBoard();
-      });
-    });
-    bindTaskBoardLocationButtons(body, files);
-    bindTaskBoardSheetControls(body, activeSpreadsheetEditor ? activeFile : null, collections);
-    return;
-  }
-
-  if (tab === "images") {
-    if (!images.length) {
-      body.innerHTML = taskBoardEmptyHtml("暂无图片", "上传图片后，白球 AI 将自动识别并准备分析。 ");
-      return;
-    }
-    const activeImage = images.find((image) => taskBoardFileKey(image) === state.taskBoardFocusId);
-    const activeSource = activeImage ? taskBoardImageSource(activeImage) : "";
-    const activeContent = activeImage ? state.taskBoardPreviewContent[taskBoardFileKey(activeImage)] : null;
-    body.innerHTML = activeImage ? `<div class="task-board-media-workspace"><aside class="task-board-image-strip">${images.map((image, index) => `<button type="button" data-board-image-preview="${escapeHtml(taskBoardFileKey(image))}" class="${image === activeImage ? "active" : ""}">${taskBoardImageVisualHtml(image, image.name || `图片 ${index + 1}`)}<span>${escapeHtml(image.name || `图片 ${index + 1}`)}</span></button>`).join("")}</aside><main class="task-board-image-viewer"><header><strong>${escapeHtml(activeImage.name || "图片预览")}</strong><div><button type="button" data-board-image-open>打开原图</button><button type="button" data-board-image-location>所在位置</button><button type="button" data-board-preview-close>关闭预览</button></div></header><div>${activeSource ? `<img src="${escapeHtml(activeSource)}" alt="${escapeHtml(activeImage.name || "图片预览")}">` : activeContent?.kind === "loading" ? `<div class="task-board-loading-state"><i></i><span>正在读取本地图片...</span></div>` : `<div class="task-board-error-state">${escapeHtml(activeContent?.previewText || "图片暂时无法读取")}</div>`}</div></main></div>` : `<div class="task-board-resource-heading"><div><strong>图片资源库</strong><span>任务生成图片和本地路径图片均会进入这里</span></div><b>${images.length} 张图片</b></div><div class="task-board-gallery">${images.map((image, index) => `<button class="task-board-image-card" type="button" data-board-image-preview="${escapeHtml(taskBoardFileKey(image))}">${taskBoardImageVisualHtml(image, image.name || `图片 ${index + 1}`)}<span>${escapeHtml(image.name || `图片 ${index + 1}`)}</span><small>${escapeHtml(image.source || "会话图片")}</small></button>`).join("")}</div>`;
-    body.querySelectorAll("[data-board-image-preview]").forEach((button) => button.addEventListener("click", () => {
-      const current = images.find((image) => taskBoardFileKey(image) === (button.dataset.boardImagePreview || ""));
-      if (current) loadTaskBoardImagePreview(current);
-    }));
-    body.querySelector("[data-board-preview-close]")?.addEventListener("click", () => { state.taskBoardFocusId = ""; renderTaskBoard(); });
-    body.querySelector("[data-board-image-open]")?.addEventListener("click", async () => {
-      const result = await api.openOriginalAttachment?.(activeImage).catch(() => null);
-      if (!result?.ok) showCopyToast(result?.message || "当前图片没有可打开的原文件");
-    });
-    body.querySelector("[data-board-image-location]")?.addEventListener("click", () => showAttachmentInFolder(activeImage));
-    void preloadTaskBoardImages(images);
-    return;
-  }
-
-  if (tab === "links") {
-    body.innerHTML = taskBoardEmbeddedBrowserHtml();
-    bindTaskBoardEmbeddedBrowser(body);
-    return;
-  }
-
-  body.innerHTML = `
-    <div class="task-board-log-head"><div><strong>执行日志</strong><span>只显示 Task Brain、黑球、真实工具调用和验证记录</span></div><b>${executionEvents.length} 条记录</b></div>
-    ${taskBoardExecutionEventsHtml(executionEvents, 80)}
-  `;
+  const messages = state.taskBoardMessageSessionId === state.selectedSessionId ? state.taskBoardMessages : state.currentMessages;
+  const events = cachedTaskBoardExecutionEvents(session, messages || []);
+  body.innerHTML = `<div class="task-board-log-head"><div><strong>执行日志</strong><span>黑球与工具返回的执行记录</span></div><b>${events.length} 条记录</b></div>${taskBoardExecutionEventsHtml(events, 80)}`;
 }
 
 function hasTaskBoardBrowserUnread() {
@@ -23449,6 +25613,7 @@ function bindTaskBoardEntrances() {
     const target = event.target instanceof Node ? event.target : null;
     if (!drawer?.classList.contains("open") || !target) return;
     if (target instanceof Element && target.closest(".agent-log-layer")) return;
+    if (target instanceof Element && target.closest(".message-file-link, .local-file-path-link")) return;
     if (drawer.contains(target) || taskBoardToggleBtn?.contains(target)) return;
     closeTaskBoard();
   }, true);
@@ -23483,7 +25648,15 @@ api.onSessionChanged((db) => {
     && state.db.selectedSessionId !== previousSessionId);
   if (selectionChanged) {
     saveSessionDraft(previousSessionId, chatInput?.value || "");
+    if (sessionScrollSaveTimer) {
+      clearTimeout(sessionScrollSaveTimer);
+      sessionScrollSaveTimer = 0;
+    }
     saveSessionScrollPosition(previousSessionId);
+    if (sessionScrollRestoreFrame) cancelAnimationFrame(sessionScrollRestoreFrame);
+    sessionScrollRestoreFrame = 0;
+    sessionScrollRestoreToken += 1;
+    pendingSessionScrollRestore = null;
     clearSessionTransientState();
     state.selectedSessionId = state.db.selectedSessionId;
     restoreSessionDraft(state.selectedSessionId);
@@ -23495,6 +25668,7 @@ api.onSessionChanged((db) => {
       || activeAssistantTypingForSession(session.id)) continue;
     sessionTaskQueue.setActive(session.id, false);
     discardLiveChatStreamsForSession(session.id);
+    if (!staleSnapshot) void processQueue(session.id);
   }
   scheduleExecutionPresenceCheck();
   if (state.debugCenterRunning) return;
@@ -23531,6 +25705,11 @@ api.onSessionChanged((db) => {
       if (recordState) recordState.textContent = `${state.db.sessions.length} 会话`;
       if (monitorSession) monitorSession.textContent = statusText(currentSession?.status);
     }, 120);
+    return;
+  }
+  if (!selectionChanged && !durableAnswerCommitted
+    && (document.activeElement === chatInput || composerIsComposing)) {
+    scheduleComposerSafeSessionRender();
     return;
   }
   sessionChangedRenderTimer = setTimeout(() => {
@@ -23573,6 +25752,7 @@ api.init().then(async (db) => {
   // after the user explicitly clicks the WeChat entry.
   wechatDialog?.close?.("startup-restore");
   reportStartupMetric("renderer:render:complete");
+  void refreshModelCatalog();
   void (async () => {
     try {
       const receipt = await api.modelRuntimeState?.();
@@ -23592,9 +25772,15 @@ api.init().then(async (db) => {
   if (TEST_PHASE_MEMBERSHIP_ENABLED) startMembershipCountdown();
   setTimeout(async () => {
     if (TEST_PHASE_MEMBERSHIP_ENABLED) await refreshLicenseStatus().catch(() => null);
-    try {
-      const info = await api.updateInfo();
-      if (info?.hasUpdate) showUpdateBadge(info);
-    } catch {}
+    await refreshUpdateBadge();
   }, 1500);
 });
+
+setInterval(() => {
+  if (document.visibilityState !== "hidden") void refreshModelCatalog();
+}, 5 * 60 * 1000);
+window.addEventListener("focus", () => { void refreshModelCatalog(); });
+setInterval(() => {
+  if (document.visibilityState !== "hidden") void refreshUpdateBadge();
+}, 15 * 60 * 1000);
+window.addEventListener("focus", () => { void refreshUpdateBadge(); });
